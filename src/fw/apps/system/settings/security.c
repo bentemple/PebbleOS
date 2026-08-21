@@ -12,7 +12,6 @@
 #include "applib/ui/app_window_stack.h"
 #include "applib/ui/dialogs/dialog.h"
 #include "applib/ui/dialogs/expandable_dialog.h"
-#include "applib/ui/dialogs/simple_dialog.h"
 #include "applib/ui/ui.h"
 #include "kernel/event_loop.h"
 #include "kernel/pbl_malloc.h"
@@ -211,12 +210,11 @@ static void prv_begin_new_pin(SettingsSecurityData *data) {
 //! Report a store refusal on the prompt rather than dropping the user back into
 //! the menu with nothing changed and no reason given.
 //!
-//! Deliberately says nothing a duress PIN could be inferred from: the phone
-//! message depends only on the connection, and the "must differ" message can
-//! only ever be reached by someone who just typed their own real PIN.
+//! Says nothing a duress PIN could be inferred from: "must differ" can only be
+//! reached by someone who has just typed their own real PIN, so it tells them
+//! nothing they did not already supply.
 static void prv_report_store_failure(SettingsSecurityData *data, status_t rv) {
-  if (rv == E_INVALID_OPERATION) {
-  } else if (rv == E_INVALID_ARGUMENT) {
+  if (rv == E_INVALID_ARGUMENT) {
     prv_set_prompt_message(data, i18n_noop("Must differ from your PIN"));
   } else {
     prv_set_prompt_message(data, i18n_noop("Could not save that PIN"));
@@ -489,18 +487,22 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
     case SettingsSecurityPin:
       if (!prv_pin_is_set(data)) {
         prv_push_pin_prompt(data, PinStageNewFirst, PinTargetMain);
-      } else       break;
+      } else {
+        // Changing a PIN means proving you know the current one first.
+        prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetMain);
+      }
+      break;
     case SettingsSecurityPinLength:
       prv_length_menu_push(data);
       break;
     case SettingsSecurityDuressPin:
       // Always straight to setting a new one. Asking "set or clear?" would
       // answer the question the menu exists to refuse to answer.
-      //
       prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetDuress);
       break;
     case SettingsSecurityClearPin:
-            break;
+      prv_push_pin_prompt(data, PinStageAuthorizeClear, PinTargetMain);
+      break;
     case SettingsSecurityLockNow:
       prv_lock_now_push(data);
       break;
