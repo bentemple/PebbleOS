@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 Core Devices LLC */
 /* SPDX-License-Identifier: Apache-2.0 */
 
+#include "pbl/services/security_lock_endpoint.h"
 #include "pbl/services/security_lock_ui.h"
 
 #include <inttypes.h>
@@ -93,6 +94,7 @@ void security_lock_disengage(void) {
   security_lock_screen_pop();
   prv_release_ui_lockout();
   security_lock_set_state(SecurityLockStateArmed);
+  security_lock_endpoint_send_state_changed(SecurityLockStateArmed);
 
   PBL_LOG_DBG("Unlocked");
 }

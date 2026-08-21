@@ -195,8 +195,7 @@ static void prv_deadline_expired_callback(void *unused) {
   if (!security_lock_is_locked()) {
     return;
   }
-  const uint32_t wiped = security_lock_shred(SecurityShredReasonDisconnectTimeout);
-  security_lock_endpoint_send_shred_complete(SecurityShredReasonDisconnectTimeout, wiped);
+  security_lock_shred(SecurityShredReasonDisconnectTimeout);
 }
 
 //! Re-checked on a timer rather than armed as a single long timeout, because a
@@ -210,8 +209,7 @@ static void prv_deadline_check(void *unused) {
   const time_t now = rtc_get_time();
   if (security_lock_note_time(now)) {
     // Clock wound back, most likely to dodge the deadline.
-    const uint32_t wiped = security_lock_shred(SecurityShredReasonClockRollback);
-    security_lock_endpoint_send_shred_complete(SecurityShredReasonClockRollback, wiped);
+    security_lock_shred(SecurityShredReasonClockRollback);
     return;
   }
 

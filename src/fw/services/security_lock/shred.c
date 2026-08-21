@@ -17,6 +17,7 @@
 #include "pbl/services/filesystem/pfs.h"
 #include "pbl/services/notifications/notification_storage.h"
 #include "pbl/services/security_lock.h"
+#include "pbl/services/security_lock_endpoint.h"
 #include "pbl/services/timeline/event.h"
 #include "pbl/util/size.h"
 
@@ -188,6 +189,16 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running) {
   security_lock_set_shred_pending(false);
 
   PBL_LOG_INFO("Shred complete, wiped bitmap 0x%" PRIx32, wiped);
+
+#if !defined(CONFIG_RECOVERY_FW)
+  // Reported from here rather than from each caller so no trigger can forget:
+  // this is what tells the phone to resend what it holds. A no-op when there is
+  // no session, which is the common case when the phone going away is what
+  // caused the shred -- the boot-time unfaithful flag covers that.
+  if (dbs_running) {
+    security_lock_endpoint_send_shred_complete(reason, wiped);
+  }
+#endif
   return wiped;
 }
 
