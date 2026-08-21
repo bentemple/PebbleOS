@@ -129,6 +129,7 @@ typedef enum {
   PEBBLE_PREF_CHANGE_EVENT,
   PEBBLE_SPEAKER_EVENT,
   PEBBLE_BACKLIGHT_EVENT,
+  PEBBLE_SECURITY_SHRED_EVENT,
 
   PEBBLE_NUM_EVENTS
 } PebbleEventType;
@@ -502,6 +503,24 @@ typedef struct PACKED { // 1 byte
   bool is_on;
 } PebbleBacklightEvent;
 
+//! Broadcast when the security lock is about to destroy the watch's content,
+//! so anything holding data of its own can destroy it too.
+//!
+//! Emitted before the wipe starts, on KernelBG or KernelMain depending on what
+//! triggered it. Handlers must be quick and must not block: the shred is
+//! already under way behind them and a slow handler only widens the window in
+//! which the data still exists.
+//!
+//! Third-party app persist storage is deliberately not wiped by the shred
+//! itself -- the phone cannot restore it -- so this event is how an app opts
+//! in to clearing its own.
+typedef struct PACKED { // 1 byte
+  //! SecurityShredReason. Note that SecurityShredReasonDuressPin means the
+  //! user is being coerced: handlers must not show UI or otherwise make the
+  //! wipe observable.
+  uint8_t reason;
+} PebbleSecurityShredEvent;
+
 typedef enum {
   VoiceEventTypeSessionSetup,
   VoiceEventTypeSessionResult,
@@ -812,6 +831,7 @@ typedef struct PACKED {
     PebblePrefChangeEvent pref_change;
     PebbleSpeakerEvent speaker;
     PebbleBacklightEvent backlight;
+    PebbleSecurityShredEvent security_shred;
   };
   PebbleTaskBitset task_mask;  // 1 == filter out, 0 == leave in
   // NOTE: we put this 8 bit field at the end so that we can pack this structure and still keep the

@@ -11,6 +11,7 @@
 #include <pbl/drivers/task_watchdog.h>
 #include <pbl/logging/logging.h>
 #include "flash_region/flash_region.h"
+#include "kernel/events.h"
 #include "kernel/pebble_tasks.h"
 #include "pbl/services/blob_db/pin_db.h"
 #include "pbl/services/blob_db/reminder_db.h"
@@ -122,6 +123,17 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running) {
   // Set before anything is destroyed so a shred interrupted by power loss is
   // resumed at next boot rather than left half done.
   security_lock_set_shred_pending(true);
+
+  // Announce before wiping, so anything holding data of its own gets the
+  // chance to destroy it rather than being told afterwards. Not emitted at
+  // early boot: nothing is subscribed yet and the event system is not up.
+  if (dbs_running) {
+    PebbleEvent event = {
+        .type = PEBBLE_SECURITY_SHRED_EVENT,
+        .security_shred = {.reason = (uint8_t)reason},
+    };
+    event_put(&event);
+  }
 
   // These databases hold their settings files open, so they have to be closed
   // or the wipe races their cached handles and the file is recreated from
