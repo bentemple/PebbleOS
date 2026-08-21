@@ -497,19 +497,44 @@ custom endpoint in this tree — copy that pattern exactly.
 
 ## Phasing
 
-1. `lock_state` settings-file store + unit tests.
-2. `pfs_shred()` + `pfs_gc_deleted_sectors()` + tests against the flash emulator.
-3. Shred engine, driven from a console prompt command only.
-4. Early-boot hook + resume-after-interruption.
-5. Lock screen modal + button lockout.
-6. PIN entry window + attempt counter + escalation.
-7. Protocol endpoint + `SHRED_COMPLETE`.
-8. Disconnect deadline + RTC rollback guard.
-9. **GB: `is_unfaithful` parsing + full-resync path.** Independently useful;
-   land it first on the GB side.
-10. GB: lockdown detection, LOCK send, 10 s BT teardown.
-11. GB: `SHRED_COMPLETE` handling.
-12. Settings UI on watch; settings UI in Gadgetbridge.
+All twelve phases are implemented. Firmware builds clean for `qemu_emery`;
+Gadgetbridge builds a full APK and its suite passes.
+
+1. ✅ `lock_state` settings-file store + unit tests.
+2. ✅ `pfs_shred()` + `pfs_gc_deleted_sectors()` + tests against the flash emulator.
+3. ✅ Shred engine, driven from a console prompt command only.
+4. ✅ Early-boot hook + resume-after-interruption.
+5. ✅ Lock screen modal + button lockout.
+6. ✅ PIN entry window + attempt counter + escalation.
+7. ✅ Protocol endpoint + `SHRED_COMPLETE`.
+8. ✅ Disconnect deadline + RTC rollback guard.
+9. ✅ **GB: `is_unfaithful` parsing + full-resync path.**
+10. ✅ GB: lockdown detection, LOCK send, 10 s BT teardown.
+11. ✅ GB: `SHRED_COMPLETE` handling.
+12. ✅ Settings UI on watch; settings UI in Gadgetbridge.
+
+### Corrections found while building
+
+Two things in the design above were wrong and are worth recording so they are
+not reintroduced:
+
+- **`modal_manager_set_min_priority(ModalPriorityMax)` is wrong for a modal.**
+  `modal_manager_get_enabled()` is `s_modal_min_priority < ModalPriorityMax`, so
+  setting `Max` stops the modal rendering, stops it receiving buttons, and locks
+  the stack it would be pushed to. `panic.c` and `battery_ui_fsm.c` get away
+  with it because their UI is an *app*, not a modal. The lock screen uses
+  `ModalPriorityAlarm`; an alarm popup cannot collide because
+  `launcher_block_popups(true)` drops the event before a popup is created.
+- **Quick Launch chords complete from an `app_timer`, not an event.** No button
+  handler can intercept that, so a chord half-held at the moment of locking
+  would launch an app under the lock screen a few hundred ms later.
+  `security_lock_engage()` therefore calls `watchface_reset_click_manager()` and
+  `launcher_cancel_force_quit()`.
+
+**SHA-256 is local to the service, not from mbedtls.**
+`third_party/wscript_build` only recurses mbedtls under `CONFIG_BT_FW_NIMBLE`,
+so boards on the QEMU Bluetooth stack never build it and both the include path
+and the link fail there. A lock that only works on some boards is not a lock.
 
 ## Risks and open questions
 
@@ -530,6 +555,19 @@ custom endpoint in this tree — copy that pattern exactly.
 - **GB cannot switch the Bluetooth adapter off** without privileged access.
 - **Zero-notification blind spot** in `REASON_LOCKDOWN` detection; the manual
   panic action is the fallback, not a nicety.
+- **The forced repaint does not blank the screen.** `security_lock_engage()`
+  uses `compositor_render_app()`, which repaints from the app framebuffer. It
+  reliably removes a notification modal, which is the stated requirement, but
+  during the seconds the shred holds KernelMain the display keeps showing the
+  outgoing app. A sensitive app's own content stays visible for that window.
+- **`security_lock_verify_pin()` blocks KernelMain for roughly 350ms** (10,000
+  SHA-256 rounds) with no progress indication and no watchdog kick. Fine today;
+  worth revisiting if the KernelMain watchdog is ever tightened.
+- **Changing PIN length is a two-step flow** (PIN Length, then Change PIN)
+  rather than a picker inside the change flow. Contained, but slightly awkward.
+- **Nothing has run on hardware or in QEMU.** Every claim here is from unit
+  tests, the host build and code reading. The screen layouts in particular have
+  never been rendered.
 - **Endpoint ID 0x2C24 is self-assigned.**
 - Unverified: whether ANCS caches caller ID to flash (`ancs/ancs_phone_call.c`),
   and whether the voice/audio endpoints buffer audio to flash. Both need a read
