@@ -220,6 +220,18 @@ status_t security_lock_clear_pin(void) {
   return rv;
 }
 
+uint8_t security_lock_get_pin_len(void) {
+  if (!s_initialized) {
+    return 0;
+  }
+  mutex_lock(s_mutex);
+  SecurityLockConfig cfg;
+  uint8_t len = (prv_read_config(&cfg) == S_SUCCESS) ? cfg.pin_len : 0;
+  memset(&cfg, 0, sizeof(cfg));
+  mutex_unlock(s_mutex);
+  return len;
+}
+
 bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out) {
   if (attempts_remaining_out) {
     *attempts_remaining_out = 0;

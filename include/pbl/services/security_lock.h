@@ -54,6 +54,10 @@ status_t security_lock_set_pin(const char *digits, uint8_t len);
 //! Clear the PIN and move to Disabled.
 status_t security_lock_clear_pin(void);
 
+//! Number of digits the configured PIN has, so the lock screen knows how many
+//! cells to prompt for. 0 if no PIN is configured.
+uint8_t security_lock_get_pin_len(void);
+
 //! Verify a PIN attempt.
 //!
 //! The failed-attempt counter is incremented and flushed to flash BEFORE the

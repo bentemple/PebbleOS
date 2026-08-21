@@ -148,6 +148,28 @@ void test_security_lock__clear_pin_disables_and_forgets(void) {
   cl_assert(!security_lock_verify_pin(PIN, strlen(PIN), NULL));
 }
 
+// The lock screen sizes itself from this, so a wrong answer either prompts for
+// digits that cannot be entered or submits short and always fails.
+void test_security_lock__pin_len_reports_configured_length(void) {
+  cl_assert_equal_i(0, security_lock_get_pin_len());
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin("12345678", 8));
+  cl_assert_equal_i(8, security_lock_get_pin_len());
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(4, security_lock_get_pin_len());
+}
+
+void test_security_lock__pin_len_is_zero_without_a_pin(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_pin());
+  cl_assert_equal_i(0, security_lock_get_pin_len());
+}
+
+void test_security_lock__pin_len_survives_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin("123456", 6));
+  prv_simulate_reboot();
+  cl_assert_equal_i(6, security_lock_get_pin_len());
+}
+
 void test_security_lock__pin_survives_reboot(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   prv_simulate_reboot();
