@@ -824,13 +824,11 @@ void command_factory_reset(void) {
 }
 
 #if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+#include "pbl/services/security_lock_shred.h"
+
 static void prv_security_shred_callback(void *unused) {
   security_lock_shred(SecurityShredReasonManualPanic);
 }
-#endif
-
-#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
-#include "pbl/services/security_lock_shred.h"
 
 void command_security_shred(void) {
   prompt_command_finish();
