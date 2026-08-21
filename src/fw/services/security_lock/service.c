@@ -174,11 +174,27 @@ status_t security_lock_set_state(SecurityLockState state) {
   return rv;
 }
 
-//! Changing a PIN requires the phone. Someone who has taken only the watch
-//! must not be able to set their own PIN and keep it, and the phone is the one
-//! thing they are unlikely to also have unlocked.
 static bool prv_phone_is_connected(void) {
   return comm_session_get_system_session() != NULL;
+}
+
+//! Whether a PIN has ever been set. The caller must hold the mutex.
+static bool prv_pin_is_configured(void) {
+  SecurityLockConfig cfg;
+  const bool configured = (prv_read_config(&cfg) == S_SUCCESS);
+  memset(&cfg, 0, sizeof(cfg));
+  return configured;
+}
+
+//! Replacing or removing an existing secret requires the phone. Someone who
+//! has taken only the watch must not be able to overwrite the PIN and keep it,
+//! and the phone is the one thing they are unlikely to also have.
+//!
+//! Setting the *first* PIN is deliberately allowed without one. There is
+//! nothing to protect yet, and requiring a phone would make the feature
+//! impossible to turn on for anyone whose watch is not currently paired.
+static bool prv_change_is_allowed(void) {
+  return !prv_pin_is_configured() || prv_phone_is_connected();
 }
 
 //! Fill a salt from the hardware RNG.
@@ -213,16 +229,16 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
-  if (!prv_phone_is_connected()) {
-    // Someone holding only the watch must not be able to re-PIN it and keep it.
-    PBL_LOG_WRN("Refusing to set a PIN with no phone connected");
-    return E_INVALID_OPERATION;
-  }
   if (!prv_pin_is_well_formed(digits, len)) {
     return E_INVALID_ARGUMENT;
   }
 
   mutex_lock(s_mutex);
+  if (!prv_change_is_allowed()) {
+    PBL_LOG_WRN("Refusing to replace an existing PIN with no phone connected");
+    mutex_unlock(s_mutex);
+    return E_INVALID_OPERATION;
+  }
 
   // Preserve any duress PIN across a change of the real one: the two are set
   // independently and forgetting the duress PIN here would silently disarm it.
@@ -264,9 +280,6 @@ unlock:
 
 status_t security_lock_set_duress_pin(const char *digits, uint8_t len) {
   if (!s_initialized) {
-    return E_INVALID_OPERATION;
-  }
-  if (!prv_phone_is_connected()) {
     return E_INVALID_OPERATION;
   }
   if (!prv_pin_is_well_formed(digits, len)) {
@@ -316,6 +329,8 @@ status_t security_lock_clear_duress_pin(void) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
+  // Removing a duress PIN disarms a defence the user set up, so it needs the
+  // phone even though adding one does not.
   if (!prv_phone_is_connected()) {
     return E_INVALID_OPERATION;
   }
