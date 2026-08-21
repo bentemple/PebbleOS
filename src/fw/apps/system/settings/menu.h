@@ -25,6 +25,9 @@ typedef enum {
   SettingsMenuItemThemes,
 #endif
   SettingsMenuItemActivity,
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  SettingsMenuItemSecurity,
+#endif
   SettingsMenuItemSystem,
   SettingsMenuItem_Count,
   SettingsMenuItem_Invalid
