@@ -222,8 +222,15 @@ void security_lock_handle_boot(void) {
   if (security_lock_is_shred_pending()) {
     // A previous shred did not finish. Whatever it was, redo it.
     reason = SecurityShredReasonUnknown;
-  } else if (security_lock_disconnect_deadline_expired(now)) {
+  } else if (security_lock_shred_deadline_expired(now)) {
     reason = SecurityShredReasonDisconnectTimeout;
+  } else if (security_lock_lock_deadline_expired(now) && !security_lock_is_locked()) {
+    // Powered off through the lock delay but not the shred delay: come back
+    // locked rather than wiped. security_lock_handle_boot() cannot engage the
+    // UI this early, so record the state and let the lock screen appear when
+    // the button handler first sees a press.
+    security_lock_set_state(SecurityLockStateLocked);
+    return;
   } else if (rolled_back && security_lock_is_locked()) {
     reason = SecurityShredReasonClockRollback;
   } else if (security_lock_is_locked()) {

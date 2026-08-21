@@ -19,7 +19,7 @@ PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LE
 #define SETTINGS_FILE_NAME "seclock"
 #define SETTINGS_FILE_SIZE KiBYTES(2)
 
-#define RECORD_VERSION 1
+#define RECORD_VERSION 2
 
 //! Config: written rarely (only when the PIN changes).
 static const char *CFG_KEY = "cfg";
@@ -39,8 +39,12 @@ typedef struct PACKED {
   uint8_t state;
   uint8_t failed_attempts;
   bool shred_pending;
-  time_t disconnect_deadline;
+  //! Both measured from the disconnect, not from each other.
+  time_t lock_deadline;
+  time_t shred_deadline;
   time_t time_high_water;
+  uint32_t lock_delay_s;
+  uint32_t shred_delay_s;
 } SecurityLockRuntime;
 
 static PebbleMutex *s_mutex;
@@ -54,6 +58,8 @@ static void prv_runtime_defaults(SecurityLockRuntime *rt) {
   *rt = (SecurityLockRuntime){
       .version = RECORD_VERSION,
       .state = SecurityLockStateDisabled,
+      .lock_delay_s = SECURITY_LOCK_DEFAULT_LOCK_DELAY_S,
+      .shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S,
   };
 }
 
@@ -148,8 +154,11 @@ status_t security_lock_set_state(SecurityLockState state) {
   if (state != SecurityLockStateLocked) {
     // Leaving the locked state retires any pending disconnect deadline and
     // the attempt counter along with it.
+    // Unlocking retires any countdown. It does not re-arm on reconnect --
+    // only the next unexpected disconnect arms it again.
     s_runtime_cache.failed_attempts = 0;
-    s_runtime_cache.disconnect_deadline = 0;
+    s_runtime_cache.lock_deadline = 0;
+    s_runtime_cache.shred_deadline = 0;
   }
   status_t rv = prv_flush_runtime();
   mutex_unlock(s_mutex);
@@ -160,11 +169,13 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
-  if (digits == NULL || len < SECURITY_LOCK_PIN_MIN_LEN || len > SECURITY_LOCK_PIN_MAX_LEN) {
+  // Exactly 4 or 6 -- nothing between, because the pad only offers those two.
+  if (digits == NULL || (len != SECURITY_LOCK_PIN_MIN_LEN && len != SECURITY_LOCK_PIN_MAX_LEN)) {
     return E_INVALID_ARGUMENT;
   }
   for (uint8_t i = 0; i < len; ++i) {
-    if (digits[i] < '0' || digits[i] > '9') {
+    // '0' is absent from the pad, so a PIN containing one could never be typed.
+    if (digits[i] < '1' || digits[i] > '9') {
       return E_INVALID_ARGUMENT;
     }
   }
@@ -323,30 +334,74 @@ status_t security_lock_set_shred_pending(bool pending) {
   return rv;
 }
 
-time_t security_lock_get_disconnect_deadline(void) {
+uint32_t security_lock_get_lock_delay_s(void) {
   if (!s_initialized) {
-    return 0;
+    return SECURITY_LOCK_DEFAULT_LOCK_DELAY_S;
   }
-  return s_runtime_cache.disconnect_deadline;
+  return s_runtime_cache.lock_delay_s;
 }
 
-status_t security_lock_set_disconnect_deadline(time_t deadline) {
+uint32_t security_lock_get_shred_delay_s(void) {
+  if (!s_initialized) {
+    return SECURITY_LOCK_DEFAULT_SHRED_DELAY_S;
+  }
+  return s_runtime_cache.shred_delay_s;
+}
+
+status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
+  // Shredding before locking would destroy the data without ever showing the
+  // user a chance to stop it, so the order is enforced rather than trusted.
+  if (shred_delay_s < lock_delay_s) {
+    return E_INVALID_ARGUMENT;
+  }
   mutex_lock(s_mutex);
-  s_runtime_cache.disconnect_deadline = deadline;
+  s_runtime_cache.lock_delay_s = lock_delay_s;
+  s_runtime_cache.shred_delay_s = shred_delay_s;
   status_t rv = prv_flush_runtime();
   mutex_unlock(s_mutex);
   return rv;
 }
 
-status_t security_lock_clear_disconnect_deadline(void) {
-  return security_lock_set_disconnect_deadline(0);
+time_t security_lock_get_lock_deadline(void) {
+  if (!s_initialized) {
+    return 0;
+  }
+  return s_runtime_cache.lock_deadline;
 }
 
-bool security_lock_disconnect_deadline_expired(time_t now) {
-  time_t deadline = security_lock_get_disconnect_deadline();
+time_t security_lock_get_shred_deadline(void) {
+  if (!s_initialized) {
+    return 0;
+  }
+  return s_runtime_cache.shred_deadline;
+}
+
+status_t security_lock_set_deadlines(time_t lock_deadline, time_t shred_deadline) {
+  if (!s_initialized) {
+    return E_INVALID_OPERATION;
+  }
+  mutex_lock(s_mutex);
+  s_runtime_cache.lock_deadline = lock_deadline;
+  s_runtime_cache.shred_deadline = shred_deadline;
+  status_t rv = prv_flush_runtime();
+  mutex_unlock(s_mutex);
+  return rv;
+}
+
+status_t security_lock_clear_deadlines(void) {
+  return security_lock_set_deadlines(0, 0);
+}
+
+bool security_lock_lock_deadline_expired(time_t now) {
+  const time_t deadline = security_lock_get_lock_deadline();
+  return (deadline != 0) && (now >= deadline);
+}
+
+bool security_lock_shred_deadline_expired(time_t now) {
+  const time_t deadline = security_lock_get_shred_deadline();
   return (deadline != 0) && (now >= deadline);
 }
 

@@ -94,7 +94,7 @@ void test_security_lock__defaults_are_disabled(void) {
   cl_assert_equal_i(0, security_lock_get_failed_attempts());
   cl_assert(!security_lock_attempts_exhausted());
   cl_assert(!security_lock_is_shred_pending());
-  cl_assert_equal_i(0, security_lock_get_disconnect_deadline());
+  cl_assert_equal_i(0, security_lock_get_shred_deadline());
   cl_assert_equal_i(0, security_lock_get_time_high_water());
 }
 
@@ -112,12 +112,16 @@ void test_security_lock__set_pin_arms(void) {
 
 void test_security_lock__rejects_bad_pin_lengths(void) {
   cl_assert(security_lock_set_pin("123", 3) != S_SUCCESS);
-  cl_assert(security_lock_set_pin("123456789", 9) != S_SUCCESS);
+  cl_assert(security_lock_set_pin("1234567", 7) != S_SUCCESS);
+  // 5 is between the two allowed lengths, so it must be rejected too.
+  cl_assert(security_lock_set_pin("12345", 5) != S_SUCCESS);
   cl_assert_equal_i(SecurityLockStateDisabled, security_lock_get_state());
 }
 
 void test_security_lock__rejects_non_digits(void) {
   cl_assert(security_lock_set_pin("12a4", 4) != S_SUCCESS);
+  // The pad has no 0 key, so a PIN with one could never be typed.
+  cl_assert(security_lock_set_pin("1204", 4) != S_SUCCESS);
   cl_assert_equal_i(SecurityLockStateDisabled, security_lock_get_state());
 }
 
@@ -152,8 +156,8 @@ void test_security_lock__clear_pin_disables_and_forgets(void) {
 // digits that cannot be entered or submits short and always fails.
 void test_security_lock__pin_len_reports_configured_length(void) {
   cl_assert_equal_i(0, security_lock_get_pin_len());
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin("12345678", 8));
-  cl_assert_equal_i(8, security_lock_get_pin_len());
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin("123456", 6));
+  cl_assert_equal_i(6, security_lock_get_pin_len());
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(4, security_lock_get_pin_len());
 }
@@ -264,11 +268,11 @@ void test_security_lock__unlocking_clears_attempts_and_deadline(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
   cl_assert(!security_lock_verify_pin(WRONG_PIN, strlen(WRONG_PIN), NULL));
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_disconnect_deadline(5000));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 5000));
 
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
   cl_assert_equal_i(0, security_lock_get_failed_attempts());
-  cl_assert_equal_i(0, security_lock_get_disconnect_deadline());
+  cl_assert_equal_i(0, security_lock_get_shred_deadline());
 }
 
 // Shred-pending flag
@@ -288,25 +292,25 @@ void test_security_lock__shred_pending_survives_reboot(void) {
 ////////////////////////////////////
 
 void test_security_lock__deadline_expiry(void) {
-  cl_assert(!security_lock_disconnect_deadline_expired(100000));
+  cl_assert(!security_lock_shred_deadline_expired(100000));
 
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_disconnect_deadline(1000));
-  cl_assert(!security_lock_disconnect_deadline_expired(999));
-  cl_assert(security_lock_disconnect_deadline_expired(1000));
-  cl_assert(security_lock_disconnect_deadline_expired(1001));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 1000));
+  cl_assert(!security_lock_shred_deadline_expired(999));
+  cl_assert(security_lock_shred_deadline_expired(1000));
+  cl_assert(security_lock_shred_deadline_expired(1001));
 }
 
 void test_security_lock__deadline_survives_reboot(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_disconnect_deadline(4242));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 4242));
   prv_simulate_reboot();
-  cl_assert_equal_i(4242, security_lock_get_disconnect_deadline());
-  cl_assert(security_lock_disconnect_deadline_expired(4242));
+  cl_assert_equal_i(4242, security_lock_get_shred_deadline());
+  cl_assert(security_lock_shred_deadline_expired(4242));
 }
 
 void test_security_lock__cleared_deadline_never_expires(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_disconnect_deadline(1000));
-  cl_assert_equal_i(S_SUCCESS, security_lock_clear_disconnect_deadline());
-  cl_assert(!security_lock_disconnect_deadline_expired(999999));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 1000));
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_deadlines());
+  cl_assert(!security_lock_shred_deadline_expired(999999));
 }
 
 // Clock rollback
@@ -345,4 +349,97 @@ void test_security_lock__high_water_survives_reboot(void) {
 void test_security_lock__first_note_is_never_a_rollback(void) {
   // No mark recorded yet, so any time is acceptable.
   cl_assert(!security_lock_note_time(1));
+}
+
+// Configurable delays
+////////////////////////////////////
+
+void test_security_lock__delays_default_to_five_and_thirty_minutes(void) {
+  cl_assert_equal_i(5 * 60, security_lock_get_lock_delay_s());
+  cl_assert_equal_i(30 * 60, security_lock_get_shred_delay_s());
+}
+
+void test_security_lock__delays_are_configurable(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(60, 120));
+  cl_assert_equal_i(60, security_lock_get_lock_delay_s());
+  cl_assert_equal_i(120, security_lock_get_shred_delay_s());
+}
+
+void test_security_lock__delays_survive_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(90, 900));
+  prv_simulate_reboot();
+  cl_assert_equal_i(90, security_lock_get_lock_delay_s());
+  cl_assert_equal_i(900, security_lock_get_shred_delay_s());
+}
+
+//! Shredding before locking would destroy the data without the user ever
+//! getting a chance to stop it.
+void test_security_lock__shred_delay_cannot_precede_lock_delay(void) {
+  cl_assert(security_lock_set_delays(600, 300) != S_SUCCESS);
+  cl_assert_equal_i(5 * 60, security_lock_get_lock_delay_s());
+}
+
+void test_security_lock__equal_delays_are_allowed(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(300, 300));
+}
+
+// Deadline arming and re-arming
+////////////////////////////////////
+
+void test_security_lock__both_deadlines_arm_and_expire_independently(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1000, 2000));
+
+  cl_assert(!security_lock_lock_deadline_expired(999));
+  cl_assert(security_lock_lock_deadline_expired(1000));
+  cl_assert(!security_lock_shred_deadline_expired(1999));
+  cl_assert(security_lock_shred_deadline_expired(2000));
+}
+
+//! A correct PIN retires the countdown entirely.
+void test_security_lock__unlocking_clears_both_deadlines(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1000, 2000));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert_equal_i(0, security_lock_get_lock_deadline());
+  cl_assert_equal_i(0, security_lock_get_shred_deadline());
+  cl_assert(!security_lock_shred_deadline_expired(999999));
+}
+
+//! Cleared deadlines stay cleared across a reboot -- an unlocked watch must not
+//! come back still counting down.
+void test_security_lock__cleared_deadlines_stay_cleared_over_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1000, 2000));
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_deadlines());
+  prv_simulate_reboot();
+  cl_assert_equal_i(0, security_lock_get_shred_deadline());
+  cl_assert(!security_lock_shred_deadline_expired(999999));
+}
+
+//! Re-arming after a reconnect/disconnect cycle must produce a fresh countdown,
+//! not resume the old one.
+void test_security_lock__deadlines_rearm_from_scratch(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(60, 600));
+
+  // First disconnect at t=1000.
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1060, 1600));
+  // Reconnect clears.
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_deadlines());
+  // Second disconnect much later at t=5000.
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(5060, 5600));
+
+  // The old deadline must not still be pending.
+  cl_assert(!security_lock_shred_deadline_expired(5599));
+  cl_assert(security_lock_shred_deadline_expired(5600));
+}
+
+//! An already-locked watch arms only the shred countdown; there is nothing left
+//! to lock.
+void test_security_lock__locked_watch_arms_only_the_shred_deadline(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 2000));
+  cl_assert_equal_i(0, security_lock_get_lock_deadline());
+  cl_assert(!security_lock_lock_deadline_expired(999999));
+  cl_assert(security_lock_shred_deadline_expired(2000));
 }

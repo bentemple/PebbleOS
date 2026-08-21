@@ -38,8 +38,8 @@ typedef enum PACKED {
 typedef struct PACKED {
   uint8_t cmd;
   uint8_t enabled;
-  net16 disconnect_timeout_s;
-  uint8_t lock_on_disconnect;
+  net16 lock_delay_s;
+  net16 shred_delay_s;
 } SecurityLockConfigureMsg;
 
 typedef struct PACKED {
@@ -65,14 +65,16 @@ typedef struct PACKED {
   uint8_t state;
 } SecurityLockStateMsg;
 
-//! Runtime config pushed by the phone. Not persisted: the phone re-sends it on
-//! every connection, and a stale timeout is worse than the default.
-static uint16_t s_disconnect_timeout_s = SECURITY_LOCK_DISCONNECT_TIMEOUT_S;
-static bool s_lock_on_disconnect;
+//! Whether the phone has asked for the feature at all. Not persisted: the
+//! phone re-sends CONFIGURE on every connection. The delays themselves are
+//! persisted by the service, because Settings can set them too and they have
+//! to survive a reboot.
 static bool s_enabled = true;
 
 static RegularTimerInfo s_deadline_timer;
 static bool s_deadline_timer_running;
+
+static void prv_stop_deadline_timer(void);
 
 static void prv_send(const void *msg, size_t len) {
   CommSession *session = comm_session_get_system_session();
@@ -111,7 +113,9 @@ static void prv_send_lock_ack(SecurityShredReason reason) {
 }
 
 static void prv_send_status(void) {
-  const time_t deadline = security_lock_get_disconnect_deadline();
+  // Report the shred countdown: it is the one with consequences the phone
+  // might want to surface.
+  const time_t deadline = security_lock_get_shred_deadline();
   const time_t now = rtc_get_time();
   uint32_t remaining = 0;
   if ((deadline != 0) && (deadline > now)) {
@@ -156,14 +160,23 @@ static void prv_handle_configure(const uint8_t *msg, size_t len) {
   }
   const SecurityLockConfigureMsg *cfg = (const SecurityLockConfigureMsg *)msg;
   s_enabled = (cfg->enabled != 0);
-  s_lock_on_disconnect = (cfg->lock_on_disconnect != 0);
 
-  const uint16_t timeout = ntoh16(cfg->disconnect_timeout_s);
-  // Zero means "use the default" rather than "shred immediately".
-  s_disconnect_timeout_s = (timeout != 0) ? timeout : SECURITY_LOCK_DISCONNECT_TIMEOUT_S;
+  // Zero means "leave it alone" rather than "act immediately", so a phone that
+  // does not care about the timings cannot accidentally set them to nothing.
+  const uint16_t lock_delay = ntoh16(cfg->lock_delay_s);
+  const uint16_t shred_delay = ntoh16(cfg->shred_delay_s);
+  if ((lock_delay != 0) || (shred_delay != 0)) {
+    const uint32_t new_lock =
+        (lock_delay != 0) ? lock_delay : security_lock_get_lock_delay_s();
+    const uint32_t new_shred =
+        (shred_delay != 0) ? shred_delay : security_lock_get_shred_delay_s();
+    if (security_lock_set_delays(new_lock, new_shred) != S_SUCCESS) {
+      PBL_LOG_WRN("Rejected delays: lock=%" PRIu32 "s shred=%" PRIu32 "s", new_lock, new_shred);
+    }
+  }
 
-  PBL_LOG_DBG("Configured: enabled=%d timeout=%" PRIu16 "s lock_on_disconnect=%d", (int)s_enabled,
-              s_disconnect_timeout_s, (int)s_lock_on_disconnect);
+  PBL_LOG_DBG("Configured: enabled=%d lock=%" PRIu32 "s shred=%" PRIu32 "s", (int)s_enabled,
+              security_lock_get_lock_delay_s(), security_lock_get_shred_delay_s());
 }
 
 void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *msg, size_t len) {
@@ -191,30 +204,43 @@ void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *ms
 // Disconnect deadline
 ////////////////////////////////////
 
-static void prv_deadline_expired_callback(void *unused) {
-  if (!security_lock_is_locked()) {
+//! Runs on KernelMain because locking touches the app and modal stacks.
+static void prv_deadline_lock_callback(void *unused) {
+  if (security_lock_is_locked()) {
     return;
   }
-  security_lock_shred(SecurityShredReasonDisconnectTimeout);
+  PBL_LOG_DBG("Lock delay elapsed while disconnected");
+  security_lock_engage(SecurityShredReasonDisconnectTimeout);
 }
 
-//! Re-checked on a timer rather than armed as a single long timeout, because a
-//! one-shot timer does not survive the watch sleeping or rebooting. The
-//! deadline itself is an absolute timestamp in the lock record, so it does.
+//! Re-checked on a timer rather than armed as one long timeout, because a
+//! one-shot timer survives neither the watch sleeping nor a reboot. The
+//! deadlines are absolute timestamps in the lock record, so they survive both
+//! and are re-checked at boot.
 static void prv_deadline_check(void *unused) {
-  if (!security_lock_is_locked()) {
+  if (security_lock_get_state() == SecurityLockStateDisabled) {
     return;
   }
 
   const time_t now = rtc_get_time();
   if (security_lock_note_time(now)) {
-    // Clock wound back, most likely to dodge the deadline.
+    // Clock wound back, most likely to outrun a deadline.
     security_lock_shred(SecurityShredReasonClockRollback);
     return;
   }
 
-  if (security_lock_disconnect_deadline_expired(now)) {
-    prv_deadline_expired_callback(NULL);
+  // Shred first: if the watch was powered off past both deadlines, the data
+  // mattering more than the lock screen is the whole point.
+  if (security_lock_shred_deadline_expired(now)) {
+    PBL_LOG_DBG("Shred delay elapsed while disconnected");
+    security_lock_shred(SecurityShredReasonDisconnectTimeout);
+    security_lock_clear_deadlines();
+    prv_stop_deadline_timer();
+    return;
+  }
+
+  if (security_lock_lock_deadline_expired(now) && !security_lock_is_locked()) {
+    launcher_task_add_callback(prv_deadline_lock_callback, NULL);
   }
 }
 
@@ -245,33 +271,34 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
   }
 
   if (event->is_open) {
-    security_lock_clear_disconnect_deadline();
+    // Reconnecting stops the countdown but does not unlock: if the watch
+    // already locked, only the PIN clears that. The deadlines stay cleared
+    // until the next unexpected disconnect arms them again.
+    security_lock_clear_deadlines();
     prv_stop_deadline_timer();
     return;
   }
 
-  if (security_lock_get_state() == SecurityLockStateDisabled) {
+  if (!s_enabled || (security_lock_get_state() == SecurityLockStateDisabled)) {
     return;
   }
 
-  if (security_lock_is_locked()) {
-    const time_t deadline = rtc_get_time() + s_disconnect_timeout_s;
-    security_lock_set_disconnect_deadline(deadline);
-    prv_start_deadline_timer();
-    PBL_LOG_DBG("Locked and disconnected; deadline in %" PRIu16 "s", s_disconnect_timeout_s);
-  } else if (s_lock_on_disconnect && s_enabled) {
-    // Off by default: locking every time the watch wanders out of Bluetooth
-    // range would be unusable.
-    PBL_LOG_DBG("Locking on unexpected disconnect");
-    launcher_task_add_callback(prv_lock_callback,
-                             (void *)(uintptr_t)SecurityShredReasonDisconnectTimeout);
-  }
+  // Both are measured from the disconnect, so a watch that is already locked
+  // still gets the full shred delay rather than an immediate wipe.
+  const time_t now = rtc_get_time();
+  const time_t lock_deadline = now + (time_t)security_lock_get_lock_delay_s();
+  const time_t shred_deadline = now + (time_t)security_lock_get_shred_delay_s();
+  security_lock_set_deadlines(security_lock_is_locked() ? 0 : lock_deadline, shred_deadline);
+  prv_start_deadline_timer();
+
+  PBL_LOG_DBG("Phone gone: lock in %" PRIu32 "s, shred in %" PRIu32 "s",
+              security_lock_get_lock_delay_s(), security_lock_get_shred_delay_s());
 }
 
 void security_lock_endpoint_init(void) {
   // A watch that was locked and offline across a reboot needs the timer running
   // again without waiting for another disconnect event.
-  if (security_lock_is_locked() && (security_lock_get_disconnect_deadline() != 0)) {
+  if ((security_lock_get_lock_deadline() != 0) || (security_lock_get_shred_deadline() != 0)) {
     prv_start_deadline_timer();
   }
 }
