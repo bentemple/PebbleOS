@@ -82,6 +82,25 @@ triggers differ only in that they re-run it and keep the watch locked. This is
 a simplification over an earlier two-tier draft, and it follows directly from
 the shred being non-destructive.
 
+### Locking almost always ends in a shred
+
+Worth stating plainly, because it is the practical behaviour rather than an
+edge case. Once the watch locks, avoiding the shred requires the user to enter
+the correct PIN before the shred delay elapses *and* not reboot in the
+meantime. A flat battery, a crash, a five-second SELECT+BACK, or simply not
+noticing for half an hour all end in a wipe.
+
+That is intended, and it is only reasonable because of the scope decision
+above: everything the shred destroys comes back from the phone on reconnect.
+Nothing unrecoverable is at stake -- health and step history, the one category
+the phone cannot restore, is deliberately never touched. So the cost of an
+unnecessary shred is a resync, not a loss.
+
+The lock phase is therefore best understood as a short grace period, not as a
+durable state the watch is expected to sit in. If that ever stops being true --
+if something unrestorable gets added to the shred list -- this trade has to be
+revisited at the same time.
+
 ### Trigger matrix
 
 | Trigger | Detected where | Result |
