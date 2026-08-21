@@ -138,6 +138,34 @@ extern status_t pfs_close_and_remove(int fd);
 //! @return - S_SUCCESS or appropriate error code on failure
 extern status_t pfs_remove(const char *name);
 
+//! Overwrites a file's payload with zeroes, then unlinks it.
+//!
+//! pfs_remove() alone only clears a flag in each page header and leaves the
+//! payload bytes readable on flash, so it cannot destroy sensitive data. This
+//! zeroes the live copy first.
+//!
+//! It does NOT destroy stale copies left elsewhere on flash by earlier garbage
+//! collection, settings_file compaction, or OP_FLAG_OVERWRITE writes. Follow a
+//! batch of shreds with pfs_gc_deleted_sectors() for that.
+//!
+//! @param name - the name of the file to shred
+//! @return - S_SUCCESS (including when the file does not exist) or an error
+extern status_t pfs_shred(const char *name);
+
+//! Garbage collects every erase sector that contains deleted pages.
+//!
+//! Live pages are relocated and the sector is physically erased, destroying
+//! stale payload bytes left behind by earlier deletes and compactions. Data
+//! still in use is preserved, so the filesystem can be scrubbed without the
+//! collateral damage of pfs_format().
+//!
+//! Slow: each 64K sector erase takes roughly 150ms and there can be hundreds of
+//! them. Callers should expect this to block for a long time.
+//!
+//! @return - S_SUCCESS, or the last error encountered. The sweep continues past
+//!           a failing region rather than aborting.
+extern status_t pfs_gc_deleted_sectors(void);
+
 //! Returns the size of the file. (The amount of bytes that can be read out)
 extern size_t pfs_get_file_size(int fd);
 

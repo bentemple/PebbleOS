@@ -273,14 +273,35 @@ New private endpoint in `normal_fw_only` of
 **11300 / 0x2C24** (unused; neighbours are 11000 voice, 11440 timeline actions).
 Self-assigned — flag if upstream compatibility matters.
 
-| Msg | Direction | Purpose |
-|---|---|---|
-| `CONFIGURE` | phone → watch | Enable/disable, set PIN hash, timeouts |
-| `LOCK` | phone → watch | Lock and shred now; carries a reason code |
-| `STATUS_REQUEST` | phone → watch | Query state |
-| `LOCK_ACK` | watch → phone | Confirms lock, echoes reason |
-| `SHRED_COMPLETE` | watch → phone | Bitmap of wiped DBs — resync signal |
-| `STATE_CHANGED` | watch → phone | Unlocked, re-shredded, etc. |
+Every message is `uint8 command` followed by a command-specific payload,
+big-endian, following the `RESPONSE_MASK = 1 << 7` convention the BlobDB
+endpoint already uses.
+
+**The PIN is set on the watch and never sent over the air.** The phone can lock
+the watch but cannot set, read or clear the PIN. Otherwise compromising the
+phone would hand over the watch's unlock secret, which defeats the point of the
+watch locking when the phone is seized.
+
+| Cmd | Msg | Direction | Payload |
+|---|---|---|---|
+| `0x01` | `CONFIGURE` | phone → watch | `uint8 enabled`, `uint16 disconnect_timeout_s`, `uint8 lock_on_disconnect` |
+| `0x02` | `LOCK` | phone → watch | `uint8 reason` |
+| `0x03` | `STATUS_REQUEST` | phone → watch | — |
+| `0x82` | `LOCK_ACK` | watch → phone | `uint8 reason` |
+| `0x83` | `STATUS_RESPONSE` | watch → phone | `uint8 state`, `uint8 pin_configured`, `uint32 deadline_remaining_s` |
+| `0x84` | `SHRED_COMPLETE` | watch → phone | `uint8 reason`, `uint32 wiped_db_bitmap` |
+| `0x85` | `STATE_CHANGED` | watch → phone | `uint8 state` |
+
+Reason codes: `0x00` unknown, `0x01` phone lockdown, `0x02` manual panic,
+`0x03` disconnect timeout, `0x04` reboot while locked, `0x05` PIN attempts
+exhausted, `0x06` clock rollback.
+
+State values match `SecurityLockState`: `0` disabled, `1` armed, `2` locked.
+
+`wiped_db_bitmap` uses `1 << BlobDBId`, so bit 1 = Pins, bit 3 = Reminders,
+bit 4 = Notifs, bit 5 = Weather, bit 8 = Contacts. Gadgetbridge uses it to
+decide which sync state to drop. Bit 31 means "content not covered by a
+BlobDB was also wiped" and is informational.
 
 ## Gadgetbridge design
 
