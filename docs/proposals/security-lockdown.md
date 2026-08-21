@@ -1,0 +1,509 @@
+# Proposal: Security Lockdown & Data Shred
+
+## Summary
+
+A coordinated PebbleOS + Gadgetbridge feature. When the phone enters Android
+lockdown mode (or a tamper condition is detected on the watch), the watch locks
+behind a PIN and destroys the sensitive data it holds.
+
+**The shred is watch-only, and deliberately limited to data the phone can
+restore.** The rationale is asymmetry: Android gives the phone real
+file-based encryption at rest, so a locked phone's data is already
+cryptographically protected. The watch has *no encryption of any kind*
+(verified — there is no at-rest crypto anywhere in `src/fw`), so everything on
+it is cleartext to anyone with a flash reader. The watch is the weak link, and
+that is where the effort goes.
+
+Because everything shredded is restorable from the phone on reconnect, the
+shred is cheap to trigger and safe to trigger often. That in turn means we can
+be aggressive about triggering it.
+
+### Explicitly out of scope
+
+Health and step history (`activity` settings file, `healthdb`), third-party app
+persistent storage, the app DB, and BT pairing keys are **not** shredded. Health
+data is sensitive and this is an accepted cost — it is not restorable from the
+phone, and wiping it would make the feature destructive enough that nobody would
+turn it on. Preserving pairing also means the watch silently reconnects and
+resyncs, which is what makes reboot-while-locked a non-event.
+
+This has a consequence that must not be glossed over: **a seized watch still
+yields step, sleep, and heart-rate history.** That is a deliberate trade, not
+an oversight.
+
+## Threat model
+
+1. **Border / device seizure.** Adversary holds both phone and watch and may
+   compel unlock.
+2. **Protest / activist context.** Phone taken while the watch is worn; the
+   watch must act autonomously when it loses the phone.
+3. **Opportunistic theft / snooping.** Someone picks the watch up and reads it.
+
+### What this cannot defend against
+
+- **No encryption at rest on the watch.** Verified: no AES/KDF-at-rest code in
+  `src/fw`; `MBEDTLS_AES_C` is compiled only for the NimBLE link layer. Erasure,
+  not access control, is the only real control available.
+- **The 5-second SELECT+BACK hard reset cannot be blocked.** Handled in the TIM4
+  debounce ISR below the OS (`src/fw/drivers/nrf5/debounced_button.c:160-186`,
+  mirrored in `sf32lb52/`), commented *"This back door absolutely must work."*
+  Holding UP as well sets `BOOT_BIT_FORCE_PRF` and boots recovery firmware.
+  **Mitigation: reboot-while-locked re-runs the shred at early boot, so the back
+  door escapes the lock screen but not the wipe.**
+- **A 4-digit PIN is not a cryptographic secret.** With flash in hand an attacker
+  enumerates 10,000 candidates offline regardless of hashing. The PIN defends the
+  screen; the shred defends the data.
+- **Residual copies below PFS.** See "Zeroing actually works" below — we can do a
+  great deal better than `pfs_remove()`, but the FTL/wear-levelling layer
+  (`flash_translation.c`) can remap and retain physical pages, and we do not
+  control it. Against a determined chip-off adversary this is best-effort.
+- Health/step data survives, per "out of scope" above.
+
+## Architecture
+
+### State machine
+
+```
+        configure PIN
+Disabled ──────────────> Armed ──────────────────> Locked
+   ^                       ^   phone LOCK cmd        │
+   │                       │   manual panic          │  correct PIN
+   │  disable + PIN        │   disconnect grace      │
+   └───────────────────────┴─────────────────────────┘
+                                   ^                 │
+                                   │                 v
+                                   └───────────── Shredding
+                          (re-shred + stay locked on
+                           reboot / 30min / 3 bad PINs)
+```
+
+There is **one shred scope**. Every trigger runs the same wipe; escalation
+triggers differ only in that they re-run it and keep the watch locked. This is
+a simplification over an earlier two-tier draft, and it follows directly from
+the shred being non-destructive.
+
+### Trigger matrix
+
+| Trigger | Detected where | Result |
+|---|---|---|
+| Phone sends `LOCK` | New protocol endpoint | Lock + shred |
+| Manual panic action | Watch menu / GB action | Lock + shred |
+| Unexpected disconnect while Armed | `PebbleCommSessionEvent` close + grace | Lock + shred (configurable) |
+| Boot with state == `Locked` | Early-boot hook | Re-shred, stay locked |
+| Disconnected > 30 min while Locked | Absolute-deadline check | Re-shred, stay locked |
+| 3 consecutive wrong PINs | Lock screen | Re-shred, stay locked |
+| `rtc_get_time()` < persisted high-water mark | Deadline check | Re-shred, stay locked |
+
+## Firmware design
+
+### 1. Lock state store — `src/fw/services/security/lock_state.{c,h}`
+
+A dedicated `settings_file` named `seclock`, opened directly rather than through
+blob\_db, because it must be readable before `blob_db_init_dbs()` runs.
+
+```c
+typedef struct PACKED {
+  uint16_t version;
+  SecurityLockState state;      // Disabled / Armed / Locked
+  uint8_t  pin_len;             // 4..8
+  uint8_t  salt[16];            // from rng_rand()
+  uint8_t  pin_hash[32];
+  uint8_t  failed_attempts;
+  bool     shred_pending;       // set before shredding, cleared after
+  time_t   disconnect_deadline; // 0 = not armed
+  time_t   time_high_water;     // monotonic guard against RTC rollback
+} SecurityLockRecord;
+```
+
+Two write-ordering rules that carry the whole design:
+
+- **Increment `failed_attempts` and flush *before* checking the PIN**, so pulling
+  power mid-verification counts as a failure rather than resetting the counter.
+- **Set `shred_pending` before starting a shred**, so an interrupted shred
+  resumes at next boot.
+
+Mirror "locked" into a spare RTC-backup boot bit (`1 << 20` is free,
+`src/fw/system/bootbits.h`). The settings file is authoritative; the boot bit is
+a redundant signal that survives a corrupted filesystem. It does not survive a
+long battery pull, so it can never be the only copy.
+
+### 2. Making the zeroing actually work
+
+This is the part that is easy to get wrong, and the requirement is explicit:
+clear the data *and zero the memory it was stored in*.
+
+Three layers each retain data after an ordinary delete, all verified:
+
+1. `pfs_remove()` clears a single page-header flag and leaves the payload bytes
+   untouched (`pfs.c:825` `unlink_flash_file`, called from `pfs.c:1494`).
+2. `settings_file` deletes are tombstones — a new zero-length record is appended
+   and the old record's header bits flipped; key and value bytes remain
+   (`settings_file.c:507-585`).
+3. Even after compaction (`settings_file_rewrite_filtered`, `settings_file.c:219`)
+   the *old* PFS file is only unlinked, so its bytes persist until PFS garbage
+   collection happens to reclaim that sector.
+
+Since we are not doing a full `pfs_format()` (that would take health data with
+it), the shred needs two new primitives:
+
+```c
+//! Overwrite a file's payload with zeroes, then unlink it.
+//! NOR flash writes only clear bits, so writing 0x00 over live data always
+//! succeeds without an erase.
+status_t pfs_shred(const char *filename);
+
+//! Force garbage collection of every erase-sector that contains deleted pages.
+//! Live pages are copied out and the sector is physically erased, destroying
+//! stale copies left behind by earlier deletes, compactions and overwrites.
+//! Preserves all live data, so health/activity storage is unaffected.
+status_t pfs_gc_deleted_sectors(void);
+```
+
+`pfs_gc_deleted_sectors()` reuses the existing `garbage_collect_sector()`
+machinery (`pfs.c:2059`), which already does exactly the right thing — copy live
+pages to the GC sector, erase the original — but is normally driven only by
+allocation pressure. Exposing it as a deliberate sweep is the key change.
+
+Shred sequence per target: `pfs_shred()` each file, then one
+`pfs_gc_deleted_sectors()` sweep at the end. Cost is bounded by how many sectors
+actually hold deleted pages (~150 ms per 64 KB sector erase).
+
+Shredding a whole settings-file-backed DB via `pfs_shred()` on the file handles
+live records and tombstones together — no need to walk records individually.
+
+### 3. Shred targets
+
+| Data | Backing store |
+|---|---|
+| Notifications | PFS `notifstr` (`notification_storage.c:29`) |
+| Calendar pins | PFS `pindb` (`pin_db.c:27`) |
+| Reminders | `reminderdb` |
+| Contacts | `contactsdb` |
+| Weather | `weatherdb` |
+| iOS notif prefs | `iosnotifprefdb` |
+| App glances | `appglancedb` |
+| Datalogging buffers | `dls_storage.c:39-40`, per-session files |
+
+Plus non-PFS flash regions that can hold leaked content — a coredump is a RAM
+snapshot and can contain notification text: raw erase of `FLASH_REGION_CD_*` and
+`FLASH_REGION_DEBUG_DB_*`.
+
+Plus RAM-resident state: music metadata (`music/service.c:41-43`), phone-call /
+caller-ID event state, and — easy to forget — **the compositor framebuffer**,
+which may be displaying a notification at the instant of lock. Force a repaint.
+
+While `Locked`, incoming notifications must be **dropped, not stored**. Add the
+check in `notifications.c` rather than relying on wiping them later.
+
+### 4. Lock screen — `src/fw/popups/security/lock_screen.{c,h}`
+
+Implement as a **modal, not an app.** Verified reason: the BACK-held-1.5s
+force-quit path (`event_loop.c:182-198`) kills any app at
+`ProcessAppRunLevelNormal`, which would pop a lock screen implemented as an app.
+Modals are not subject to it.
+
+Follow the kernel-panic / critical-battery precedent (`kernel/panic.c:15-29`,
+`shell/normal/battery_ui_fsm.c:166-181`):
+
+```c
+modal_manager_pop_all();
+modal_manager_set_min_priority(ModalPriorityMax);   // blocks everything below
+window_set_overrides_back_button(window, true);     // factory_reset.c:41-44
+```
+
+Quick Launch needs no special handling: its bindings live on the watchface's
+click-config provider, and `launcher_handle_button_event` routes to
+`modal_manager_handle_button_event` whenever a modal has focus
+(`event_loop.c:240-246`), so they are suppressed naturally.
+
+Behaviour — clock stays visible, any button raises the lock screen:
+
+- On entering `Locked`: `app_manager_close_current_app(true)`, then
+  `watchface_launch_default()`, then `launcher_block_popups(true)`.
+- Do not push the modal yet; the clock remains on screen.
+- In `launcher_handle_button_event`, if `Locked` and the modal is not up: push it
+  and swallow the event. Also swallow the 10×BACK coredump path
+  (`event_loop.c:200-213`) while locked.
+
+### 5. PIN entry
+
+`selection_layer` caps at `MAX_SELECTION_LAYER_CELLS = 3`, too few for a 4-digit
+PIN without raising a constant that costs memory for every other user. Write a
+small dedicated `security_pin_window`: UP/DOWN change the digit, SELECT advances.
+
+Hashing: `MBEDTLS_SHA256_C` / `MBEDTLS_PKCS5_C` are **not** currently enabled in
+`third_party/mbedtls/.../pebble_mbedtls_config.h` (only `MBEDTLS_AES_C`).
+Enabling them costs a few KB of flash. Salt from `rng_rand()`
+(`include/pbl/drivers/rng.h:11`).
+
+Be clear-eyed: PBKDF2 over a 4-digit PIN is trivially brute-forced offline. It
+prevents casual recovery of the PIN string itself (which the user may have
+reused). The attempt counter, not the hash, protects the data.
+
+### 6. Early-boot shred hook
+
+`services_normal_early_init()` is exactly `pfs_init(true)`
+(`services_normal/service.c:81-83`), called from `main.c:317` — after PFS mounts,
+but before `display_init()` (`main.c:344`), `bt_driver_init()` (`main.c:352`) and
+`services_init()` (`main.c:354`).
+
+Read `seclock` there; if `state == Locked` or `shred_pending`, run the shred
+before any pixel is drawn or the radio comes up.
+
+### 7. Disconnect deadline and clock trust
+
+Timers survive neither sleep nor reboot. Use the pattern established by
+`cron/service.c`: persist an **absolute deadline**, re-arm a short capped timer
+on each wake.
+
+- On session close while `Locked`: `disconnect_deadline = rtc_get_time() + 1800`.
+- On session open: clear it.
+- Check on every wake, timer tick, and at the boot hook.
+
+`rtc_get_time()` is settable by the user and the phone; there is no
+reboot-persistent monotonic clock (`rtc_get_ticks()` resets on boot). Keep
+`time_high_water` in the lock record, bump it as time advances, and treat a
+backwards jump beyond a small slack as tamper. Refuse phone-initiated time
+changes while `Locked`.
+
+### 8. Protocol endpoint
+
+New private endpoint in `normal_fw_only` of
+`src/fw/services/comm_session/protocol_endpoints_table.json`. Proposed ID
+**11300 / 0x2C24** (unused; neighbours are 11000 voice, 11440 timeline actions).
+Self-assigned — flag if upstream compatibility matters.
+
+| Msg | Direction | Purpose |
+|---|---|---|
+| `CONFIGURE` | phone → watch | Enable/disable, set PIN hash, timeouts |
+| `LOCK` | phone → watch | Lock and shred now; carries a reason code |
+| `STATUS_REQUEST` | phone → watch | Query state |
+| `LOCK_ACK` | watch → phone | Confirms lock, echoes reason |
+| `SHRED_COMPLETE` | watch → phone | Bitmap of wiped DBs — resync signal |
+| `STATE_CHANGED` | watch → phone | Unlocked, re-shredded, etc. |
+
+## Gadgetbridge design
+
+Repo: `../Gadgetbridge`. All work in a **git worktree** — another session is
+editing that checkout.
+
+### 1. Detecting lockdown
+
+Android has a real, public signal, and Gadgetbridge is already positioned to
+receive it. `NotificationListenerService.REASON_LOCKDOWN` (value **23**, public
+since API 34) is delivered to `onNotificationRemoved(sbn, rankingMap, reason)`
+for every active notification when lockdown is entered. The platform does this
+deliberately — `NotificationManagerService` registers a `StrongAuthTracker` and
+on `STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN` calls
+`cancelNotificationsWhenEnterLockDownMode()`, whose javadoc tells listeners to
+*"ensure the canceled notifications are indeed removed on their end to prevent
+data leaking."*
+
+`NotificationListener.java` currently overrides only the 2-arg
+`onNotificationRemoved(sbn)` (**line 1028**); the 3-arg variant carrying `reason`
+is free to add.
+
+```java
+// REASON_LOCKDOWN is public only at API 34, but the value has flowed
+// through the 3-arg callback for longer.
+private static final int REASON_LOCKDOWN_COMPAT = 23;
+
+@Override
+public void onNotificationRemoved(StatusBarNotification sbn,
+                                  RankingMap rankingMap, int reason) {
+    if (reason == REASON_LOCKDOWN_COMPAT) {
+        LockdownController.onLockdownEntered(getApplicationContext());
+    }
+    super.onNotificationRemoved(sbn, rankingMap, reason);
+}
+```
+
+**Gap: if no notifications are active when lockdown is entered, nothing fires** —
+the platform iterates an empty list. Close it with a composite check
+(`isDeviceLocked()` && active notifications just went non-empty → empty) and ship
+a manual panic action regardless.
+
+What does not work, so nobody re-litigates it: `KeyguardManager.isDeviceLocked()`
+/ `isKeyguardLocked()` / `isDeviceSecure()` cannot distinguish lockdown from an
+ordinary lock; `UserManager.isUserUnlocked()` tracks CE storage (BFU→AFU) and
+stays `true` through lockdown; `LockPatternUtils.StrongAuthTracker` is hidden-API
+blocked and signature-permission gated; `DevicePolicyManager.getStrongAuthRequired`
+does not exist; `Settings.Secure` has no runtime lockdown-state key
+(`lockdown_in_power_menu` only controls whether the button is shown).
+
+Exit has no reason code — detect via `ACTION_USER_PRESENT` following a
+`REASON_LOCKDOWN`. The platform re-posts every notification 20 ms apart on exit;
+suppress forwarding for ~2 s or the watch gets flooded.
+
+### 2. Response sequence
+
+```
+REASON_LOCKDOWN
+   │
+   ├─ t=0    send LOCK to watch
+   ├─ t=0    stop forwarding notifications; apply privacy mode
+   ├─ 0<t<10 retry LOCK on LOCK_ACK timeout; re-send on reconnect
+   └─ t=10s  disconnect device, then tear down Bluetooth
+```
+
+The 10-second delay leaves room for the `LOCK_ACK` round trip and a retry, while
+bounding the exposure window. Watch-side disconnect detection remains the
+backstop for a watch that never got the message.
+
+- **GB never calls `BluetoothAdapter.enable()`/`disable()` anywhere** (verified by
+  grep across the app), so the API-33 deprecation is a non-issue. Existing
+  teardown primitives: `GBApplication.deviceService().disconnect()` (fan-out via
+  `ACTION_DISCONNECT`, `model/DeviceService.java:58`, handled at
+  `DeviceCommunicationService.java:899`) and `GBApplication.quit()`
+  (`GBApplication.java:133`).
+- Turning the adapter genuinely off is not available silently on modern Android.
+  **Scope: disconnect the device and stop GB using the radio.** The UI must not
+  claim more.
+- Schedule the 10 s action with `Handler.postDelayed` on a foreground-service
+  context, not `WorkManager` — the latency requirement is tighter than
+  WorkManager's guarantees.
+
+### 3. Supporting `is_unfaithful` — the "resend everything" flag
+
+PebbleOS already has a resync signal and Gadgetbridge ignores it. Adding support
+is worth doing in its own right: it makes GB behave correctly against *stock*
+Pebble firmware after any factory reset or re-pair, not just for this feature.
+
+`bt_persistent_storage_is_unfaithful()` is reported in the version handshake
+(`system_versions.c:51,149`), set on first boot (`shell_event_loop.c:79`) and on
+re-pairing, cleared only after the phone issues a BlobDB `CLEAR`
+(`blob_db/endpoint.c:296-299`).
+
+GB's `case ENDPOINT_FIRMWAREVERSION:` (`PebbleProtocol.java:2447`) parses only
+the running-firmware metadata and stops after `hwRev` — 47 of 155 payload bytes.
+`is_unfaithful` is never reached. Verified layout of `struct VersionsMessage`
+(`system_versions.c:36-54`), all sizes confirmed from the headers:
+
+| Field | Size | Offset |
+|---|---|---|
+| `command` | 1 | 0 |
+| `running_fw_metadata` | 47 | 1 |
+| `recovery_fw_metadata` | 47 | 48 |
+| `boot_version` | 4 | 95 |
+| `hw_version[9]` | 9 | 99 |
+| `serial_number[12]` | 12 | 108 |
+| `device_address` | 6 | 120 |
+| `system_resources_version` | 8 | 126 |
+| `iso_locale[6]` | 6 | 134 |
+| `lang_version` | 2 | 140 |
+| `capabilities` | 8 | 142 |
+| **`is_unfaithful`** | **1** | **150** |
+| `activity_insights_version` | 2 | 151 |
+| `javascript_bytecode_version` | 2 | 153 |
+
+(`FirmwareMetadata` = 47 B: `firmware_metadata.h:68-86`. `capabilities` is a
+union over `uint64_t` = 8 B: `session_remote_version.h:15-43`. `BTDeviceAddress`
+= 6 B: `bluetooth_types.h:171-173`. `ResourceVersion` = two `uint32_t` = 8 B:
+`resource.h:25-30`.)
+
+GB stops at offset 47 (it never consumes `metadata_version`). Continue parsing
+sequentially with explicit skips rather than an absolute seek — self-documenting
+and it matches the struct:
+
+```java
+// ...existing parse ends after hwRev, at offset 47
+if (buf.remaining() >= 108) {          // rest of the message
+    buf.get();                          // metadata_version of running fw
+    buf.position(buf.position() + 47);  // recovery_fw_metadata
+    buf.getInt();                       // boot_version
+    buf.position(buf.position() + 9 + 12 + 6 + 8 + 6); // hw, serial, addr, res, locale
+    buf.getShort();                     // lang_version
+    buf.getLong();                      // capabilities
+    boolean isUnfaithful = buf.get() != 0;
+    if (isUnfaithful) {
+        // watch lost its data - clear all sync state and re-push everything
+    }
+}
+```
+
+Guard on `buf.remaining()` so older/shorter firmware messages do not throw.
+
+### 4. Forcing a full resync
+
+Triggered by either `is_unfaithful` or our `SHRED_COMPLETE`. A calendar resync
+requires clearing **two** layers — this is the part that is easy to get wrong:
+
+1. **The greenDAO table.** `CalendarSyncState` (generated at
+   `GBDaoGenerator.java:1377`; unique index on `deviceId`+`calendarEntryId`)
+   stores a per-event `hash`. `CalendarReceiver.syncCalendar()` treats an event as
+   already-on-watch when `calendarSyncState.getHash() == e.hashCode()`
+   (`CalendarReceiver.java:175`). Delete all rows for the device.
+2. **The in-memory cache.** `CalendarReceiver.eventState` is a per-instance
+   `Hashtable` with **no public invalidation method**. Clearing only the DB still
+   short-circuits here. Add a `clearSyncState()` method, or force receiver
+   recreation via `DeviceCommunicationService.setReceiversEnableState()`
+   (`DeviceCommunicationService.java:1392`).
+
+Only then broadcast `FORCE_CALENDAR_SYNC`. On its own that intent **does not
+force anything** — it calls `scheduleSync()`, which runs the same hash diff and
+concludes everything is synced. This is precisely the failure mode a watch-side
+shred would otherwise hit.
+
+Notifications need no state clearing (GB tracks none). Weather can reuse
+`encodeBlobDBClear(BLOBDB_WEATHER)` (`PebbleProtocol.java:785`, used at 1129).
+
+Incidental bug worth fixing while here: `PebbleProtocol.decodeBlobDb()`
+(line 2219) reads the response token and status, logs them, and **returns
+`null`** — GB never correlates BlobDB acks to requests and assumes every write
+succeeds.
+
+### 5. Adding the endpoint
+
+`PebbleProtocol.decodeResponse()` (`PebbleProtocol.java:2399`) is a plain switch
+on endpoint id; there is no registry. `ENDPOINT_HEALTH_SYNC = 911`
+(`PebbleProtocol.java:113`, encoder at 764, decoder case at 2690) is an existing
+custom endpoint in this tree — copy that pattern exactly.
+
+### 6. Settings
+
+- New `res/xml/lockdown_settings.xml`, registered in
+  `activities/SettingsActivity.java` (three-line pattern at lines 89-105 and
+  120-131, following `automations_settings.xml`).
+- Keys in `util/GBPrefs.java`; add a `PreferenceMigratorNN` if any key moves.
+- Reuse the Pebble privacy-mode plumbing (`PebbleSupport.java:192-206`, pref
+  `pebble_pref_privacy_mode`) for the notification-suppression half.
+
+## Phasing
+
+1. `lock_state` settings-file store + unit tests.
+2. `pfs_shred()` + `pfs_gc_deleted_sectors()` + tests against the flash emulator.
+3. Shred engine, driven from a console prompt command only.
+4. Early-boot hook + resume-after-interruption.
+5. Lock screen modal + button lockout.
+6. PIN entry window + attempt counter + escalation.
+7. Protocol endpoint + `SHRED_COMPLETE`.
+8. Disconnect deadline + RTC rollback guard.
+9. **GB: `is_unfaithful` parsing + full-resync path.** Independently useful;
+   land it first on the GB side.
+10. GB: lockdown detection, LOCK send, 10 s BT teardown.
+11. GB: `SHRED_COMPLETE` handling.
+12. Settings UI on watch; settings UI in Gadgetbridge.
+
+## Risks and open questions
+
+- **PRF gap.** SELECT+BACK+UP boots recovery firmware, which does not run
+  `services_normal_early_init()`. PRF is built from this tree
+  (`bluetooth_persistent_storage_prf.c` exists), so an equivalent hook can be
+  added — but a device carrying an older PRF image is unprotected. Needs a
+  decision.
+- **Health data survives a seizure.** Accepted trade; stated here so it stays a
+  conscious one.
+- **FTL retains stale physical pages.** `pfs_gc_deleted_sectors()` erases at the
+  PFS sector level, but the translation layer below it may have remapped pages we
+  cannot reach. Best-effort against chip-off.
+- **Lock-on-disconnect UX.** Locking every time the watch leaves BT range would be
+  miserable. Default off; when on, use a grace period.
+- **Flash wear.** The GC sweep erases sectors on every shred. Frequent triggering
+  costs NOR endurance — bounded, but worth measuring.
+- **GB cannot switch the Bluetooth adapter off** without privileged access.
+- **Zero-notification blind spot** in `REASON_LOCKDOWN` detection; the manual
+  panic action is the fallback, not a nicety.
+- **Endpoint ID 0x2C24 is self-assigned.**
+- Unverified: whether ANCS caches caller ID to flash (`ancs/ancs_phone_call.c`),
+  and whether the voice/audio endpoints buffer audio to flash. Both need a read
+  before finalising the shred target list.
