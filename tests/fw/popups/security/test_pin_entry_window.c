@@ -7,6 +7,7 @@
 
 #include "applib/touch_service.h"
 #include "popups/security/pin_entry_window.h"
+#include "pbl/util/math.h"
 
 // Stubs
 ////////////////////////////////////
@@ -225,6 +226,56 @@ void test_pin_entry_window__keys_are_laid_out_left_to_right_top_to_bottom(void) 
   // Columns line up.
   cl_assert_equal_i(first[0].x, first[3].x);
   cl_assert_equal_i(first[0].x, first[6].x);
+}
+
+//! The bounding box of a key, recovered from the hit test rather than from the
+//! layout arithmetic, so this measures what a finger would actually meet.
+static GRect prv_key_extent(char digit) {
+  int16_t min_x = TEST_W, min_y = TEST_H, max_x = -1, max_y = -1;
+  for (int16_t y = 0; y < TEST_H; ++y) {
+    for (int16_t x = 0; x < TEST_W; ++x) {
+      if (security_pin_entry_window_digit_at(&s_pin_window, GPoint(x, y)) == digit) {
+        min_x = MIN(min_x, x);
+        min_y = MIN(min_y, y);
+        max_x = MAX(max_x, x);
+        max_y = MAX(max_y, y);
+      }
+    }
+  }
+  cl_assert(max_x >= 0);
+  return GRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
+}
+
+// A key too small to hit reliably is a lock screen the user fights. Checked
+// against the hit test, not the drawing, because the hit test is what decides
+// whether the tap counted.
+void test_pin_entry_window__keys_are_big_enough_to_hit(void) {
+  for (int i = 0; i < SECURITY_PIN_PAD_KEYS; ++i) {
+    const GRect key = prv_key_extent((char)('1' + i));
+    cl_assert(key.size.w >= 30);
+    cl_assert(key.size.h >= 30);
+  }
+}
+
+void test_pin_entry_window__keys_stay_inside_the_screen(void) {
+  for (int i = 0; i < SECURITY_PIN_PAD_KEYS; ++i) {
+    const GRect key = prv_key_extent((char)('1' + i));
+    cl_assert(key.origin.x >= 0);
+    cl_assert(key.origin.y >= 0);
+    cl_assert(key.origin.x + key.size.w <= TEST_W);
+    cl_assert(key.origin.y + key.size.h <= TEST_H);
+  }
+}
+
+// All nine the same size, or the pad looks broken and the edge keys are harder
+// to hit than the middle one.
+void test_pin_entry_window__keys_are_uniform(void) {
+  const GRect first = prv_key_extent('1');
+  for (int i = 1; i < SECURITY_PIN_PAD_KEYS; ++i) {
+    const GRect key = prv_key_extent((char)('1' + i));
+    cl_assert_equal_i(first.size.w, key.size.w);
+    cl_assert_equal_i(first.size.h, key.size.h);
+  }
 }
 
 // The top strip carries the progress bar and the message, and a tap there must
