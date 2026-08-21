@@ -172,6 +172,11 @@ void security_pin_entry_window_set_message(SecurityPinEntryWindow *pin_window,
   layer_mark_dirty(&pin_window->window.layer);
 }
 
+void security_pin_entry_window_set_pin_len(SecurityPinEntryWindow *pin_window, uint8_t pin_len) {
+  pin_window->pin_len = MAX(SECURITY_LOCK_PIN_MIN_LEN, MIN(SECURITY_LOCK_PIN_MAX_LEN, pin_len));
+  security_pin_entry_window_reset(pin_window);
+}
+
 void security_pin_entry_window_reset(SecurityPinEntryWindow *pin_window) {
   memset(pin_window->digits, '0', sizeof(pin_window->digits));
   pin_window->cursor = 0;

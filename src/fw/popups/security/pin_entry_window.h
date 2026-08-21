@@ -57,6 +57,12 @@ void security_pin_entry_window_set_title(SecurityPinEntryWindow *pin_window, con
 //! Copied into the window; may be NULL to clear.
 void security_pin_entry_window_set_message(SecurityPinEntryWindow *pin_window, const char *message);
 
+//! Change how many digits are prompted for, clamped as in init. Resets entry,
+//! since anything typed so far was for a different length.
+//!
+//! Safe while the window is on a stack: it touches nothing the stack owns.
+void security_pin_entry_window_set_pin_len(SecurityPinEntryWindow *pin_window, uint8_t pin_len);
+
 //! Zero the entered digits and put the cursor back on the first one.
 void security_pin_entry_window_reset(SecurityPinEntryWindow *pin_window);
 
