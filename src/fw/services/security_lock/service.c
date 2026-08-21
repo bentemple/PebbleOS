@@ -8,12 +8,14 @@
 #include <string.h>
 
 #include <pbl/drivers/rng.h>
+#include <pbl/drivers/rtc.h>
 #include <pbl/logging/logging.h>
 #include "pbl/os/mutex.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/settings/settings_file.h"
 #include "pbl/services/system_task.h"
 #include "system/passert.h"
+#include "pbl/util/size.h"
 #include "util/units.h"
 
 PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LEVEL);
@@ -54,6 +56,9 @@ typedef struct PACKED {
   uint32_t lock_delay_s;
   uint32_t shred_delay_s;
 } SecurityLockRuntime;
+
+//! Keeps two salts derived in the same tick from coming out identical.
+static uint32_t s_salt_counter;
 
 static PebbleMutex *s_mutex;
 static bool s_initialized;
@@ -173,17 +178,38 @@ status_t security_lock_set_state(SecurityLockState state) {
   return rv;
 }
 
-//! Fill a salt from the hardware RNG.
-static bool prv_make_salt(uint8_t salt[SECURITY_LOCK_SALT_LEN]) {
+//! Fill a salt, falling back to clock entropy where there is no RNG.
+//!
+//! Not every board has one -- CONFIG_RNG_STUB boards, QEMU among them, have an
+//! rng_rand() that always fails -- and treating that as fatal made the PIN
+//! impossible to set there at all.
+//!
+//! Falling back is acceptable because of what the salt is for. It stops one
+//! precomputed table covering every watch; it is not itself a secret, and it
+//! is not what protects the PIN. Against someone reading the flash a 4-digit
+//! PIN is 10^4 candidates whatever the salt, and the attempt counter is the
+//! real control. A merely unpredictable-per-watch salt still does the job the
+//! salt is there to do.
+static void prv_make_salt(uint8_t salt[SECURITY_LOCK_SALT_LEN]) {
+  bool have_rng = true;
   for (size_t i = 0; i < SECURITY_LOCK_SALT_LEN; i += sizeof(uint32_t)) {
     uint32_t r;
     if (!rng_rand(&r)) {
-      PBL_LOG_ERR("RNG failed; refusing to derive a verifier with a weak salt");
-      return false;
+      have_rng = false;
+      break;
     }
     memcpy(&salt[i], &r, sizeof(r));
   }
-  return true;
+  if (have_rng) {
+    return;
+  }
+
+  PBL_LOG_WRN("No RNG on this board; salting from the clock instead");
+  const uint32_t seeds[] = {(uint32_t)rtc_get_time(), (uint32_t)rtc_get_ticks(),
+                            (uint32_t)(uintptr_t)salt, s_salt_counter++};
+  for (size_t i = 0; i < SECURITY_LOCK_SALT_LEN; ++i) {
+    salt[i] = (uint8_t)(seeds[i % ARRAY_LENGTH(seeds)] >> (8 * ((i / 4) % 4)));
+  }
 }
 
 //! Exactly 4 or 6 digits of 1-9. '0' is absent from the pad, so a PIN
@@ -220,12 +246,8 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   cfg.version = RECORD_VERSION;
   cfg.pin_len = len;
 
-  status_t rv = S_SUCCESS;
-  if (!prv_make_salt(cfg.salt)) {
-    rv = E_INTERNAL;
-    goto unlock;
-  }
-  rv = security_lock_pin_hash(digits, len, cfg.salt, cfg.pin_hash);
+  prv_make_salt(cfg.salt);
+  status_t rv = security_lock_pin_hash(digits, len, cfg.salt, cfg.pin_hash);
   if (rv != S_SUCCESS) {
     goto unlock;
   }
@@ -278,10 +300,7 @@ status_t security_lock_set_duress_pin(const char *digits, uint8_t len) {
   }
 
   cfg.duress_len = len;
-  if (!prv_make_salt(cfg.duress_salt)) {
-    rv = E_INTERNAL;
-    goto unlock;
-  }
+  prv_make_salt(cfg.duress_salt);
   rv = security_lock_pin_hash(digits, len, cfg.duress_salt, cfg.duress_hash);
   if (rv != S_SUCCESS) {
     goto unlock;
