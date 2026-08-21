@@ -17,6 +17,8 @@
 #include "pbl/services/blob_db/endpoint_private.h"
 #include "pbl/services/data_logging/data_logging_service.h"
 #include "pbl/services/filesystem/pfs.h"
+#include "pbl/services/security_lock.h"
+#include "pbl/services/security_lock_shred.h"
 #include "pbl/services/protobuf_log/protobuf_log.h"
 #include "pbl/services/music_internal.h"
 #include "pbl/services/notifications/alerts_private.h"
@@ -77,6 +79,14 @@ static bool prv_is_time_valid_for_activity_init(void) {
 
 void services_normal_early_init(void) {
   pfs_init(true);
+
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  // Deliberately here, right after the filesystem is mounted and before
+  // display_init(), bt_driver_init() or services_init(): if a shred is owed it
+  // must happen before a pixel is drawn or the radio comes up.
+  security_lock_init();
+  security_lock_handle_boot();
+#endif
 }
 
 void services_normal_init(void) {
@@ -85,6 +95,13 @@ void services_normal_init(void) {
   app_install_manager_init();
 
   blob_db_init_dbs();
+
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  // Bonding storage did not exist yet when a boot shred ran, so the
+  // "resend everything" flag is applied here instead.
+  security_lock_finish_boot_shred();
+#endif
+
   app_cache_init();
   phone_call_service_init();
   music_init();

@@ -823,6 +823,23 @@ void command_factory_reset(void) {
   factory_reset(false /* should_shutdown */);
 }
 
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+static void prv_security_shred_callback(void *unused) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+}
+#endif
+
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+#include "pbl/services/security_lock_shred.h"
+
+void command_security_shred(void) {
+  prompt_command_finish();
+  // Runs on the launcher task: the shred blocks for seconds on sector erases,
+  // which would otherwise stall the prompt's own task.
+  launcher_task_add_callback(prv_security_shred_callback, NULL);
+}
+#endif
+
 void command_factory_reset_fast(void) {
   prompt_command_finish();
 
