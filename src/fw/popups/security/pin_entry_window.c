@@ -150,6 +150,12 @@ void security_pin_entry_window_init(SecurityPinEntryWindow *pin_window, uint8_t 
   layer_set_update_proc(&pin_window->window.layer, prv_update_proc);
 }
 
+void security_pin_entry_window_set_cancelable(SecurityPinEntryWindow *pin_window, bool cancelable) {
+  // Nothing subscribes BACK either way; this only decides whether the stack
+  // below is allowed to act on it.
+  window_set_overrides_back_button(&pin_window->window, !cancelable);
+}
+
 void security_pin_entry_window_set_title(SecurityPinEntryWindow *pin_window, const char *title) {
   pin_window->title = title;
   layer_mark_dirty(&pin_window->window.layer);

@@ -131,6 +131,21 @@ void test_pin_entry_window__back_is_overridden_and_unbound(void) {
   cl_assert(s_handlers[BUTTON_ID_BACK] == NULL);
 }
 
+// Settings needs a prompt the user can walk away from, but the lock screen must
+// never get one, so the default has to stay "not cancelable" and BACK must stay
+// unsubscribed in both modes.
+void test_pin_entry_window__cancelable_only_when_asked_for(void) {
+  security_pin_entry_window_set_cancelable(&s_pin_window, true);
+  cl_assert(!s_overrides_back_button);
+  cl_assert(s_handlers[BUTTON_ID_BACK] == NULL);
+
+  security_pin_entry_window_set_cancelable(&s_pin_window, false);
+  cl_assert(s_overrides_back_button);
+
+  security_pin_entry_window_init(&s_pin_window, 4, prv_submit, NULL);
+  cl_assert(s_overrides_back_button);
+}
+
 void test_pin_entry_window__pin_len_is_clamped(void) {
   security_pin_entry_window_init(&s_pin_window, 0, prv_submit, NULL);
   cl_assert_equal_i(SECURITY_LOCK_PIN_MIN_LEN, s_pin_window.pin_len);
