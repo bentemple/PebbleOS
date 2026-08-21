@@ -178,19 +178,23 @@ status_t security_lock_set_state(SecurityLockState state) {
   return rv;
 }
 
-//! Fill a salt, falling back to clock entropy where there is no RNG.
+//! Fill a salt.
 //!
-//! Not every board has one -- CONFIG_RNG_STUB boards, QEMU among them, have an
-//! rng_rand() that always fails -- and treating that as fatal made the PIN
-//! impossible to set there at all.
+//! On a board with real RNG hardware a failure means that hardware is broken,
+//! and deriving a verifier from a predictable salt would be the wrong answer:
+//! we refuse instead, and the PIN is not set.
 //!
-//! Falling back is acceptable because of what the salt is for. It stops one
-//! precomputed table covering every watch; it is not itself a secret, and it
-//! is not what protects the PIN. Against someone reading the flash a 4-digit
-//! PIN is 10^4 candidates whatever the salt, and the attempt counter is the
-//! real control. A merely unpredictable-per-watch salt still does the job the
-//! salt is there to do.
-static void prv_make_salt(uint8_t salt[SECURITY_LOCK_SALT_LEN]) {
+//! CONFIG_RNG_STUB boards have no RNG by design -- qemu_emery among them, where
+//! rng_rand() always fails -- so refusing there would make the feature
+//! impossible to use or test at all. Those fall back to clock entropy. That is
+//! acceptable only because of what the salt is for: it stops one precomputed
+//! table covering every watch. It is not a secret and it is not what protects
+//! the PIN, which against someone reading the flash is 10^4 candidates whatever
+//! the salt. The attempt counter is the real control.
+//!
+//! @return false if no usable salt could be produced, in which case the caller
+//!         must not store anything.
+static bool prv_make_salt(uint8_t salt[SECURITY_LOCK_SALT_LEN]) {
   bool have_rng = true;
   for (size_t i = 0; i < SECURITY_LOCK_SALT_LEN; i += sizeof(uint32_t)) {
     uint32_t r;
@@ -201,15 +205,21 @@ static void prv_make_salt(uint8_t salt[SECURITY_LOCK_SALT_LEN]) {
     memcpy(&salt[i], &r, sizeof(r));
   }
   if (have_rng) {
-    return;
+    return true;
   }
 
+#if defined(CONFIG_RNG_STUB)
   PBL_LOG_WRN("No RNG on this board; salting from the clock instead");
   const uint32_t seeds[] = {(uint32_t)rtc_get_time(), (uint32_t)rtc_get_ticks(),
                             (uint32_t)(uintptr_t)salt, s_salt_counter++};
   for (size_t i = 0; i < SECURITY_LOCK_SALT_LEN; ++i) {
     salt[i] = (uint8_t)(seeds[i % ARRAY_LENGTH(seeds)] >> (8 * ((i / 4) % 4)));
   }
+  return true;
+#else
+  PBL_LOG_ERR("RNG failed on a board that has one; refusing to set a PIN");
+  return false;
+#endif
 }
 
 //! Exactly 4 or 6 digits of 1-9. '0' is absent from the pad, so a PIN
@@ -246,8 +256,12 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   cfg.version = RECORD_VERSION;
   cfg.pin_len = len;
 
-  prv_make_salt(cfg.salt);
-  status_t rv = security_lock_pin_hash(digits, len, cfg.salt, cfg.pin_hash);
+  status_t rv;
+  if (!prv_make_salt(cfg.salt)) {
+    rv = E_INTERNAL;
+    goto unlock;
+  }
+  rv = security_lock_pin_hash(digits, len, cfg.salt, cfg.pin_hash);
   if (rv != S_SUCCESS) {
     goto unlock;
   }
@@ -300,7 +314,10 @@ status_t security_lock_set_duress_pin(const char *digits, uint8_t len) {
   }
 
   cfg.duress_len = len;
-  prv_make_salt(cfg.duress_salt);
+  if (!prv_make_salt(cfg.duress_salt)) {
+    rv = E_INTERNAL;
+    goto unlock;
+  }
   rv = security_lock_pin_hash(digits, len, cfg.duress_salt, cfg.duress_hash);
   if (rv != S_SUCCESS) {
     goto unlock;

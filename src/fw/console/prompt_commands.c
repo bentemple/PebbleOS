@@ -824,7 +824,32 @@ void command_factory_reset(void) {
 }
 
 #if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+#include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_shred.h"
+
+//! One machine-readable line of lock state, so an end-to-end test can assert on
+//! what the watch actually believes rather than on what a screenshot looks like.
+//!
+//! Deliberately reports no duress state: the console is reachable from a seized
+//! watch, and whether a duress PIN exists is exactly the secret.
+void command_security_status(void) {
+  char buf[160];
+  const time_t now = rtc_get_time();
+  const time_t lock_deadline = security_lock_get_lock_deadline();
+  const time_t shred_deadline = security_lock_get_shred_deadline();
+
+  snprintf(buf, sizeof(buf),
+           "state=%d pin_len=%u attempts=%u shred_pending=%d lock_in=%d shred_in=%d "
+           "lock_delay=%u shred_delay=%u",
+           (int)security_lock_get_state(), (unsigned)security_lock_get_pin_len(),
+           (unsigned)security_lock_get_failed_attempts(),
+           (int)security_lock_is_shred_pending(),
+           (lock_deadline == 0) ? -1 : (int)(lock_deadline - now),
+           (shred_deadline == 0) ? -1 : (int)(shred_deadline - now),
+           (unsigned)security_lock_get_lock_delay_s(),
+           (unsigned)security_lock_get_shred_delay_s());
+  prompt_send_response(buf);
+}
 
 static void prv_security_shred_callback(void *unused) {
   security_lock_shred(SecurityShredReasonManualPanic);

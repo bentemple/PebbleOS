@@ -19,6 +19,7 @@
 #include "pbl/services/notifications/notification_storage.h"
 #include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_endpoint.h"
+#include "pbl/services/system_task.h"
 #include "pbl/services/timeline/event.h"
 #include "pbl/util/size.h"
 
@@ -117,8 +118,15 @@ static void prv_erase_flash_region(uint32_t begin, uint32_t end, const char *wha
 //! once the Bluetooth stack exists. See security_lock_finish_boot_shred().
 static bool s_boot_shred_pending_notify;
 
-static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running) {
+static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool sweep) {
   PBL_LOG_INFO("Shredding: %s", security_lock_shred_reason_str(reason));
+
+  // Erasing takes seconds and there is no way to yield through it, so the
+  // watchdog has to stop supervising this task or it resets us mid-wipe --
+  // which, since a reboot while locked shreds again, is a boot loop rather
+  // than a one-off. factory_reset_fast() does the same for the same reason.
+  const PebbleTask task = pebble_task_get_current();
+  task_watchdog_mask_clear(task);
 
   // Set before anything is destroyed so a shred interrupted by power loss is
   // resumed at next boot rather than left half done.
@@ -175,9 +183,16 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running) {
   // Zeroing each file kills the live copy, but earlier garbage collection,
   // settings_file compaction and OP_FLAG_OVERWRITE writes scatter superseded
   // copies with no record of where. This is the only thing that reaches those.
-  status_t gc_rv = pfs_gc_deleted_sectors();
-  if (gc_rv != S_SUCCESS) {
-    PBL_LOG_ERR("Shred sweep incomplete: %" PRId32, (int32_t)gc_rv);
+  //
+  // It is also the slow half: a sector erase is ~150ms and the filesystem is
+  // hundreds of sectors. At early boot it is deferred rather than run inline,
+  // because blocking services_normal_early_init() for that long leaves the
+  // watch sitting on the boot splash looking dead.
+  if (sweep) {
+    status_t gc_rv = pfs_gc_deleted_sectors();
+    if (gc_rv != S_SUCCESS) {
+      PBL_LOG_ERR("Shred sweep incomplete: %" PRId32, (int32_t)gc_rv);
+    }
   }
 
   if (dbs_running) {
@@ -207,6 +222,7 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running) {
 
   security_lock_set_shred_pending(false);
 
+  task_watchdog_mask_set(task);
   PBL_LOG_INFO("Shred complete, wiped bitmap 0x%" PRIx32, wiped);
 
 #if !defined(CONFIG_RECOVERY_FW)
@@ -222,11 +238,20 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running) {
 }
 
 uint32_t security_lock_shred(SecurityShredReason reason) {
-  return prv_shred(reason, true /* dbs_running */);
+  return prv_shred(reason, true /* dbs_running */, true /* sweep */);
+}
+
+//! Runs the sweep that security_lock_shred_early() skipped.
+static void prv_deferred_sweep(void *unused) {
+  PBL_LOG_DBG("Running deferred shred sweep");
+  const PebbleTask task = pebble_task_get_current();
+  task_watchdog_mask_clear(task);
+  pfs_gc_deleted_sectors();
+  task_watchdog_mask_set(task);
 }
 
 uint32_t security_lock_shred_early(SecurityShredReason reason) {
-  return prv_shred(reason, false /* dbs_running */);
+  return prv_shred(reason, false /* dbs_running */, false /* sweep */);
 }
 
 void security_lock_handle_boot(void) {
@@ -276,6 +301,10 @@ void security_lock_finish_boot_shred(void) {
     return;
   }
   s_boot_shred_pending_notify = false;
+  // The boot shred zeroed the files but skipped the sector sweep to keep boot
+  // quick; catch up now that the system is running and can do it in the
+  // background.
+  system_task_add_callback(prv_deferred_sweep, NULL);
   bt_persistent_storage_set_unfaithful(true);
   PBL_LOG_DBG("Marked unfaithful after boot shred");
 #endif

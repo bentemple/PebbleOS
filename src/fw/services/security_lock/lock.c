@@ -3,6 +3,7 @@
 
 #include "pbl/services/security_lock_endpoint.h"
 #include "pbl/services/security_lock_ui.h"
+#include "pbl/services/system_task.h"
 
 #include <inttypes.h>
 
@@ -49,13 +50,17 @@ static void prv_release_ui_lockout(void) {
   modal_manager_set_min_priority(ModalPriorityMin);
 }
 
+static void prv_shred_callback(void *data) {
+  security_lock_shred((SecurityShredReason)(uintptr_t)data);
+}
+
 void security_lock_engage(SecurityShredReason reason) {
   PBL_ASSERT_TASK(PebbleTask_KernelMain);
 
   const uint8_t pin_len = security_lock_get_pin_len();
   if (pin_len < SECURITY_LOCK_PIN_MIN_LEN || pin_len > SECURITY_LOCK_PIN_MAX_LEN) {
     PBL_LOG_WRN("No PIN configured; shredding without locking");
-    security_lock_shred(reason);
+    system_task_add_callback(prv_shred_callback, (void *)(uintptr_t)reason);
     return;
   }
 
@@ -85,7 +90,10 @@ void security_lock_engage(SecurityShredReason reason) {
     compositor_display_update(NULL);
   }
 
-  security_lock_shred(reason);
+  // Handed to KernelBG rather than run here. The wipe takes seconds of flash
+  // erases, and doing that on KernelMain freezes the watch solid for the
+  // duration -- the lock screen would not even draw.
+  system_task_add_callback(prv_shred_callback, (void *)(uintptr_t)reason);
 }
 
 void security_lock_disengage(void) {
