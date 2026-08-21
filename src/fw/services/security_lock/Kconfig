@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Core Devices LLC
+# SPDX-License-Identifier: Apache-2.0
+
+config SERVICE_SECURITY_LOCK
+    bool "Security lock"
+    help
+      PIN lock and data shred triggered by phone lockdown or watch-side
+      tamper signals. See docs/proposals/security-lockdown.md.
+
+if SERVICE_SECURITY_LOCK
+
+module = SERVICE_SECURITY_LOCK
+module-str = Security lock
+source "subsys/logging/Kconfig.template.log_level"
+
+endif
