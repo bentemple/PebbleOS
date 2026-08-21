@@ -16,6 +16,7 @@
 #include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/security_lock_ui.h"
+#include "pbl/services/touch/touch.h"
 #include "system/passert.h"
 
 //! Statically allocated on purpose. There is only ever one lock screen, and
@@ -26,6 +27,10 @@ static bool s_visible;
 
 //! The window keeps a pointer rather than a copy, so this has to outlive it.
 static char s_title[24];
+
+//! The global touch setting as we found it, so forcing it on for the pad does
+//! not quietly turn it on for good.
+static bool s_touch_was_enabled = true;
 
 static void prv_shred_callback(void *unused) {
   security_lock_shred(SecurityShredReasonPinAttemptsExhausted);
@@ -85,6 +90,17 @@ void security_lock_screen_push(void) {
   security_pin_entry_window_init(&s_pin_window, pin_len, prv_submit, NULL);
   security_pin_entry_window_set_title(&s_pin_window, s_title);
 
+  // The pad is the only way in, so the global touch switch cannot be allowed to
+  // stand between the user and their watch. Someone who turned touch off for a
+  // swim and then locked would otherwise have no input at all, and a reboot
+  // re-shreds and comes back locked -- an unrecoverable watch. Restored on the
+  // way out so the user's setting survives the lock.
+  s_touch_was_enabled = touch_service_is_globally_enabled();
+  if (!s_touch_was_enabled) {
+    PBL_LOG_DBG("Forcing touch on for the lock screen");
+    touch_service_set_globally_enabled(true);
+  }
+
   // engage() already did this when the watch locked, but a watch that rebooted
   // into the locked state never ran it. Idempotent.
   security_lock_ui_lockout();
@@ -104,6 +120,10 @@ void security_lock_screen_pop(void) {
   s_visible = false;
   security_pin_entry_window_reset(&s_pin_window);
   window_stack_remove(&s_pin_window.window, true /* animated */);
+
+  if (!s_touch_was_enabled) {
+    touch_service_set_globally_enabled(false);
+  }
 }
 
 bool security_lock_screen_is_visible(void) {
