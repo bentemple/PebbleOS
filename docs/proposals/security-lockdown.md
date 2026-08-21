@@ -321,7 +321,7 @@ on `STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN` calls
 data leaking."*
 
 `NotificationListener.java` currently overrides only the 2-arg
-`onNotificationRemoved(sbn)` (**line 1028**); the 3-arg variant carrying `reason`
+`onNotificationRemoved(sbn)` (**line 1057**); the 3-arg variant carrying `reason`
 is free to add.
 
 ```java
@@ -375,7 +375,7 @@ backstop for a watch that never got the message.
   grep across the app), so the API-33 deprecation is a non-issue. Existing
   teardown primitives: `GBApplication.deviceService().disconnect()` (fan-out via
   `ACTION_DISCONNECT`, `model/DeviceService.java:58`, handled at
-  `DeviceCommunicationService.java:899`) and `GBApplication.quit()`
+  `DeviceCommunicationService.java:669`) and `GBApplication.quit()`
   (`GBApplication.java:133`).
 - Turning the adapter genuinely off is not available silently on modern Android.
   **Scope: disconnect the device and stop GB using the radio.** The UI must not
@@ -428,13 +428,11 @@ and it matches the struct:
 
 ```java
 // ...existing parse ends after hwRev, at offset 47
-if (buf.remaining() >= 108) {          // rest of the message
-    buf.get();                          // metadata_version of running fw
-    buf.position(buf.position() + 47);  // recovery_fw_metadata
-    buf.getInt();                       // boot_version
-    buf.position(buf.position() + 9 + 12 + 6 + 8 + 6); // hw, serial, addr, res, locale
-    buf.getShort();                     // lang_version
-    buf.getLong();                      // capabilities
+// Skip metadata_version, recovery_fw_metadata, boot_version, hw_version,
+// serial_number, device_address, system_resources_version, iso_locale,
+// lang_version and capabilities. Sizes mirror struct VersionsMessage.
+if (length >= bytesParsed + VERSIONS_IS_UNFAITHFUL_SKIP + 1) {
+    buf.position(buf.position() + VERSIONS_IS_UNFAITHFUL_SKIP);  // == 103
     boolean isUnfaithful = buf.get() != 0;
     if (isUnfaithful) {
         // watch lost its data - clear all sync state and re-push everything
@@ -442,7 +440,15 @@ if (buf.remaining() >= 108) {          // rest of the message
 }
 ```
 
-Guard on `buf.remaining()` so older/shorter firmware messages do not throw.
+**Bound the read with the message's own `length` header, not
+`buf.remaining()`.** An earlier draft of this document said to use
+`buf.remaining()`; that is wrong and unsafe. `PebbleIoThread` hands
+`decodeResponse()` a *reused, fixed 8192-byte* array and the decoder does
+`ByteBuffer.wrap()` over the whole thing, so `remaining()` reports
+`8192 - position` rather than how much of *this* message is left. Against a
+truncated message from older firmware it would happily read leftover bytes from
+the previous message and could report a fabricated `is_unfaithful`, triggering a
+spurious full resync. Keep `buf.remaining()` only as a secondary bounds check.
 
 ### 4. Forcing a full resync
 
@@ -466,7 +472,7 @@ concludes everything is synced. This is precisely the failure mode a watch-side
 shred would otherwise hit.
 
 Notifications need no state clearing (GB tracks none). Weather can reuse
-`encodeBlobDBClear(BLOBDB_WEATHER)` (`PebbleProtocol.java:785`, used at 1129).
+`encodeBlobDBClear(BLOBDB_WEATHER)` (`PebbleProtocol.java:795`).
 
 Incidental bug worth fixing while here: `PebbleProtocol.decodeBlobDb()`
 (line 2219) reads the response token and status, logs them, and **returns
@@ -477,14 +483,14 @@ succeeds.
 
 `PebbleProtocol.decodeResponse()` (`PebbleProtocol.java:2399`) is a plain switch
 on endpoint id; there is no registry. `ENDPOINT_HEALTH_SYNC = 911`
-(`PebbleProtocol.java:113`, encoder at 764, decoder case at 2690) is an existing
+(`PebbleProtocol.java:115`, encoder at 770, decoder case at 2788) is an existing
 custom endpoint in this tree — copy that pattern exactly.
 
 ### 6. Settings
 
 - New `res/xml/lockdown_settings.xml`, registered in
-  `activities/SettingsActivity.java` (three-line pattern at lines 89-105 and
-  120-131, following `automations_settings.xml`).
+  `activities/SettingsActivity.java` (search index and click routing around lines 110-120 and 150-160, following
+  `MapsSettingsActivity`).
 - Keys in `util/GBPrefs.java`; add a `PreferenceMigratorNN` if any key moves.
 - Reuse the Pebble privacy-mode plumbing (`PebbleSupport.java:192-206`, pref
   `pebble_pref_privacy_mode`) for the notification-suppression half.
