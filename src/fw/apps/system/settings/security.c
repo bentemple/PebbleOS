@@ -324,8 +324,15 @@ static void prv_push_pin_prompt(SettingsSecurityData *data, PinStage stage, PinT
   app_window_stack_push(&data->pin_window.window, true /* animated */);
 }
 
-//! Changing any PIN needs the phone, so say so before asking for one rather
-//! than taking an entry the store is going to refuse.
+//! Say the phone is needed before asking for a PIN, rather than taking an entry
+//! the store is going to refuse.
+//!
+//! Mirrors what the store actually enforces, which is narrower than "any
+//! change": replacing or removing an existing secret needs the phone, because
+//! that is what someone holding only the watch would want to do. Setting a
+//! first PIN, or adding a duress PIN, protects something rather than
+//! disarming it and is allowed offline -- otherwise the feature could not be
+//! turned on at all by anyone whose watch is not currently paired.
 static bool prv_require_phone(SettingsSecurityData *data) {
   if (connection_service_peek_pebble_app_connection()) {
     return true;
@@ -506,10 +513,11 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
 
   switch (prv_item_from_row(data, row)) {
     case SettingsSecurityPin:
-      if (prv_require_phone(data)) {
-        prv_push_pin_prompt(data,
-                            prv_pin_is_set(data) ? PinStageAuthorizeSet : PinStageNewFirst,
-                            PinTargetMain);
+      if (!prv_pin_is_set(data)) {
+        // The first one needs no phone: there is nothing yet to protect.
+        prv_push_pin_prompt(data, PinStageNewFirst, PinTargetMain);
+      } else if (prv_require_phone(data)) {
+        prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetMain);
       }
       break;
     case SettingsSecurityPinLength:
@@ -518,9 +526,10 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
     case SettingsSecurityDuressPin:
       // Always straight to setting a new one. Asking "set or clear?" would
       // answer the question the menu exists to refuse to answer.
-      if (prv_require_phone(data)) {
-        prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetDuress);
-      }
+      //
+      // No phone check: adding a duress PIN arms a defence rather than
+      // disarming one, and the store allows it offline.
+      prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetDuress);
       break;
     case SettingsSecurityClearPin:
       if (prv_require_phone(data)) {

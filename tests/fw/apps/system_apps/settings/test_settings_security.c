@@ -36,7 +36,8 @@ static uint8_t s_stored_duress_len;
 static uint8_t s_failed_attempts;
 static int s_reset_attempts_calls;
 static int s_engage_calls;
-//! The real store refuses to change any PIN without a phone session.
+//! The real store refuses to REPLACE or REMOVE a secret without a phone
+//! session. Setting a first PIN, or adding a duress PIN, is allowed offline.
 static bool s_phone_connected = true;
 
 uint8_t security_lock_get_pin_len(void) {
@@ -44,7 +45,7 @@ uint8_t security_lock_get_pin_len(void) {
 }
 
 status_t security_lock_set_pin(const char *digits, uint8_t len) {
-  if (!s_phone_connected) {
+  if ((s_stored_pin_len != 0) && !s_phone_connected) {
     return E_INVALID_OPERATION;
   }
   if (len < SECURITY_LOCK_PIN_MIN_LEN || len > SECURITY_LOCK_PIN_MAX_LEN) {
@@ -57,9 +58,7 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
 }
 
 status_t security_lock_set_duress_pin(const char *digits, uint8_t len) {
-  if (!s_phone_connected) {
-    return E_INVALID_OPERATION;
-  }
+  // No phone check: adding one arms a defence rather than disarming one.
   if (s_stored_pin_len == 0) {
     return E_INVALID_OPERATION;
   }
@@ -497,30 +496,52 @@ void test_settings_security__clearing_the_pin_takes_the_duress_pin_with_it(void)
 // Needing the phone
 ////////////////////////////////////
 
-void test_settings_security__set_pin_asks_for_the_phone_first(void) {
+// Requiring a phone to set the FIRST PIN would make the feature impossible to
+// turn on for anyone whose watch is not currently paired.
+void test_settings_security__the_first_pin_needs_no_phone(void) {
   s_phone_connected = false;
   prv_open_settings();
 
   prv_select(ROW_SET_PIN);
+  cl_assert(s_prompt != NULL);
+  cl_assert_equal_i(0, s_simple_dialog_pushes);
 
-  // No prompt at all: taking an entry the store is going to refuse would waste
-  // the user's time and then fail for a reason they could not have guessed.
-  cl_assert(s_prompt == NULL);
-  cl_assert_equal_i(1, s_simple_dialog_pushes);
-  cl_assert_equal_s("Connect your phone to change your PIN", s_simple_dialog_text);
+  prv_submit("1234");
+  prv_submit("1234");
+  cl_assert_equal_i(4, security_lock_get_pin_len());
 }
 
-void test_settings_security__every_pin_change_asks_for_the_phone(void) {
+// Arming a defence, not disarming one, so it follows the same rule.
+void test_settings_security__adding_a_duress_pin_needs_no_phone(void) {
   prv_install_pin("1234");
   prv_open_settings();
   s_phone_connected = false;
 
-  const uint16_t rows[] = {ROW_CHANGE_PIN, ROW_DURESS_PIN, ROW_CLEAR_PIN};
+  prv_select(ROW_DURESS_PIN);
+  cl_assert(s_prompt != NULL);
+  cl_assert_equal_i(0, s_simple_dialog_pushes);
+
+  prv_submit("1234");
+  prv_submit("5678");
+  prv_submit("5678");
+  cl_assert_equal_i(4, s_stored_duress_len);
+}
+
+// Replacing or removing an existing secret is what the phone rule is for.
+void test_settings_security__replacing_or_removing_asks_for_the_phone(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  s_phone_connected = false;
+
+  const uint16_t rows[] = {ROW_CHANGE_PIN, ROW_CLEAR_PIN};
   for (int i = 0; i < (int)ARRAY_LENGTH(rows); ++i) {
     s_simple_dialog_pushes = 0;
     prv_select(rows[i]);
+    // No prompt at all: taking an entry the store is going to refuse would
+    // waste the user's time and then fail for a reason they could not guess.
     cl_assert(s_prompt == NULL);
     cl_assert_equal_i(1, s_simple_dialog_pushes);
+    cl_assert_equal_s("Connect your phone to change your PIN", s_simple_dialog_text);
   }
 }
 
@@ -536,17 +557,20 @@ void test_settings_security__lock_now_still_works_without_a_phone(void) {
   cl_assert_equal_i(0, s_simple_dialog_pushes);
 }
 
-// The phone can go away between opening the prompt and submitting it.
+// The phone can go away between opening the prompt and submitting it, so the
+// up-front check cannot be the only one.
 void test_settings_security__a_refusal_mid_flow_says_why(void) {
+  prv_install_pin("1234");
   prv_open_settings();
-  prv_select(ROW_SET_PIN);
+  prv_select(ROW_CHANGE_PIN);
   cl_assert(s_prompt != NULL);
 
   s_phone_connected = false;
   prv_submit("1234");
-  prv_submit("1234");
+  prv_submit("5678");
+  prv_submit("5678");
 
-  cl_assert_equal_i(0, security_lock_get_pin_len());
+  cl_assert(security_lock_verify_pin("1234", 4, NULL));
   // Still on the prompt, with the reason on screen rather than silently back in
   // the menu with nothing changed.
   cl_assert(s_prompt != NULL);
