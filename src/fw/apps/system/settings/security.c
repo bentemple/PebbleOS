@@ -9,7 +9,6 @@
 #include "option_menu.h"
 #include "window.h"
 
-#include "applib/connection_service.h"
 #include "applib/ui/app_window_stack.h"
 #include "applib/ui/dialogs/dialog.h"
 #include "applib/ui/dialogs/expandable_dialog.h"
@@ -217,7 +216,6 @@ static void prv_begin_new_pin(SettingsSecurityData *data) {
 //! only ever be reached by someone who just typed their own real PIN.
 static void prv_report_store_failure(SettingsSecurityData *data, status_t rv) {
   if (rv == E_INVALID_OPERATION) {
-    prv_set_prompt_message(data, i18n_noop("Connect your phone to change your PIN"));
   } else if (rv == E_INVALID_ARGUMENT) {
     prv_set_prompt_message(data, i18n_noop("Must differ from your PIN"));
   } else {
@@ -324,30 +322,6 @@ static void prv_push_pin_prompt(SettingsSecurityData *data, PinStage stage, PinT
   app_window_stack_push(&data->pin_window.window, true /* animated */);
 }
 
-//! Say the phone is needed before asking for a PIN, rather than taking an entry
-//! the store is going to refuse.
-//!
-//! Mirrors what the store actually enforces, which is narrower than "any
-//! change": replacing or removing an existing secret needs the phone, because
-//! that is what someone holding only the watch would want to do. Setting a
-//! first PIN, or adding a duress PIN, protects something rather than
-//! disarming it and is allowed offline -- otherwise the feature could not be
-//! turned on at all by anyone whose watch is not currently paired.
-static bool prv_require_phone(SettingsSecurityData *data) {
-  if (connection_service_peek_pebble_app_connection()) {
-    return true;
-  }
-  SimpleDialog *dialog = simple_dialog_create(WINDOW_NAME("No Phone"));
-  if (!dialog) {
-    return false;
-  }
-  Dialog *base = simple_dialog_get_dialog(dialog);
-  dialog_set_text(base, i18n_get("Connect your phone to change your PIN", data));
-  dialog_set_icon(base, RESOURCE_ID_GENERIC_WARNING_LARGE);
-  dialog_set_timeout(base, DIALOG_TIMEOUT_INFINITE);
-  app_simple_dialog_push(dialog);
-  return false;
-}
 
 // PIN length
 //////////////////////////////////////////////////////////////////////////////
@@ -514,12 +488,8 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
   switch (prv_item_from_row(data, row)) {
     case SettingsSecurityPin:
       if (!prv_pin_is_set(data)) {
-        // The first one needs no phone: there is nothing yet to protect.
         prv_push_pin_prompt(data, PinStageNewFirst, PinTargetMain);
-      } else if (prv_require_phone(data)) {
-        prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetMain);
-      }
-      break;
+      } else       break;
     case SettingsSecurityPinLength:
       prv_length_menu_push(data);
       break;
@@ -527,15 +497,10 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
       // Always straight to setting a new one. Asking "set or clear?" would
       // answer the question the menu exists to refuse to answer.
       //
-      // No phone check: adding a duress PIN arms a defence rather than
-      // disarming one, and the store allows it offline.
       prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetDuress);
       break;
     case SettingsSecurityClearPin:
-      if (prv_require_phone(data)) {
-        prv_push_pin_prompt(data, PinStageAuthorizeClear, PinTargetMain);
-      }
-      break;
+            break;
     case SettingsSecurityLockNow:
       prv_lock_now_push(data);
       break;

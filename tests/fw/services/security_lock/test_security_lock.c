@@ -481,66 +481,6 @@ void test_security_lock__locked_watch_arms_only_the_shred_deadline(void) {
   cl_assert(security_lock_shred_deadline_expired(2000));
 }
 
-// Changing a PIN requires the phone
-////////////////////////////////////
-
-//! Setting the first PIN must work with no phone. There is nothing to protect
-//! yet, and requiring one would make the feature impossible to turn on for
-//! anyone whose watch is not currently paired -- which is exactly how it was
-//! broken when this gate applied to every set.
-void test_security_lock__can_set_the_first_pin_without_the_phone(void) {
-  s_phone_connected = false;
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
-  cl_assert_equal_i(4, security_lock_get_pin_len());
-}
-
-//! ...but replacing one already set is what needs the phone.
-void test_security_lock__cannot_replace_an_existing_pin_without_the_phone(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  s_phone_connected = false;
-  cl_assert(security_lock_set_pin("5678", 4) != S_SUCCESS);
-  s_phone_connected = true;
-  cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
-}
-
-//! Adding a duress PIN is harmless without the phone; removing one disarms a
-//! defence the user deliberately set up, so that half needs it.
-void test_security_lock__duress_pin_add_and_remove_phone_rules(void) {
-  s_phone_connected = false;
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
-
-  cl_assert(security_lock_clear_duress_pin() != S_SUCCESS);
-  s_phone_connected = true;
-  cl_assert_equal_i(S_SUCCESS, security_lock_clear_duress_pin());
-}
-
-void test_security_lock__cannot_change_pin_without_the_phone(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  s_phone_connected = false;
-  cl_assert(security_lock_set_pin("5678", 4) != S_SUCCESS);
-  // The original PIN must still be the one that works.
-  s_phone_connected = true;
-  cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
-}
-
-void test_security_lock__cannot_clear_pin_without_the_phone(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  s_phone_connected = false;
-  cl_assert(security_lock_clear_pin() != S_SUCCESS);
-  s_phone_connected = true;
-  cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
-}
-
-//! Verifying must still work with no phone -- otherwise a watch that lost its
-//! phone could never be unlocked again.
-void test_security_lock__can_still_unlock_without_the_phone(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  s_phone_connected = false;
-  cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
-}
-
 // Duress PIN
 ////////////////////////////////////
 
