@@ -59,6 +59,7 @@
 #if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
 #include "popups/security/lock_screen.h"
 #include "pbl/services/security_lock.h"
+#include "pbl/services/security_lock_endpoint.h"
 #endif
 #include "shell/normal/app_idle_timeout.h"
 #include "shell/normal/watchface.h"
@@ -561,6 +562,9 @@ static NOINLINE void prv_extended_event_handler(PebbleEvent* e) {
     case PEBBLE_COMM_SESSION_EVENT: {
       PebbleCommSessionEvent *comm_session_event = &e->bluetooth.comm_session_event;
       debounced_connection_service_handle_event(comm_session_event);
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+      security_lock_handle_comm_session_event(comm_session_event);
+#endif
       put_bytes_handle_comm_session_event(comm_session_event);
 #ifndef CONFIG_RECOVERY_FW
       if (comm_session_event->is_system) {

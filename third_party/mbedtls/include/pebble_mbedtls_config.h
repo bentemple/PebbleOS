@@ -5,10 +5,9 @@
 
 #pragma once
 
-/* Minimal Mbed TLS configuration for PebbleOS. Only the primitives the
- * firmware actually uses are enabled: AES-128 (ECB/CMAC) and P-256 ECDH for
- * the NimBLE host (SM pairing and GATT database hash), plus SHA-256 for the
- * security lock's PIN verifier.
+/* Minimal Mbed TLS configuration for PebbleOS. Only the primitives required
+ * by the NimBLE host (SM pairing and GATT database hash) are enabled:
+ * AES-128 (ECB/CMAC) and P-256 ECDH.
  */
 
 #include <stddef.h>
@@ -26,13 +25,6 @@ void kernel_free(void *ptr);
 #define MBEDTLS_AES_ROM_TABLES
 #define MBEDTLS_CIPHER_C
 #define MBEDTLS_CMAC_C
-
-/* Used by the security lock so the user's PIN is not stored in cleartext.
- * SHA-256 only: PBKDF2 would additionally need MBEDTLS_MD_C and
- * MBEDTLS_PKCS5_C, and against a 4-digit PIN (10^4 candidates, recoverable
- * offline by anyone who can read the flash) the stronger KDF buys nothing.
- * See docs/proposals/security-lockdown.md. */
-#define MBEDTLS_SHA256_C
 
 #define MBEDTLS_BIGNUM_C
 #define MBEDTLS_ECP_C

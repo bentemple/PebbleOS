@@ -18,6 +18,7 @@
 #include "pbl/services/data_logging/data_logging_service.h"
 #include "pbl/services/filesystem/pfs.h"
 #include "pbl/services/security_lock.h"
+#include "pbl/services/security_lock_endpoint.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/protobuf_log/protobuf_log.h"
 #include "pbl/services/music_internal.h"
@@ -100,6 +101,7 @@ void services_normal_init(void) {
   // Bonding storage did not exist yet when a boot shred ran, so the
   // "resend everything" flag is applied here instead.
   security_lock_finish_boot_shred();
+  security_lock_endpoint_init();
 #endif
 
   app_cache_init();

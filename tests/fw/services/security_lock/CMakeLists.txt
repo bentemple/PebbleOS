@@ -24,3 +24,9 @@ pbl_clar_test(test_security_lock
   DEFINES DUMA_DISABLED
   OVERRIDES dummy_board
 )
+
+pbl_clar_test(test_sha256
+  SOURCES
+    src/fw/services/security_lock/sha256.c
+  OVERRIDES dummy_board
+)

@@ -5,6 +5,8 @@ pbl_library()
 pbl_library_sources(
   service.c
   pin_hash.c
+  sha256.c
   shred.c
   lock.c
+  endpoint.c
 )

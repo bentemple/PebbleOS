@@ -5,7 +5,7 @@
 
 #include <string.h>
 
-#include <mbedtls/sha256.h>
+#include "sha256.h"
 
 //! Iterated to make casual recovery of the PIN string cost something. At
 //! roughly 35us per SHA-256 block on a 64MHz M4 this is a few hundred
@@ -29,26 +29,16 @@ status_t security_lock_pin_hash(const char *digits, uint8_t len,
   memcpy(buf, salt, SECURITY_LOCK_SALT_LEN);
   memcpy(buf + SECURITY_LOCK_SALT_LEN, digits, len);
 
-  status_t rv = S_SUCCESS;
-  if (mbedtls_sha256(buf, SECURITY_LOCK_SALT_LEN + len, hash_out, 0 /* is224 */) != 0) {
-    rv = E_INTERNAL;
-    goto cleanup;
-  }
+  sha256(buf, SECURITY_LOCK_SALT_LEN + len, hash_out);
 
   for (uint32_t i = 1; i < HASH_ITERATIONS; ++i) {
     memcpy(buf + SECURITY_LOCK_SALT_LEN, hash_out, SECURITY_LOCK_HASH_LEN);
-    if (mbedtls_sha256(buf, sizeof(buf), hash_out, 0 /* is224 */) != 0) {
-      rv = E_INTERNAL;
-      goto cleanup;
-    }
+    sha256(buf, sizeof(buf), hash_out);
   }
 
-cleanup:
+  // The PIN was in here; don't leave it on the stack.
   memset(buf, 0, sizeof(buf));
-  if (rv != S_SUCCESS) {
-    memset(hash_out, 0, SECURITY_LOCK_HASH_LEN);
-  }
-  return rv;
+  return S_SUCCESS;
 }
 
 bool security_lock_hash_equal(const uint8_t a[SECURITY_LOCK_HASH_LEN],
