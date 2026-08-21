@@ -63,9 +63,13 @@ void security_lock_engage(SecurityShredReason reason) {
   security_lock_set_state(SecurityLockStateLocked);
   security_lock_ui_lockout();
 
-  // BACK may be held down right now. Left alone, the 1.5s timer would fire
-  // after the lockout is up and force quit whatever we just launched.
+  // Buttons may be held down right now. Left alone, the BACK 1.5s timer would
+  // force quit whatever we launch below, and a half-completed quick launch
+  // chord would launch an app straight over the clock -- neither of which the
+  // button handler can intercept, because both fire from a timer rather than
+  // from an event.
   launcher_cancel_force_quit();
+  watchface_reset_click_manager();
 
   // Whatever is on screen may well be the notification that prompted this.
   modal_manager_pop_all();

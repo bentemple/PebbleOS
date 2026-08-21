@@ -313,4 +313,15 @@ void watchface_start_low_power(void) {
 
 void watchface_reset_click_manager(void) {
   click_manager_reset(&s_click_manager);
+
+  // The quick launch combos are tracked outside the click manager, so resetting
+  // only the recognizers leaves a held-button bitmap and possibly a running
+  // hold timer behind. Either can fire an app launch after the watchface has
+  // stopped receiving button events, using a chord the user never completed.
+  if (s_combo_back_hold_timer != NULL) {
+    app_timer_cancel(s_combo_back_hold_timer);
+    s_combo_back_hold_timer = NULL;
+  }
+  s_active_combo_buttons = BIT_CLEAR;
+  s_buttons_pressed = BIT_CLEAR;
 }
