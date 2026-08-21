@@ -297,7 +297,6 @@ static void prv_dispatch_data(bool post_event) {
     }
 
     // If buffer has room, read more data
-    uint32_t samples_drained = 0;
     while (state->num_samples < state->samples_per_update) {
       // Read available data.
       AccelManagerBufferData data;
@@ -320,7 +319,6 @@ static void prv_dispatch_data(bool post_event) {
 
       memcpy(state->raw_buffer + state->num_samples, &data, sizeof(AccelRawData));
       state->num_samples++;
-      samples_drained++;
     }
 
     // If buffer is full, notify subscriber to process it
