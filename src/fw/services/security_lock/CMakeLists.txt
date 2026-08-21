@@ -6,4 +6,5 @@ pbl_library_sources(
   service.c
   pin_hash.c
   shred.c
+  lock.c
 )
