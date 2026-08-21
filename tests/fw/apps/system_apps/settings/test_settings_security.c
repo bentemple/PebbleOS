@@ -6,12 +6,14 @@
 #include <string.h>
 
 #include "applib/ui/dialogs/expandable_dialog.h"
+#include "applib/ui/dialogs/simple_dialog.h"
 #include "apps/system/settings/menu.h"
 #include "apps/system/settings/option_menu.h"
 #include "apps/system/settings/security.h"
 #include "popups/security/pin_entry_window.h"
 #include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_shred.h"
+#include "pbl/util/size.h"
 
 // Stubs
 ////////////////////////////////////
@@ -29,15 +31,22 @@
 
 static char s_stored_pin[SECURITY_LOCK_PIN_MAX_LEN];
 static uint8_t s_stored_pin_len;
+static char s_stored_duress[SECURITY_LOCK_PIN_MAX_LEN];
+static uint8_t s_stored_duress_len;
 static uint8_t s_failed_attempts;
 static int s_reset_attempts_calls;
 static int s_engage_calls;
+//! The real store refuses to change any PIN without a phone session.
+static bool s_phone_connected = true;
 
 uint8_t security_lock_get_pin_len(void) {
   return s_stored_pin_len;
 }
 
 status_t security_lock_set_pin(const char *digits, uint8_t len) {
+  if (!s_phone_connected) {
+    return E_INVALID_OPERATION;
+  }
   if (len < SECURITY_LOCK_PIN_MIN_LEN || len > SECURITY_LOCK_PIN_MAX_LEN) {
     return E_INVALID_ARGUMENT;
   }
@@ -47,9 +56,39 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   return S_SUCCESS;
 }
 
+status_t security_lock_set_duress_pin(const char *digits, uint8_t len) {
+  if (!s_phone_connected) {
+    return E_INVALID_OPERATION;
+  }
+  if (s_stored_pin_len == 0) {
+    return E_INVALID_OPERATION;
+  }
+  if ((len == s_stored_pin_len) && (memcmp(digits, s_stored_pin, len) == 0)) {
+    return E_INVALID_ARGUMENT;
+  }
+  memcpy(s_stored_duress, digits, len);
+  s_stored_duress_len = len;
+  return S_SUCCESS;
+}
+
+//! A tripwire, not a fake: nothing in the menu may ask this. Any path that
+//! does fails the test that walks it, which between them cover every row and
+//! every branch of the visibility rule.
+bool security_lock_has_duress_pin(void) {
+  cl_fail("Settings must never ask whether a duress PIN exists");
+  return false;
+}
+
 status_t security_lock_clear_pin(void) {
+  if (!s_phone_connected) {
+    return E_INVALID_OPERATION;
+  }
   memset(s_stored_pin, 0, sizeof(s_stored_pin));
   s_stored_pin_len = 0;
+  // Clearing the real PIN takes the duress PIN with it; that is the only way
+  // to remove one, and the reason the menu needs no row for it.
+  memset(s_stored_duress, 0, sizeof(s_stored_duress));
+  s_stored_duress_len = 0;
   return S_SUCCESS;
 }
 
@@ -156,6 +195,7 @@ bool app_window_stack_remove(Window *window, bool animated) {
 static OptionMenuSelectCallback s_option_select;
 static void *s_option_context;
 static int s_option_choice;
+static uint16_t s_option_num_rows;
 static OptionMenu s_option_menu;
 
 OptionMenu *settings_option_menu_push(const char *i18n_title_key,
@@ -165,11 +205,42 @@ OptionMenu *settings_option_menu_push(const char *i18n_title_key,
   s_option_select = callbacks->select;
   s_option_context = context;
   s_option_choice = choice;
+  s_option_num_rows = num_rows;
   return &s_option_menu;
 }
 
 void *settings_option_menu_get_context(SettingsOptionMenuData *data) {
   return s_option_context;
+}
+
+// The "connect your phone" notice.
+static int s_simple_dialog_pushes;
+static char s_simple_dialog_text[128];
+static SimpleDialog s_simple_dialog;
+static Dialog s_dialog;
+
+bool connection_service_peek_pebble_app_connection(void) {
+  return s_phone_connected;
+}
+
+SimpleDialog *simple_dialog_create(const char *dialog_name) {
+  return &s_simple_dialog;
+}
+
+Dialog *simple_dialog_get_dialog(SimpleDialog *simple_dialog) {
+  return &s_dialog;
+}
+
+void dialog_set_text(Dialog *dialog, const char *text) {
+  strncpy(s_simple_dialog_text, text, sizeof(s_simple_dialog_text) - 1);
+  s_simple_dialog_text[sizeof(s_simple_dialog_text) - 1] = '\0';
+}
+
+void dialog_set_icon(Dialog *dialog, uint32_t icon) {}
+void dialog_set_timeout(Dialog *dialog, uint32_t timeout) {}
+
+void app_simple_dialog_push(SimpleDialog *simple_dialog) {
+  s_simple_dialog_pushes++;
 }
 
 // Lock Now's confirmation.
@@ -222,11 +293,14 @@ void i18n_free_all(const void *owner) {}
 //! Row order when no PIN is configured.
 #define ROW_SET_PIN 0
 #define ROW_PIN_LENGTH_UNSET 1
+#define ROWS_WITHOUT_PIN 2
 //! Row order once one is.
 #define ROW_CHANGE_PIN 0
 #define ROW_PIN_LENGTH_SET 1
-#define ROW_CLEAR_PIN 2
-#define ROW_LOCK_NOW 3
+#define ROW_DURESS_PIN 2
+#define ROW_CLEAR_PIN 3
+#define ROW_LOCK_NOW 4
+#define ROWS_WITH_PIN 5
 
 static void prv_open_settings(void) {
   settings_security_get_info()->init();
@@ -256,6 +330,11 @@ static void prv_install_pin(const char *pin) {
 void test_settings_security__initialize(void) {
   memset(s_stored_pin, 0, sizeof(s_stored_pin));
   s_stored_pin_len = 0;
+  memset(s_stored_duress, 0, sizeof(s_stored_duress));
+  s_stored_duress_len = 0;
+  s_phone_connected = true;
+  s_simple_dialog_pushes = 0;
+  s_simple_dialog_text[0] = '\0';
   s_failed_attempts = 0;
   s_reset_attempts_calls = 0;
   s_engage_calls = 0;
@@ -266,6 +345,8 @@ void test_settings_security__initialize(void) {
   s_prompt_cancelable = false;
   s_prompt_message[0] = '\0';
   s_option_select = NULL;
+  s_option_choice = -1;
+  s_option_num_rows = 0;
   s_dialog_confirm = NULL;
   s_dialog_pops = 0;
   s_deferred_callback = NULL;
@@ -283,13 +364,13 @@ void test_settings_security__cleanup(void) {
 
 void test_settings_security__hides_pin_actions_until_there_is_a_pin(void) {
   prv_open_settings();
-  cl_assert_equal_i(2, prv_num_rows());
+  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
 }
 
 void test_settings_security__shows_pin_actions_once_set(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  cl_assert_equal_i(4, prv_num_rows());
+  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
 }
 
 // Rows appear and disappear underneath the selection, so the mapping from row
@@ -297,18 +378,192 @@ void test_settings_security__shows_pin_actions_once_set(void) {
 // PIN" and erasing the watch instead.
 void test_settings_security__rows_follow_the_pin_appearing(void) {
   prv_open_settings();
-  cl_assert_equal_i(2, prv_num_rows());
+  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
 
   prv_select(ROW_SET_PIN);
   prv_submit("1234");
   prv_submit("1234");
 
   s_module->appear(s_module);
-  cl_assert_equal_i(4, prv_num_rows());
+  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
 
-  // Row 3 must now be Lock Now, not something that fell through to a default.
+  // The last row must now be Lock Now, not something that fell through to a
+  // default.
   prv_select(ROW_LOCK_NOW);
   cl_assert(s_dialog_confirm != NULL);
+}
+
+// Duress PIN
+////////////////////////////////////
+
+//! Defined with the rest of the length helpers further down.
+static void prv_choose_length(uint8_t len);
+
+//! Count and order of rows, which must not depend on the duress PIN.
+static void prv_capture_row_titles(int *count) {
+  *count = prv_num_rows();
+}
+
+// The menu must look identical whether or not a duress PIN is configured.
+// Anything that varies -- a row appearing, a subtitle changing -- hands over
+// the one bit the feature depends on keeping.
+void test_settings_security__duress_state_is_not_visible(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  int without = 0;
+  prv_capture_row_titles(&without);
+
+  // Configure one, through the menu, exactly as a user would.
+  prv_select(ROW_DURESS_PIN);
+  prv_submit("1234");
+  prv_submit("5678");
+  prv_submit("5678");
+  cl_assert_equal_i(4, s_stored_duress_len);
+
+  s_module->appear(s_module);
+  int with = 0;
+  prv_capture_row_titles(&with);
+
+  cl_assert_equal_i(without, with);
+}
+
+void test_settings_security__duress_pin_requires_the_current_pin(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_select(ROW_DURESS_PIN);
+
+  prv_submit("9999");
+  cl_assert_equal_i(0, s_stored_duress_len);
+  cl_assert(s_prompt != NULL);
+
+  prv_submit("1234");
+  prv_submit("5678");
+  prv_submit("5678");
+  cl_assert_equal_i(4, s_stored_duress_len);
+}
+
+// verify_pin only tries the duress hash when the entered length matches the one
+// it was stored with, and the lock screen only ever prompts for the real PIN's
+// length. A duress PIN of the other length would look set and never work.
+void test_settings_security__duress_pin_matches_the_real_pin_length(void) {
+  prv_install_pin("123456");
+  prv_open_settings();
+
+  // Even with the picker set to four, which is what the next real PIN would be.
+  prv_select(ROW_PIN_LENGTH_SET);
+  prv_choose_length(4);
+  s_module->appear(s_module);
+
+  prv_select(ROW_DURESS_PIN);
+  cl_assert_equal_i(6, s_prompt_pin_len);
+  prv_submit("123456");
+  cl_assert_equal_i(6, s_prompt_pin_len);
+}
+
+void test_settings_security__duress_pin_must_differ_from_the_real_one(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_select(ROW_DURESS_PIN);
+
+  prv_submit("1234");
+  prv_submit("1234");
+  prv_submit("1234");
+
+  cl_assert_equal_i(0, s_stored_duress_len);
+  cl_assert(s_prompt != NULL);
+  cl_assert_equal_s("Must differ from your PIN", s_prompt_message);
+}
+
+// Clearing the real PIN is the only way to remove a duress PIN, so it has to
+// actually do it -- otherwise a forgotten one survives into the next PIN.
+void test_settings_security__clearing_the_pin_takes_the_duress_pin_with_it(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_DURESS_PIN);
+  prv_submit("1234");
+  prv_submit("5678");
+  prv_submit("5678");
+  cl_assert_equal_i(4, s_stored_duress_len);
+
+  s_module->appear(s_module);
+  prv_select(ROW_CLEAR_PIN);
+  prv_submit("1234");
+
+  cl_assert_equal_i(0, s_stored_pin_len);
+  cl_assert_equal_i(0, s_stored_duress_len);
+}
+
+// Needing the phone
+////////////////////////////////////
+
+void test_settings_security__set_pin_asks_for_the_phone_first(void) {
+  s_phone_connected = false;
+  prv_open_settings();
+
+  prv_select(ROW_SET_PIN);
+
+  // No prompt at all: taking an entry the store is going to refuse would waste
+  // the user's time and then fail for a reason they could not have guessed.
+  cl_assert(s_prompt == NULL);
+  cl_assert_equal_i(1, s_simple_dialog_pushes);
+  cl_assert_equal_s("Connect your phone to change your PIN", s_simple_dialog_text);
+}
+
+void test_settings_security__every_pin_change_asks_for_the_phone(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  s_phone_connected = false;
+
+  const uint16_t rows[] = {ROW_CHANGE_PIN, ROW_DURESS_PIN, ROW_CLEAR_PIN};
+  for (int i = 0; i < (int)ARRAY_LENGTH(rows); ++i) {
+    s_simple_dialog_pushes = 0;
+    prv_select(rows[i]);
+    cl_assert(s_prompt == NULL);
+    cl_assert_equal_i(1, s_simple_dialog_pushes);
+  }
+}
+
+// Verifying still works offline, so the phone check must not sit in front of
+// the parts that only read.
+void test_settings_security__lock_now_still_works_without_a_phone(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  s_phone_connected = false;
+
+  prv_select(ROW_LOCK_NOW);
+  cl_assert(s_dialog_confirm != NULL);
+  cl_assert_equal_i(0, s_simple_dialog_pushes);
+}
+
+// The phone can go away between opening the prompt and submitting it.
+void test_settings_security__a_refusal_mid_flow_says_why(void) {
+  prv_open_settings();
+  prv_select(ROW_SET_PIN);
+  cl_assert(s_prompt != NULL);
+
+  s_phone_connected = false;
+  prv_submit("1234");
+  prv_submit("1234");
+
+  cl_assert_equal_i(0, security_lock_get_pin_len());
+  // Still on the prompt, with the reason on screen rather than silently back in
+  // the menu with nothing changed.
+  cl_assert(s_prompt != NULL);
+  cl_assert_equal_s("Connect your phone to change your PIN", s_prompt_message);
+}
+
+void test_settings_security__a_refused_clear_says_why(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_select(ROW_CLEAR_PIN);
+
+  s_phone_connected = false;
+  prv_submit("1234");
+
+  cl_assert_equal_i(4, security_lock_get_pin_len());
+  cl_assert(s_prompt != NULL);
+  cl_assert_equal_s("Connect your phone to change your PIN", s_prompt_message);
 }
 
 // Setting a PIN
@@ -448,9 +703,40 @@ void test_settings_security__a_correct_pin_also_leaves_the_counter_clear(void) {
 // PIN length
 ////////////////////////////////////
 
+//! The lengths the picker must offer, in order. Stated here rather than derived
+//! from the module: "exactly four or six" is the requirement, so the test has
+//! to fail if the module starts offering a five.
+static const uint8_t s_expected_lengths[] = {4, 6};
+
+static int prv_length_index(uint8_t len) {
+  for (int i = 0; i < (int)ARRAY_LENGTH(s_expected_lengths); ++i) {
+    if (s_expected_lengths[i] == len) {
+      return i;
+    }
+  }
+  cl_fail("that length is not offered");
+  return 0;
+}
+
 static void prv_choose_length(uint8_t len) {
   cl_assert(s_option_select != NULL);
-  s_option_select(&s_option_menu, len - SECURITY_LOCK_PIN_MIN_LEN, NULL);
+  s_option_select(&s_option_menu, prv_length_index(len), NULL);
+}
+
+void test_settings_security__offers_only_four_or_six_digits(void) {
+  prv_open_settings();
+  prv_select(ROW_PIN_LENGTH_UNSET);
+
+  cl_assert_equal_i(ARRAY_LENGTH(s_expected_lengths), s_option_num_rows);
+
+  // And each row really does produce the length it claims.
+  for (int i = 0; i < (int)ARRAY_LENGTH(s_expected_lengths); ++i) {
+    s_option_select(&s_option_menu, i, NULL);
+    s_module->appear(s_module);
+    prv_select(ROW_SET_PIN);
+    cl_assert_equal_i(s_expected_lengths[i], s_prompt_pin_len);
+    prv_select(ROW_PIN_LENGTH_UNSET);
+  }
 }
 
 void test_settings_security__length_choice_survives_a_menu_refresh(void) {
@@ -469,8 +755,8 @@ void test_settings_security__length_choice_survives_a_menu_refresh(void) {
   prv_submit("1234");
   cl_assert_equal_i(6, s_prompt_pin_len);  // now collecting the new one
 
-  prv_submit("135790");
-  prv_submit("135790");
+  prv_submit("135792");
+  prv_submit("135792");
   cl_assert_equal_i(6, security_lock_get_pin_len());
 }
 
@@ -478,15 +764,15 @@ void test_settings_security__length_applies_to_a_first_pin(void) {
   prv_open_settings();
 
   prv_select(ROW_PIN_LENGTH_UNSET);
-  prv_choose_length(8);
+  prv_choose_length(6);
   s_module->appear(s_module);
 
   prv_select(ROW_SET_PIN);
-  cl_assert_equal_i(8, s_prompt_pin_len);
+  cl_assert_equal_i(6, s_prompt_pin_len);
 
-  prv_submit("13579024");
-  prv_submit("13579024");
-  cl_assert_equal_i(8, security_lock_get_pin_len());
+  prv_submit("135792");
+  prv_submit("135792");
+  cl_assert_equal_i(6, security_lock_get_pin_len());
 }
 
 void test_settings_security__length_menu_opens_on_the_current_choice(void) {
@@ -494,7 +780,7 @@ void test_settings_security__length_menu_opens_on_the_current_choice(void) {
   prv_open_settings();
 
   prv_select(ROW_PIN_LENGTH_SET);
-  cl_assert_equal_i(6 - SECURITY_LOCK_PIN_MIN_LEN, s_option_choice);
+  cl_assert_equal_i(prv_length_index(6), s_option_choice);
 }
 
 // Lock Now
@@ -503,7 +789,7 @@ void test_settings_security__length_menu_opens_on_the_current_choice(void) {
 void test_settings_security__lock_now_is_hidden_without_a_pin(void) {
   prv_open_settings();
   // Only Set PIN and PIN Length; nothing here can erase anything.
-  cl_assert_equal_i(2, prv_num_rows());
+  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
 }
 
 void test_settings_security__lock_now_confirms_before_engaging(void) {
