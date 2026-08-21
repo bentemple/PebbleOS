@@ -58,8 +58,22 @@ status_t security_lock_set_state(SecurityLockState state);
 //! Configure the PIN and move to Armed. Digits are ASCII '0'-'9'.
 status_t security_lock_set_pin(const char *digits, uint8_t len);
 
-//! Clear the PIN and move to Disabled.
+//! Clear the PIN and move to Disabled. Also clears any duress PIN.
 status_t security_lock_clear_pin(void);
+
+//! Configure a second PIN that unlocks the watch and silently destroys its
+//! content at the same time.
+//!
+//! For being made to unlock under observation or coercion: the watch behaves
+//! exactly as it does for the real PIN -- same animation, no message, no
+//! difference an onlooker could spot -- while the shred runs in the
+//! background. The phone is deliberately not told, because it would restore
+//! everything within seconds and the duress PIN would achieve nothing.
+//!
+//! Must differ from the real PIN, and follows the same 4-or-6-digit rule.
+status_t security_lock_set_duress_pin(const char *digits, uint8_t len);
+status_t security_lock_clear_duress_pin(void);
+bool security_lock_has_duress_pin(void);
 
 //! Number of digits the configured PIN has, so the lock screen knows how many
 //! cells to prompt for. 0 if no PIN is configured.

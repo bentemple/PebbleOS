@@ -10,7 +10,10 @@
 #include <pbl/drivers/rng.h>
 #include <pbl/logging/logging.h>
 #include "pbl/os/mutex.h"
+#include "pbl/services/comm_session/session.h"
+#include "pbl/services/security_lock_shred.h"
 #include "pbl/services/settings/settings_file.h"
+#include "pbl/services/system_task.h"
 #include "system/passert.h"
 #include "util/units.h"
 
@@ -19,7 +22,7 @@ PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LE
 #define SETTINGS_FILE_NAME "seclock"
 #define SETTINGS_FILE_SIZE KiBYTES(2)
 
-#define RECORD_VERSION 2
+#define RECORD_VERSION 3
 
 //! Config: written rarely (only when the PIN changes).
 static const char *CFG_KEY = "cfg";
@@ -32,6 +35,12 @@ typedef struct PACKED {
   uint8_t pin_len;
   uint8_t salt[SECURITY_LOCK_SALT_LEN];
   uint8_t pin_hash[SECURITY_LOCK_HASH_LEN];
+  //! Second PIN that unlocks and silently wipes. Its own salt, so the two
+  //! verifiers share nothing.
+  bool has_duress_pin;
+  uint8_t duress_len;
+  uint8_t duress_salt[SECURITY_LOCK_SALT_LEN];
+  uint8_t duress_hash[SECURITY_LOCK_HASH_LEN];
 } SecurityLockConfig;
 
 typedef struct PACKED {
@@ -165,57 +174,187 @@ status_t security_lock_set_state(SecurityLockState state) {
   return rv;
 }
 
+//! Changing a PIN requires the phone. Someone who has taken only the watch
+//! must not be able to set their own PIN and keep it, and the phone is the one
+//! thing they are unlikely to also have unlocked.
+static bool prv_phone_is_connected(void) {
+  return comm_session_get_system_session() != NULL;
+}
+
+//! Fill a salt from the hardware RNG.
+static bool prv_make_salt(uint8_t salt[SECURITY_LOCK_SALT_LEN]) {
+  for (size_t i = 0; i < SECURITY_LOCK_SALT_LEN; i += sizeof(uint32_t)) {
+    uint32_t r;
+    if (!rng_rand(&r)) {
+      PBL_LOG_ERR("RNG failed; refusing to derive a verifier with a weak salt");
+      return false;
+    }
+    memcpy(&salt[i], &r, sizeof(r));
+  }
+  return true;
+}
+
+//! Exactly 4 or 6 digits of 1-9. '0' is absent from the pad, so a PIN
+//! containing one could never be typed.
+static bool prv_pin_is_well_formed(const char *digits, uint8_t len) {
+  if (digits == NULL ||
+      (len != SECURITY_LOCK_PIN_MIN_LEN && len != SECURITY_LOCK_PIN_MAX_LEN)) {
+    return false;
+  }
+  for (uint8_t i = 0; i < len; ++i) {
+    if (digits[i] < '1' || digits[i] > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
 status_t security_lock_set_pin(const char *digits, uint8_t len) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
-  // Exactly 4 or 6 -- nothing between, because the pad only offers those two.
-  if (digits == NULL || (len != SECURITY_LOCK_PIN_MIN_LEN && len != SECURITY_LOCK_PIN_MAX_LEN)) {
+  if (!prv_phone_is_connected()) {
+    // Someone holding only the watch must not be able to re-PIN it and keep it.
+    PBL_LOG_WRN("Refusing to set a PIN with no phone connected");
+    return E_INVALID_OPERATION;
+  }
+  if (!prv_pin_is_well_formed(digits, len)) {
     return E_INVALID_ARGUMENT;
-  }
-  for (uint8_t i = 0; i < len; ++i) {
-    // '0' is absent from the pad, so a PIN containing one could never be typed.
-    if (digits[i] < '1' || digits[i] > '9') {
-      return E_INVALID_ARGUMENT;
-    }
-  }
-
-  SecurityLockConfig cfg = {
-      .version = RECORD_VERSION,
-      .pin_len = len,
-  };
-  for (size_t i = 0; i < sizeof(cfg.salt); i += sizeof(uint32_t)) {
-    uint32_t r;
-    if (!rng_rand(&r)) {
-      PBL_LOG_ERR("RNG failed; refusing to set a PIN with a weak salt");
-      return E_INTERNAL;
-    }
-    memcpy(&cfg.salt[i], &r, sizeof(r));
-  }
-
-  status_t rv = security_lock_pin_hash(digits, len, cfg.salt, cfg.pin_hash);
-  if (rv != S_SUCCESS) {
-    return rv;
   }
 
   mutex_lock(s_mutex);
+
+  // Preserve any duress PIN across a change of the real one: the two are set
+  // independently and forgetting the duress PIN here would silently disarm it.
+  SecurityLockConfig cfg;
+  if (prv_read_config(&cfg) != S_SUCCESS) {
+    memset(&cfg, 0, sizeof(cfg));
+  }
+  cfg.version = RECORD_VERSION;
+  cfg.pin_len = len;
+
+  status_t rv = S_SUCCESS;
+  if (!prv_make_salt(cfg.salt)) {
+    rv = E_INTERNAL;
+    goto unlock;
+  }
+  rv = security_lock_pin_hash(digits, len, cfg.salt, cfg.pin_hash);
+  if (rv != S_SUCCESS) {
+    goto unlock;
+  }
+
+  // A duress PIN that now matches the real one would be unreachable.
+  if (cfg.has_duress_pin && (cfg.duress_len == len) &&
+      security_lock_hash_equal(cfg.duress_hash, cfg.pin_hash)) {
+    cfg.has_duress_pin = false;
+  }
+
   rv = prv_write(CFG_KEY, &cfg, sizeof(cfg));
   if (rv == S_SUCCESS) {
     s_runtime_cache.state = SecurityLockStateArmed;
     s_runtime_cache.failed_attempts = 0;
     rv = prv_flush_runtime();
   }
-  mutex_unlock(s_mutex);
 
-  // Don't leave the derived verifier sitting on the stack.
+unlock:
+  mutex_unlock(s_mutex);
   memset(&cfg, 0, sizeof(cfg));
   return rv;
+}
+
+status_t security_lock_set_duress_pin(const char *digits, uint8_t len) {
+  if (!s_initialized) {
+    return E_INVALID_OPERATION;
+  }
+  if (!prv_phone_is_connected()) {
+    return E_INVALID_OPERATION;
+  }
+  if (!prv_pin_is_well_formed(digits, len)) {
+    return E_INVALID_ARGUMENT;
+  }
+
+  mutex_lock(s_mutex);
+
+  SecurityLockConfig cfg;
+  status_t rv = prv_read_config(&cfg);
+  if (rv != S_SUCCESS) {
+    // No real PIN means nothing to be under duress about.
+    mutex_unlock(s_mutex);
+    return E_INVALID_OPERATION;
+  }
+
+  // Identical PINs would make the duress one unreachable -- the real check runs
+  // first and would always win.
+  uint8_t candidate[SECURITY_LOCK_HASH_LEN];
+  if ((cfg.pin_len == len) &&
+      security_lock_pin_hash(digits, len, cfg.salt, candidate) == S_SUCCESS &&
+      security_lock_hash_equal(candidate, cfg.pin_hash)) {
+    rv = E_INVALID_ARGUMENT;
+    goto unlock;
+  }
+
+  cfg.duress_len = len;
+  if (!prv_make_salt(cfg.duress_salt)) {
+    rv = E_INTERNAL;
+    goto unlock;
+  }
+  rv = security_lock_pin_hash(digits, len, cfg.duress_salt, cfg.duress_hash);
+  if (rv != S_SUCCESS) {
+    goto unlock;
+  }
+  cfg.has_duress_pin = true;
+  rv = prv_write(CFG_KEY, &cfg, sizeof(cfg));
+
+unlock:
+  mutex_unlock(s_mutex);
+  memset(candidate, 0, sizeof(candidate));
+  memset(&cfg, 0, sizeof(cfg));
+  return rv;
+}
+
+status_t security_lock_clear_duress_pin(void) {
+  if (!s_initialized) {
+    return E_INVALID_OPERATION;
+  }
+  if (!prv_phone_is_connected()) {
+    return E_INVALID_OPERATION;
+  }
+  mutex_lock(s_mutex);
+  SecurityLockConfig cfg;
+  status_t rv = prv_read_config(&cfg);
+  if (rv == S_SUCCESS) {
+    cfg.has_duress_pin = false;
+    memset(cfg.duress_hash, 0, sizeof(cfg.duress_hash));
+    memset(cfg.duress_salt, 0, sizeof(cfg.duress_salt));
+    cfg.duress_len = 0;
+    rv = prv_write(CFG_KEY, &cfg, sizeof(cfg));
+  }
+  mutex_unlock(s_mutex);
+  memset(&cfg, 0, sizeof(cfg));
+  return rv;
+}
+
+bool security_lock_has_duress_pin(void) {
+  if (!s_initialized) {
+    return false;
+  }
+  mutex_lock(s_mutex);
+  SecurityLockConfig cfg;
+  const bool has = (prv_read_config(&cfg) == S_SUCCESS) && cfg.has_duress_pin;
+  memset(&cfg, 0, sizeof(cfg));
+  mutex_unlock(s_mutex);
+  return has;
 }
 
 status_t security_lock_clear_pin(void) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
+  if (!prv_phone_is_connected()) {
+    return E_INVALID_OPERATION;
+  }
+  // Deleting the config record takes the duress PIN with it, which is what we
+  // want: a watch with no real PIN has nothing to be under duress about.
   mutex_lock(s_mutex);
   SettingsFile file;
   status_t rv = settings_file_open(&file, SETTINGS_FILE_NAME, SETTINGS_FILE_SIZE);
@@ -241,6 +380,10 @@ uint8_t security_lock_get_pin_len(void) {
   memset(&cfg, 0, sizeof(cfg));
   mutex_unlock(s_mutex);
   return len;
+}
+
+static void prv_duress_shred_callback(void *unused) {
+  security_lock_shred(SecurityShredReasonDuressPin);
 }
 
 bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out) {
@@ -270,10 +413,19 @@ bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts
 
   SecurityLockConfig cfg;
   bool matched = false;
-  if (prv_read_config(&cfg) == S_SUCCESS && cfg.pin_len == len) {
+  bool duress = false;
+  if (prv_read_config(&cfg) == S_SUCCESS) {
     uint8_t attempt_hash[SECURITY_LOCK_HASH_LEN];
-    if (security_lock_pin_hash(digits, len, cfg.salt, attempt_hash) == S_SUCCESS) {
+    if ((cfg.pin_len == len) &&
+        security_lock_pin_hash(digits, len, cfg.salt, attempt_hash) == S_SUCCESS) {
       matched = security_lock_hash_equal(attempt_hash, cfg.pin_hash);
+    }
+    if (!matched && cfg.has_duress_pin && (cfg.duress_len == len) &&
+        security_lock_pin_hash(digits, len, cfg.duress_salt, attempt_hash) == S_SUCCESS) {
+      // Reported to the caller as an ordinary success. Nothing above this layer
+      // is told the difference, so nothing can leak it into the UI.
+      duress = security_lock_hash_equal(attempt_hash, cfg.duress_hash);
+      matched = duress;
     }
     memset(attempt_hash, 0, sizeof(attempt_hash));
   }
@@ -291,6 +443,13 @@ bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts
   }
 
   mutex_unlock(s_mutex);
+
+  if (duress) {
+    // Deferred to KernelBG so the unlock completes and the watch looks
+    // completely ordinary while the wipe runs behind it.
+    system_task_add_callback(prv_duress_shred_callback, NULL);
+  }
+
   return matched;
 }
 

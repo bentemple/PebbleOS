@@ -17,6 +17,10 @@ typedef enum {
   SecurityShredReasonRebootWhileLocked = 0x04,
   SecurityShredReasonPinAttemptsExhausted = 0x05,
   SecurityShredReasonClockRollback = 0x06,
+  //! A duress PIN was entered. The watch unlocks normally and wipes without
+  //! any visible sign, so someone watching over the user's shoulder sees an
+  //! ordinary unlock.
+  SecurityShredReasonDuressPin = 0x07,
 } SecurityShredReason;
 
 //! Bit position in the wiped-database bitmap for a given BlobDBId.

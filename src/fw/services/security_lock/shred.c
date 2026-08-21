@@ -70,6 +70,8 @@ const char *security_lock_shred_reason_str(SecurityShredReason reason) {
       return "PIN attempts exhausted";
     case SecurityShredReasonClockRollback:
       return "clock rollback";
+    case SecurityShredReasonDuressPin:
+      return "duress PIN";
     case SecurityShredReasonUnknown:
     default:
       return "unknown";
@@ -175,12 +177,17 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running) {
   }
 
 #if !defined(CONFIG_RECOVERY_FW)
+  // A duress wipe must not ask the phone to resend: the phone would cheerfully
+  // restore everything within seconds and the duress PIN would accomplish
+  // nothing. It stays gone until the user deliberately resyncs.
+  const bool notify_phone = (reason != SecurityShredReasonDuressPin);
+
   // Tell the phone its copy is authoritative. Gadgetbridge does not currently
   // read this flag (an explicit SHRED_COMPLETE message covers that), but the
   // official app does, and it costs nothing to be correct for both.
-  if (dbs_running) {
+  if (dbs_running && notify_phone) {
     bt_persistent_storage_set_unfaithful(true);
-  } else {
+  } else if (!dbs_running && notify_phone) {
     // Bonding storage is not up this early; defer to finish_boot_shred().
     s_boot_shred_pending_notify = true;
   }
@@ -195,7 +202,7 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running) {
   // this is what tells the phone to resend what it holds. A no-op when there is
   // no session, which is the common case when the phone going away is what
   // caused the shred -- the boot-time unfaithful flag covers that.
-  if (dbs_running) {
+  if (dbs_running && (reason != SecurityShredReasonDuressPin)) {
     security_lock_endpoint_send_shred_complete(reason, wiped);
   }
 #endif
@@ -218,29 +225,34 @@ void security_lock_handle_boot(void) {
   // otherwise wind the clock back to dodge the disconnect deadline.
   const bool rolled_back = security_lock_note_time(now);
 
+  // Rebooting is the one reliable way past the lock screen: SELECT+BACK held
+  // for five seconds hard resets from the button ISR, below anything software
+  // can intercept. So any reboot while a response was armed -- locked, or
+  // counting down towards it -- shreds. Restarting must never be cheaper than
+  // waiting, and everything destroyed comes back from the phone.
+  const bool was_armed = security_lock_is_locked() ||
+                         (security_lock_get_lock_deadline() != 0) ||
+                         (security_lock_get_shred_deadline() != 0);
+
   SecurityShredReason reason;
   if (security_lock_is_shred_pending()) {
     // A previous shred did not finish. Whatever it was, redo it.
     reason = SecurityShredReasonUnknown;
   } else if (security_lock_shred_deadline_expired(now)) {
     reason = SecurityShredReasonDisconnectTimeout;
-  } else if (security_lock_lock_deadline_expired(now) && !security_lock_is_locked()) {
-    // Powered off through the lock delay but not the shred delay: come back
-    // locked rather than wiped. security_lock_handle_boot() cannot engage the
-    // UI this early, so record the state and let the lock screen appear when
-    // the button handler first sees a press.
-    security_lock_set_state(SecurityLockStateLocked);
-    return;
-  } else if (rolled_back && security_lock_is_locked()) {
+  } else if (rolled_back && was_armed) {
     reason = SecurityShredReasonClockRollback;
-  } else if (security_lock_is_locked()) {
-    // Holding SELECT+BACK for five seconds hard resets from the button ISR,
-    // below anything software can intercept, so rebooting is the one reliable
-    // way past the lock screen. Making it a shred trigger is what stops that
-    // being a way past the shred as well.
+  } else if (was_armed) {
     reason = SecurityShredReasonRebootWhileLocked;
   } else {
     return;
+  }
+
+  // A watch that was still counting down never reached the lock screen, and the
+  // reboot has just destroyed its content anyway. Lock it, so a shred is not
+  // followed by a watch that opens straight up.
+  if (!security_lock_is_locked() && (security_lock_get_pin_len() != 0)) {
+    security_lock_set_state(SecurityLockStateLocked);
   }
 
   security_lock_shred_early(reason);
