@@ -12,6 +12,7 @@
 #include <pbl/logging/logging.h>
 #include "debug/flash_logging.h"
 #include "flash_region/flash_region.h"
+#include "kernel/event_loop.h"
 #include "kernel/events.h"
 #include "kernel/pebble_tasks.h"
 #include "pbl/services/blob_db/pin_db.h"
@@ -113,12 +114,8 @@ static void prv_erase_flash_region(uint32_t begin, uint32_t end, const char *wha
   }
   PBL_LOG_DBG("Erasing %s region", what);
   flash_region_erase_optimal_range_no_watchdog(begin, begin, end, end);
-  task_watchdog_bit_set(pebble_task_get_current());
+  task_watchdog_bit_set_all();
 }
-
-//! Set when a shred ran before the blob dbs were up, so the phone can be told
-//! once the Bluetooth stack exists. See security_lock_finish_boot_shred().
-static bool s_boot_shred_pending_notify;
 
 //! Sectors collected per pass, and the gap between passes.
 //!
@@ -232,7 +229,7 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
     } else {
       PBL_LOG_ERR("Failed to shred %s: %" PRId32, s_shred_targets[i].filename, (int32_t)rv);
     }
-    task_watchdog_bit_set(pebble_task_get_current());
+    task_watchdog_bit_set_all();
   }
 
   if (prv_shred_dls_files()) {
@@ -287,11 +284,8 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
   // Tell the phone its copy is authoritative. Gadgetbridge does not currently
   // read this flag (an explicit SHRED_COMPLETE message covers that), but the
   // official app does, and it costs nothing to be correct for both.
-  if (dbs_running && notify_phone) {
+  if (notify_phone) {
     bt_persistent_storage_set_unfaithful(true);
-  } else if (!dbs_running && notify_phone) {
-    // Bonding storage is not up this early; defer to finish_boot_shred().
-    s_boot_shred_pending_notify = true;
   }
 #endif
 
@@ -316,10 +310,6 @@ uint32_t security_lock_shred(SecurityShredReason reason) {
   return prv_shred(reason, true /* dbs_running */, true /* sweep */);
 }
 
-uint32_t security_lock_shred_early(SecurityShredReason reason) {
-  return prv_shred(reason, false /* dbs_running */, false /* sweep */);
-}
-
 void security_lock_handle_boot(void) {
   const time_t now = rtc_get_time();
 
@@ -331,46 +321,45 @@ void security_lock_handle_boot(void) {
   // Rebooting is the one reliable way past the lock screen: SELECT+BACK held
   // for five seconds hard resets from the button ISR, below anything software
   // can intercept. So any reboot while a response was armed -- locked, or
-  // counting down towards it -- shreds. Restarting must never be cheaper than
-  // waiting, and everything destroyed comes back from the phone.
+  // counting down towards it -- owes a wipe. Restarting must never be cheaper
+  // than waiting, and everything destroyed comes back from the phone.
   const bool was_armed = security_lock_is_locked() ||
                          (security_lock_get_lock_deadline() != 0) ||
                          (security_lock_get_shred_deadline() != 0);
 
-  SecurityShredReason reason;
-  if (security_lock_is_shred_pending()) {
-    // A previous shred did not finish. Whatever it was, redo it.
-    reason = SecurityShredReasonUnknown;
-  } else if (security_lock_shred_deadline_expired(now)) {
-    reason = SecurityShredReasonDisconnectTimeout;
-  } else if (rolled_back && was_armed) {
-    reason = SecurityShredReasonClockRollback;
-  } else if (was_armed) {
-    reason = SecurityShredReasonRebootWhileLocked;
-  } else {
+  if (!security_lock_is_shred_pending() && !was_armed &&
+      !security_lock_shred_deadline_expired(now) && !rolled_back) {
     return;
   }
 
-  // A watch that was still counting down never reached the lock screen, and the
-  // reboot has just destroyed its content anyway. Lock it, so a shred is not
-  // followed by a watch that opens straight up.
+  // Deliberately does not wipe anything here. This runs inside
+  // services_normal_early_init(), before the display, the radio or the task
+  // that owns the databases exist, and erasing flash from it blocks the boot
+  // for as long as it takes -- which presented as a watch sitting on the boot
+  // splash, apparently dead. Record what is owed and let
+  // security_lock_finish_boot_shred() run it once the system is up.
+  //
+  // The delay is safe: the flag persists, so the wipe survives power being
+  // pulled and simply happens on a later boot, and the watch comes back locked
+  // in the meantime.
+  security_lock_set_shred_pending(true);
   if (!security_lock_is_locked() && (security_lock_get_pin_len() != 0)) {
     security_lock_set_state(SecurityLockStateLocked);
   }
+  PBL_LOG_INFO("Wipe owed at boot; deferred until the system is up");
+}
 
-  security_lock_shred_early(reason);
+//! Runs the wipe that security_lock_handle_boot() deferred.
+static void prv_boot_shred_callback(void *unused) {
+  security_lock_shred(SecurityShredReasonRebootWhileLocked);
 }
 
 void security_lock_finish_boot_shred(void) {
-#if !defined(CONFIG_RECOVERY_FW)
-  if (!s_boot_shred_pending_notify) {
+  if (!security_lock_is_shred_pending()) {
     return;
   }
-  s_boot_shred_pending_notify = false;
-  // The boot shred zeroed the files but skipped the sector sweep to keep boot
-  // quick; catch up now that the system is running.
-  prv_start_sweep();
-  bt_persistent_storage_set_unfaithful(true);
-  PBL_LOG_DBG("Marked unfaithful after boot shred");
-#endif
+  // On the launcher task, like every other path: the wipe closes and reopens
+  // databases and deadlocks if driven from KernelBG.
+  PBL_LOG_INFO("Running the wipe deferred from boot");
+  launcher_task_add_callback(prv_boot_shred_callback, NULL);
 }

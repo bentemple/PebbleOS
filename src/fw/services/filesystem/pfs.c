@@ -2201,8 +2201,10 @@ int pfs_gc_deleted_sectors(int max_sectors) {
     }
     regions_collected++;
 
-    // Erases are slow (~150ms per 64K sector) and there can be hundreds.
-    task_watchdog_bit_set(pebble_task_get_current());
+    // Erases are slow (~150ms per 64K sector) and there can be hundreds. Feed
+    // every task, not just this one: anything blocked waiting on us would
+    // otherwise miss its own check-in and take the watch down with it.
+    task_watchdog_bit_set_all();
   }
 
   PBL_LOG_DBG("Shred GC swept %d region(s)", regions_collected);

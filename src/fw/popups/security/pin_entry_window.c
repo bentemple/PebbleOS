@@ -181,6 +181,7 @@ static void prv_touch_handler(const TouchEvent *event, void *context) {
   const GRect bounds = pin_window->window.layer.bounds;
   const GPoint point = GPoint(event->x, event->y);
 
+
   switch (event->type) {
     case TouchEvent_Touchdown:
       pin_window->pressed_key = prv_key_at(&bounds, point);

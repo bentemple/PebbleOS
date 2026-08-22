@@ -55,16 +55,8 @@ typedef enum {
 //! @return bitmap of what was wiped, for SHRED_COMPLETE
 uint32_t security_lock_shred(SecurityShredReason reason);
 
-//! Shred from early boot, before the blob dbs and Bluetooth stack exist.
-//!
-//! Skips the database close/reopen dance (nothing has opened them yet) and
-//! defers marking the watch unfaithful until security_lock_finish_boot_shred().
-//! Callable from services_normal_early_init(), i.e. after PFS is mounted but
-//! before any pixel is drawn or the radio is brought up.
-uint32_t security_lock_shred_early(SecurityShredReason reason);
-
-//! Apply the phone-facing side effects of a boot shred once Bluetooth
-//! persistent storage is available. No-op if no boot shred happened.
+//! Run the wipe that security_lock_handle_boot() deferred, now that the
+//! system is up. No-op if none is owed.
 void security_lock_finish_boot_shred(void);
 
 //! Decide whether a shred is owed at boot and run it if so.

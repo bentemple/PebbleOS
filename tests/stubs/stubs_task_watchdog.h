@@ -16,6 +16,9 @@ void task_watchdog_mask_clear(PebbleTask task) {
 void task_watchdog_feed(void) {
 }
 
+void task_watchdog_bit_set_all(void) {
+}
+
 void task_watchdog_bit_set(PebbleTask task) {
 }
 
