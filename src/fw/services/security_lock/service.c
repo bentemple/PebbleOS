@@ -15,6 +15,10 @@
 #include "pbl/services/bluetooth/bluetooth_ctl.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/settings/settings_file.h"
+#if !defined(CONFIG_RECOVERY_FW)
+#include "pbl/services/bluetooth/bluetooth_persistent_storage.h"
+#include "pbl/services/security_lock_endpoint.h"
+#endif
 #include "pbl/services/system_task.h"
 #include "system/passert.h"
 #include "pbl/util/size.h"
@@ -81,6 +85,13 @@ static bool s_initialized;
 //! Cached so the hot path (is_locked, called from the button handler) does not
 //! touch flash. Flash remains authoritative; the cache is refreshed on write.
 static SecurityLockRuntime s_runtime_cache;
+
+//! Databases whose inbound writes were refused while the watch was shut.
+//!
+//! RAM only, unlike the rest of the record: a reboot while locked wipes, and
+//! the wipe asks for its own resend, so nothing is lost by not persisting this
+//! -- while persisting it would mean a flash write per refused write.
+static uint32_t s_refused_dbs;
 
 static void prv_runtime_defaults(SecurityLockRuntime *rt) {
   *rt = (SecurityLockRuntime){
@@ -188,7 +199,60 @@ void security_lock_deinit(void) {
   mutex_destroy(s_mutex);
   s_mutex = NULL;
   s_initialized = false;
+  s_refused_dbs = 0;
   prv_runtime_defaults(&s_runtime_cache);
+}
+
+void security_lock_note_write_refused(BlobDBId db_id) {
+  if (!s_initialized) {
+    return;
+  }
+  // Under the mutex because the bitmap is read and cleared from another task,
+  // and a plain read-modify-write of it is not atomic on this hardware. Only
+  // refused writes reach here, so the cost is bounded by how fast the phone can
+  // talk to a watch that is answering nothing.
+  mutex_lock(s_mutex);
+  s_refused_dbs |= SECURITY_SHRED_DB_BIT(db_id);
+  mutex_unlock(s_mutex);
+}
+
+uint32_t security_lock_take_refused_dbs(void) {
+  if (!s_initialized) {
+    return 0;
+  }
+  mutex_lock(s_mutex);
+  const uint32_t dbs = s_refused_dbs;
+  s_refused_dbs = 0;
+  mutex_unlock(s_mutex);
+  return dbs;
+}
+
+//! Ask the phone to resend anything that was refused while the watch was shut.
+//!
+//! Nothing was destroyed, so this is not a shred -- but a refused write was
+//! acked as a success, and the phone records it delivered on that ack alone. It
+//! will never offer that record again unless its own content changes, so this
+//! is the only thing that undoes it.
+//!
+//! Silent when nothing was refused: a resync the phone did not need costs it a
+//! full calendar re-push, and every unlock reaches here.
+static void prv_report_refused_writes(void) {
+  const uint32_t dbs = security_lock_take_refused_dbs();
+  if (dbs == 0) {
+    return;
+  }
+#if !defined(CONFIG_RECOVERY_FW)
+  PBL_LOG_INFO("Asking the phone to resend databases 0x%" PRIx32 " refused while shut", dbs);
+
+  // The same request in the form the version handshake carries. Gadgetbridge
+  // stops parsing that message long before this byte, so it cannot be the only
+  // mechanism, but the official app reads it.
+  bt_persistent_storage_set_unfaithful(true);
+
+  // Queued if there is no session yet -- see the ordering note in
+  // security_lock_set_state().
+  security_lock_endpoint_report_resync_needed(SecurityShredReasonWritesRefused, dbs);
+#endif
 }
 
 SecurityLockState security_lock_get_state(void) {
@@ -225,6 +289,14 @@ status_t security_lock_set_state(SecurityLockState state) {
     // state is what gives it back -- whatever the reason for leaving it. Called
     // outside the mutex: it drops into bt_ctl, which takes a lock of its own.
     security_lock_radio_blackout_release();
+
+    // After the release, not before: this needs a radio and the release is what
+    // gives it back. The ordering alone is not enough, though. Airplane mode
+    // comes back asynchronously and the session is rebuilt later still, so
+    // there is reliably none by the time this runs -- the STATE_CHANGED that
+    // unlocking sends a few frames later finds none either. The report queues
+    // itself and goes out when the session reopens.
+    prv_report_refused_writes();
   }
   return rv;
 }
@@ -472,6 +544,10 @@ status_t security_lock_clear_pin(void) {
   // Before the runtime record goes: that record is the only thing that knows
   // the radio was taken down and what to put back.
   security_lock_radio_blackout_release();
+
+  // Turning the feature off is another way out of the locked state, and it does
+  // not go through security_lock_set_state().
+  prv_report_refused_writes();
 
   // Deleting the config record takes the duress PIN with it, which is what we
   // want: a watch with no real PIN has nothing to be under duress about.

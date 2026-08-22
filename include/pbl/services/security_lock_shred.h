@@ -22,6 +22,10 @@ typedef enum {
   //! any visible sign, so someone watching over the user's shoulder sees an
   //! ordinary unlock.
   SecurityShredReasonDuressPin = 0x07,
+  //! Not a wipe at all. Writes were refused while the watch was locked and
+  //! acked as successes, so the phone has them recorded as delivered and will
+  //! never send them again on its own.
+  SecurityShredReasonWritesRefused = 0x08,
 } SecurityShredReason;
 
 //! Bit position in the wiped-database bitmap for a given BlobDBId.
@@ -91,3 +95,19 @@ const char *security_lock_shred_reason_str(SecurityShredReason reason);
 //! locked: accepting a store the wipe just erased would write it straight back
 //! in cleartext.
 bool security_lock_shred_covers_db(BlobDBId db_id);
+
+//! Record that an inbound write was refused because the watch was locked or a
+//! wipe was in flight.
+//!
+//! The refusal is acked to the phone as a success, so the phone marks that
+//! record delivered and never offers it again unless its own content changes.
+//! A bitmap rather than a count because the resend request the phone
+//! understands is per database.
+void security_lock_note_write_refused(BlobDBId db_id);
+
+//! Take the accumulated refusals, clearing them.
+//!
+//! RAM only. A reboot while locked wipes, and the wipe asks for its own resend.
+//!
+//! @return bitmap in SECURITY_SHRED_DB_BIT form, 0 if nothing was refused
+uint32_t security_lock_take_refused_dbs(void);

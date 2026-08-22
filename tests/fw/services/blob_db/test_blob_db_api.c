@@ -282,3 +282,65 @@ void test_blob_db_api__reads_and_deletes_are_not_guarded(void) {
   cl_assert_equal_i(S_SUCCESS, blob_db_read(BlobDBIdPins, s_key, sizeof(s_key), val, sizeof(val)));
   cl_assert_equal_i(S_SUCCESS, blob_db_delete(BlobDBIdPins, s_key, sizeof(s_key)));
 }
+
+// The record of what was refused
+////////////////////////////////////
+
+//! A refused write is acked as a success, so the phone records it delivered and
+//! never offers it again unless its own content changes. This bitmap is the
+//! only thing that remembers, and it is what the watch asks the phone to resend
+//! once it is open again.
+void test_blob_db_api__a_dropped_write_records_its_database(void) {
+  fake_security_lock_set_locked(true);
+
+  cl_assert_equal_i(S_SUCCESS, prv_insert(BlobDBIdPins));
+
+  cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdPins), fake_security_lock_get_refused_dbs());
+}
+
+//! A bitmap rather than a count, because the resend request the phone
+//! understands names the databases.
+void test_blob_db_api__every_dropped_database_is_recorded(void) {
+  fake_security_lock_set_locked(true);
+
+  uint32_t expected = 0;
+  for (size_t i = 0; i < ARRAY_LENGTH(s_covered_dbs); ++i) {
+    cl_assert_equal_i(S_SUCCESS, prv_insert(s_covered_dbs[i]));
+    expected |= SECURITY_SHRED_DB_BIT(s_covered_dbs[i]);
+  }
+
+  cl_assert_equal_i(expected, fake_security_lock_get_refused_dbs());
+}
+
+//! Nothing refused means nothing asked for. A resync the phone did not need
+//! costs it a full calendar re-push, so silence has to be the default.
+void test_blob_db_api__an_accepted_write_records_nothing(void) {
+  for (size_t i = 0; i < ARRAY_LENGTH(s_covered_dbs); ++i) {
+    cl_assert_equal_i(S_SUCCESS, prv_insert(s_covered_dbs[i]));
+  }
+
+  cl_assert_equal_i(0, fake_security_lock_get_refused_dbs());
+}
+
+//! The stores a wipe spares are never refused, so they can never appear in a
+//! resend request either.
+void test_blob_db_api__a_spared_store_is_never_recorded(void) {
+  fake_security_lock_set_locked(true);
+
+  for (size_t i = 0; i < ARRAY_LENGTH(s_spared_dbs); ++i) {
+    cl_assert_equal_i(S_SUCCESS, prv_insert(s_spared_dbs[i]));
+  }
+
+  cl_assert_equal_i(0, fake_security_lock_get_refused_dbs());
+}
+
+//! Refusals mid-wipe count too. The duress and clock-rollback wipes both run
+//! unlocked, so there is no unlock coming to report them -- the wipe itself
+//! carries them.
+void test_blob_db_api__a_write_dropped_mid_wipe_is_recorded(void) {
+  fake_security_lock_set_shredding(true);
+
+  cl_assert_equal_i(S_SUCCESS, prv_insert(BlobDBIdNotifs));
+
+  cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdNotifs), fake_security_lock_get_refused_dbs());
+}

@@ -147,13 +147,28 @@ bool regular_timer_remove_callback(RegularTimerInfo *cb) {
   return true;
 }
 
+//! Whether a phone is attached. The whole point of the deferred resync is what
+//! happens when it is not, so this is driven directly.
+static bool s_session_up;
+
 typedef struct CommSession CommSession;
 CommSession *comm_session_get_system_session(void) {
-  return NULL;
+  return s_session_up ? (CommSession *)1 : NULL;
 }
 
+//! Every message the endpoint put on the wire. Only the last one is inspected;
+//! the count is what proves a queued request is not sent twice.
+static int s_msgs_sent;
+static uint8_t s_last_msg[16];
+static size_t s_last_msg_len;
+
 void comm_session_send_data(CommSession *session, uint16_t endpoint_id, const uint8_t *data,
-                            size_t length, uint32_t timeout_ms) {}
+                            size_t length, uint32_t timeout_ms) {
+  cl_assert(length <= sizeof(s_last_msg));
+  memcpy(s_last_msg, data, length);
+  s_last_msg_len = length;
+  s_msgs_sent++;
+}
 
 // Helpers
 ////////////////////////////////////
@@ -173,6 +188,22 @@ static bool prv_timer_running(void) {
   return s_timer != NULL;
 }
 
+//! SHRED_COMPLETE: command, reason, then the bitmap big-endian.
+#define CMD_SHRED_COMPLETE 0x84
+
+static uint32_t prv_last_resync_bitmap(void) {
+  cl_assert_equal_i(6, (int)s_last_msg_len);
+  cl_assert_equal_i(CMD_SHRED_COMPLETE, s_last_msg[0]);
+  return ((uint32_t)s_last_msg[2] << 24) | ((uint32_t)s_last_msg[3] << 16) |
+         ((uint32_t)s_last_msg[4] << 8) | (uint32_t)s_last_msg[5];
+}
+
+static uint8_t prv_last_resync_reason(void) {
+  cl_assert_equal_i(6, (int)s_last_msg_len);
+  cl_assert_equal_i(CMD_SHRED_COMPLETE, s_last_msg[0]);
+  return s_last_msg[1];
+}
+
 void test_security_lock_endpoint__initialize(void) {
   s_state = SecurityLockStateArmed;
   s_blackout = false;
@@ -187,13 +218,17 @@ void test_security_lock_endpoint__initialize(void) {
   s_shreds = 0;
   s_timer = NULL;
 
-  // endpoint.c tracks its timer in a static and clar runs every test in one
-  // process, so the module needs resetting too. A reconnect is how it retires
-  // that timer, which makes this its own reset path rather than a back door.
+  // endpoint.c tracks its timer and any queued resync request in statics, and
+  // clar runs every test in one process, so the module needs resetting too. A
+  // reconnect is how it retires the timer and flushes the queue, which makes
+  // this its own reset path rather than a back door.
+  s_session_up = true;
   prv_session_event(true);
   s_timer = NULL;
   s_lock_deadline = 0;
   s_shred_deadline = 0;
+  s_msgs_sent = 0;
+  s_last_msg_len = 0;
 }
 
 void test_security_lock_endpoint__cleanup(void) {}
@@ -350,4 +385,87 @@ void test_security_lock_endpoint__init_resumes_a_pending_countdown(void) {
   security_lock_endpoint_init();
 
   cl_assert(prv_timer_running());
+}
+
+// Asking the phone to resend
+////////////////////////////////////
+
+void test_security_lock_endpoint__a_report_goes_out_on_a_live_session(void) {
+  security_lock_endpoint_report_resync_needed(SecurityShredReasonWritesRefused,
+                                              SECURITY_SHRED_DB_BIT(BlobDBIdPins));
+
+  cl_assert_equal_i(1, s_msgs_sent);
+  cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdPins), prv_last_resync_bitmap());
+  cl_assert_equal_i(SecurityShredReasonWritesRefused, prv_last_resync_reason());
+}
+
+//! The hazard the whole thing turns on. Both cases that need to ask the phone
+//! for a resend are cases where the phone is not there: a wipe caused by it
+//! walking away, and an unlock that has only just given the radio back. Sending
+//! into a session that does not exist yet would drop the request silently.
+void test_security_lock_endpoint__a_report_with_no_session_waits_for_one(void) {
+  s_session_up = false;
+
+  security_lock_endpoint_report_resync_needed(SecurityShredReasonWritesRefused,
+                                              SECURITY_SHRED_DB_BIT(BlobDBIdPins));
+  cl_assert_equal_i(0, s_msgs_sent);
+
+  s_session_up = true;
+  prv_session_event(true);
+
+  cl_assert_equal_i(1, s_msgs_sent);
+  cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdPins), prv_last_resync_bitmap());
+}
+
+//! Once told, the phone is not told again on every reconnect for the rest of
+//! time -- each repeat would be another full calendar re-push.
+void test_security_lock_endpoint__a_queued_report_is_sent_once(void) {
+  s_session_up = false;
+  security_lock_endpoint_report_resync_needed(SecurityShredReasonWritesRefused,
+                                              SECURITY_SHRED_DB_BIT(BlobDBIdPins));
+
+  s_session_up = true;
+  prv_session_event(true);
+  prv_session_event(false);
+  prv_session_event(true);
+
+  cl_assert_equal_i(1, s_msgs_sent);
+}
+
+//! Reports made while the phone is away merge rather than queue up, so a watch
+//! that was offline for a while still costs one message.
+void test_security_lock_endpoint__reports_made_while_offline_merge(void) {
+  s_session_up = false;
+  security_lock_endpoint_report_resync_needed(SecurityShredReasonWritesRefused,
+                                              SECURITY_SHRED_DB_BIT(BlobDBIdPins));
+  security_lock_endpoint_report_resync_needed(SecurityShredReasonDisconnectTimeout,
+                                              SECURITY_SHRED_DB_BIT(BlobDBIdWeather));
+
+  s_session_up = true;
+  prv_session_event(true);
+
+  cl_assert_equal_i(1, s_msgs_sent);
+  cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdPins) | SECURITY_SHRED_DB_BIT(BlobDBIdWeather),
+                    prv_last_resync_bitmap());
+  // The most recent cause, which is the one that lost the most.
+  cl_assert_equal_i(SecurityShredReasonDisconnectTimeout, prv_last_resync_reason());
+}
+
+//! Nothing lost, nothing asked for. Every unlock reaches this, so an empty
+//! report must be silent rather than a resync of everything.
+void test_security_lock_endpoint__an_empty_report_sends_nothing(void) {
+  security_lock_endpoint_report_resync_needed(SecurityShredReasonWritesRefused, 0);
+
+  cl_assert_equal_i(0, s_msgs_sent);
+
+  // And nothing is left queued for the next reconnect either.
+  prv_session_event(true);
+  cl_assert_equal_i(0, s_msgs_sent);
+}
+
+void test_security_lock_endpoint__reconnecting_with_nothing_queued_sends_nothing(void) {
+  prv_session_event(false);
+  prv_session_event(true);
+
+  cl_assert_equal_i(0, s_msgs_sent);
 }

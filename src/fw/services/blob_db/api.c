@@ -201,6 +201,10 @@ static uint32_t s_writes_dropped;
 //! Also owns the log bookkeeping: one line when the drops start and one when
 //! they stop, never one per write. A locked watch with a chatty phone reaches
 //! this per message, and this module's level compiles PBL_LOG_DBG out.
+//!
+//! Records which database was refused as it goes. The success we report is what
+//! makes that necessary: the phone marks the record delivered and will not
+//! offer it again, so the watch has to ask for it back once it is open.
 static bool prv_should_drop_write(BlobDBId db_id) {
   if (!security_lock_is_locked() && !security_lock_is_shredding()) {
     if (s_writes_dropped != 0) {
@@ -213,6 +217,8 @@ static bool prv_should_drop_write(BlobDBId db_id) {
   if (!security_lock_shred_covers_db(db_id)) {
     return false;
   }
+
+  security_lock_note_write_refused(db_id);
 
   if (s_writes_dropped++ == 0) {
     PBL_LOG_INFO("Locked or shredding, dropping writes to blob db %d", (int)db_id);

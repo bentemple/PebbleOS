@@ -74,26 +74,60 @@ static bool s_enabled = true;
 static RegularTimerInfo s_deadline_timer;
 static bool s_deadline_timer_running;
 
+//! Databases the phone must resend, and the most recent reason it must, held
+//! until there is a session to say it on. 0 means nothing owed.
+static uint32_t s_resync_dbs;
+static SecurityShredReason s_resync_reason;
+
 static void prv_stop_deadline_timer(void);
 
-static void prv_send(const void *msg, size_t len) {
+//! @return false if there was no session to send on, so nothing went out
+static bool prv_send(const void *msg, size_t len) {
   CommSession *session = comm_session_get_system_session();
   if (session == NULL) {
-    // Expected whenever the shred was triggered by the phone going away.
     PBL_LOG_DBG("No session; phone will be told on reconnect");
-    return;
+    return false;
   }
   comm_session_send_data(session, SECURITY_LOCK_ENDPOINT_ID, msg, len,
                          COMM_SESSION_DEFAULT_TIMEOUT);
+  return true;
 }
 
-void security_lock_endpoint_send_shred_complete(SecurityShredReason reason, uint32_t wiped_dbs) {
+//! Hand the outstanding resync request to the phone, if there is one to hand it
+//! to. Cleared only once it has actually gone out.
+static void prv_flush_resync(void) {
+  if (s_resync_dbs == 0) {
+    return;
+  }
+
   const SecurityLockShredCompleteMsg msg = {
       .cmd = SecurityLockCmdShredComplete,
-      .reason = (uint8_t)reason,
-      .wiped_dbs = hton32(wiped_dbs),
+      .reason = (uint8_t)s_resync_reason,
+      .wiped_dbs = hton32(s_resync_dbs),
   };
-  prv_send(&msg, sizeof(msg));
+  if (!prv_send(&msg, sizeof(msg))) {
+    return;
+  }
+
+  PBL_LOG_INFO("Told the phone to resend databases 0x%" PRIx32 ", reason %" PRIu8, s_resync_dbs,
+               (uint8_t)s_resync_reason);
+  s_resync_dbs = 0;
+}
+
+void security_lock_endpoint_report_resync_needed(SecurityShredReason reason, uint32_t dbs) {
+  if (dbs == 0) {
+    // Nothing was lost, so nothing is asked for. Every unlock reaches here and
+    // a resync the phone did not need costs it a full calendar re-push.
+    return;
+  }
+
+  // Recorded before the attempt rather than on its failure. Both callers run on
+  // KernelMain, as does the session event that would flush this, so the two
+  // cannot actually interleave today -- but a signal that survives only because
+  // the send happened to fail in the right order is not one worth relying on.
+  s_resync_dbs |= dbs;
+  s_resync_reason = reason;
+  prv_flush_resync();
 }
 
 void security_lock_endpoint_send_state_changed(SecurityLockState state) {
@@ -302,6 +336,14 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
     // clears a lock, whatever caused it.
     security_lock_clear_deadlines();
     prv_stop_deadline_timer();
+
+    // The phone is back, so anything the watch could not tell it while it was
+    // gone goes now. This is the half that matters: an unlock releases the
+    // radio blackout, but the session is not rebuilt until after that has been
+    // and gone, and a wipe caused by the phone walking away never had one at
+    // all. comm_session_open() adds the session to its list before publishing
+    // this event, so there is one to send on by the time we are called.
+    prv_flush_resync();
     return;
   }
 

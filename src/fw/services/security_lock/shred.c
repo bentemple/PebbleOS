@@ -342,12 +342,19 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
   PBL_LOG_INFO("Shred complete, wiped bitmap 0x%" PRIx32, wiped);
 
 #if !defined(CONFIG_RECOVERY_FW)
+  // Writes refused while the watch was locked, or while this was running, were
+  // acked to the phone as successes, so it has them recorded as delivered. They
+  // ride along with what was destroyed rather than waiting for an unlock that
+  // may be hours away. Drained unconditionally: a duress wipe must swallow them
+  // rather than leave them for the next unlock to ask on its behalf.
+  const uint32_t refused = security_lock_take_refused_dbs();
+
   // Reported from here rather than from each caller so no trigger can forget:
-  // this is what tells the phone to resend what it holds. A no-op when there is
-  // no session, which is the common case when the phone going away is what
-  // caused the shred -- the boot-time unfaithful flag covers that.
+  // this is what tells the phone to resend what it holds. Queued when there is
+  // no session -- the common case, since the phone going away is what causes
+  // most wipes -- and sent on the next one.
   if (dbs_running && (reason != SecurityShredReasonDuressPin)) {
-    security_lock_endpoint_send_shred_complete(reason, wiped);
+    security_lock_endpoint_report_resync_needed(reason, wiped | refused);
   }
 #endif
   return wiped;
@@ -388,6 +395,10 @@ uint32_t security_lock_shred(SecurityShredReason reason) {
 //! can follow. RAM only: the persisted shred_pending flag is what survives a
 //! power cut, and it stays set until the tail has run.
 static bool s_boot_shred_tail_owed;
+//! What that wipe destroyed and why, carried to the tail because telling the
+//! phone is one of the things that cannot be done this early.
+static uint32_t s_boot_shred_wiped;
+static SecurityShredReason s_boot_shred_reason;
 
 void security_lock_handle_boot(void) {
   PBL_LOG_INFO("SECBOOT handle_boot enter");
@@ -452,7 +463,8 @@ void security_lock_handle_boot(void) {
   // wipe touches no filesystem file, so there are no superseded copies for the
   // sweep to find and no resend to ask the phone for.
   const bool tail_owed = !prv_storage_is_clean();
-  prv_shred(reason, false /* dbs_running */, false /* finish */);
+  s_boot_shred_wiped = prv_shred(reason, false /* dbs_running */, false /* finish */);
+  s_boot_shred_reason = reason;
   s_boot_shred_tail_owed = tail_owed;
 
   PBL_LOG_INFO("SECBOOT handle_boot leave owed=%d skipped=0 locked=%d reason=%s", (int)tail_owed,
@@ -474,6 +486,11 @@ void security_lock_finish_boot_shred(void) {
   // Bonding storage did not exist when the wipe ran. A boot shred is never a
   // duress shred, so the phone is always told to resend.
   bt_persistent_storage_set_unfaithful(true);
+
+  // Neither did the radio, so the wipe could not say this for itself. Queued
+  // here and sent on the first session, which is what keeps a reboot while
+  // locked from being a silent loss -- Gadgetbridge never reads the flag above.
+  security_lock_endpoint_report_resync_needed(s_boot_shred_reason, s_boot_shred_wiped);
 #endif
 
   // The data is gone; what is left is cleanup, which does not need resuming on

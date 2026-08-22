@@ -46,6 +46,7 @@ typedef struct {
   int unfaithful_marks;
   int blackouts;
   uint32_t last_complete_bitmap;
+  SecurityShredReason last_complete_reason;
 } ShredTrace;
 
 static ShredTrace s_trace;
@@ -136,9 +137,20 @@ void security_lock_ui_quiesce(void) {
   }
 }
 
-void security_lock_endpoint_send_shred_complete(SecurityShredReason reason, uint32_t wiped) {
+void security_lock_endpoint_report_resync_needed(SecurityShredReason reason, uint32_t dbs) {
   s_trace.shred_completes++;
-  s_trace.last_complete_bitmap = wiped;
+  s_trace.last_complete_reason = reason;
+  s_trace.last_complete_bitmap = dbs;
+}
+
+//! Databases whose inbound writes were refused while the watch was shut. Owned
+//! by the lock service; a wipe only drains it.
+static uint32_t s_refused_dbs;
+
+uint32_t security_lock_take_refused_dbs(void) {
+  const uint32_t dbs = s_refused_dbs;
+  s_refused_dbs = 0;
+  return dbs;
 }
 
 void timeline_event_init(void) {
@@ -229,6 +241,7 @@ void event_put(void *event) {
 void test_security_lock_shred__initialize(void) {
   memset(&s_trace, 0, sizeof(s_trace));
   s_during_quiesce = NULL;
+  s_refused_dbs = 0;
   s_shred_pending = false;
   s_dirty = true;
   s_locked = false;
@@ -553,4 +566,72 @@ void test_security_lock_shred__coverage_matches_the_wiped_bitmap(void) {
     const bool in_bitmap = ((wiped & SECURITY_SHRED_DB_BIT(id)) != 0);
     cl_assert_equal_b(in_bitmap, security_lock_shred_covers_db((BlobDBId)id));
   }
+}
+
+// Writes refused while the watch was shut
+////////////////////////////////////
+
+//! A refused write was acked to the phone as a success, so the phone has it
+//! recorded as delivered. Those databases ride along with what the wipe
+//! destroyed rather than waiting for an unlock that may be hours away.
+void test_security_lock_shred__a_wipe_asks_for_refused_writes_too(void) {
+  s_refused_dbs = SECURITY_SHRED_DB_BIT(BlobDBIdPins);
+
+  const uint32_t wiped = security_lock_shred(SecurityShredReasonDisconnectTimeout);
+
+  cl_assert_equal_i(1, s_trace.shred_completes);
+  cl_assert_equal_i(wiped | SECURITY_SHRED_DB_BIT(BlobDBIdPins), s_trace.last_complete_bitmap);
+}
+
+//! Two wipes must not ask twice: the first drains the record.
+void test_security_lock_shred__refusals_are_reported_once(void) {
+  s_refused_dbs = SECURITY_SHRED_DB_BIT(BlobDBIdPins);
+  security_lock_shred(SecurityShredReasonDisconnectTimeout);
+
+  security_lock_mark_dirty_since_shred();
+  const uint32_t wiped = security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(2, s_trace.shred_completes);
+  cl_assert_equal_i(wiped, s_trace.last_complete_bitmap);
+}
+
+//! A duress wipe asks for nothing -- the phone would restore everything within
+//! seconds -- but it still has to drain the record, or the next unlock would
+//! ask on its behalf and undo the whole point of the duress PIN.
+void test_security_lock_shred__a_duress_wipe_swallows_the_refusals(void) {
+  s_refused_dbs = SECURITY_SHRED_DB_BIT(BlobDBIdPins);
+
+  security_lock_shred(SecurityShredReasonDuressPin);
+
+  cl_assert_equal_i(0, s_trace.shred_completes);
+  cl_assert_equal_i(0, security_lock_take_refused_dbs());
+}
+
+//! The boot wipe runs before the radio exists, so it cannot say anything. The
+//! tail is the first point that can, and the request waits there for a session
+//! rather than being sent into one that does not exist.
+void test_security_lock_shred__the_boot_wipe_asks_from_its_tail(void) {
+  s_locked = true;
+  s_state = SecurityLockStateLocked;
+
+  security_lock_handle_boot();
+  cl_assert_equal_i(0, s_trace.shred_completes);
+
+  security_lock_finish_boot_shred();
+
+  cl_assert_equal_i(1, s_trace.shred_completes);
+  cl_assert(s_trace.last_complete_bitmap & SECURITY_SHRED_NON_BLOBDB_BIT);
+  cl_assert_equal_i(SecurityShredReasonRebootWhileLocked, s_trace.last_complete_reason);
+}
+
+//! A clean boot wipe destroyed nothing of the phone's, so it asks for nothing.
+void test_security_lock_shred__a_clean_boot_wipe_asks_for_nothing(void) {
+  s_dirty = false;
+  s_locked = true;
+  s_state = SecurityLockStateLocked;
+
+  security_lock_handle_boot();
+  security_lock_finish_boot_shred();
+
+  cl_assert_equal_i(0, s_trace.shred_completes);
 }

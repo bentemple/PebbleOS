@@ -16,9 +16,20 @@ typedef struct PebbleCommSessionEvent PebbleCommSessionEvent;
 //! src/fw/services/comm_session/protocol_endpoints_table.json.
 void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *msg, size_t len);
 
-//! Tell the phone a shred finished, so it knows to resend what it holds.
-//! @param wiped_dbs bitmap from security_lock_shred()
-void security_lock_endpoint_send_shred_complete(SecurityShredReason reason, uint32_t wiped_dbs);
+//! Tell the phone its copy is authoritative for these databases, so it resends
+//! what the watch no longer holds.
+//!
+//! Carried on SHRED_COMPLETE. Nothing was necessarily shredded -- writes
+//! refused at the door are asked for the same way -- but the request the phone
+//! acts on is identical, so the reason code is what distinguishes them.
+//!
+//! Queued rather than dropped when there is no session, and flushed on the next
+//! one. The two cases that need this are precisely the ones with no phone
+//! attached: a wipe triggered by the phone going away, and a lock that held the
+//! radio down until a moment ago.
+//!
+//! @param dbs bitmap in SECURITY_SHRED_DB_BIT form. 0 sends nothing.
+void security_lock_endpoint_report_resync_needed(SecurityShredReason reason, uint32_t dbs);
 
 //! Tell the phone the lock state changed.
 void security_lock_endpoint_send_state_changed(SecurityLockState state);

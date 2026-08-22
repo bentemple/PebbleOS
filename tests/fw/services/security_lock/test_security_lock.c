@@ -63,6 +63,25 @@ uint32_t security_lock_shred(SecurityShredReason reason) {
   return 0;
 }
 
+//! What the service asked the phone to resend and, because the fake bt_ctl
+//! applies airplane mode synchronously, whether the radio was already back at
+//! the moment it asked.
+static int s_resync_reports;
+static SecurityShredReason s_resync_reason;
+static uint32_t s_resync_dbs;
+static bool s_airplane_at_report;
+void security_lock_endpoint_report_resync_needed(SecurityShredReason reason, uint32_t dbs) {
+  s_resync_reports++;
+  s_resync_reason = reason;
+  s_resync_dbs |= dbs;
+  s_airplane_at_report = bt_ctl_is_airplane_mode_on();
+}
+
+static int s_unfaithful_marks;
+void bt_persistent_storage_set_unfaithful(bool unfaithful) {
+  s_unfaithful_marks++;
+}
+
 // Fake PIN hash
 ////////////////////////////////////
 // Substituted for the mbedtls-backed implementation so the test does not link
@@ -155,6 +174,11 @@ void test_security_lock__initialize(void) {
   s_phone_connected = true;
   s_duress_shreds = 0;
   s_pending_cb = NULL;
+  s_resync_reports = 0;
+  s_resync_reason = SecurityShredReasonUnknown;
+  s_resync_dbs = 0;
+  s_airplane_at_report = false;
+  s_unfaithful_marks = 0;
   fake_bt_ctl_reset();
   fake_spi_flash_init(0, 0x1000000);
   pfs_init(false);
@@ -896,4 +920,128 @@ void test_security_lock__an_unreadable_config_record_leaves_no_pin(void) {
 
   cl_assert_equal_i(0, security_lock_get_pin_len());
   cl_assert(!security_lock_verify_pin(PIN, strlen(PIN), NULL));
+}
+
+// Writes refused while locked
+////////////////////////////////////
+
+//! The bug this exists for. A locked watch drops inbound writes and acks them
+//! as successes, and Gadgetbridge records a calendar event as synced the moment
+//! it fires the write -- so a pin pushed to a locked watch is discarded, acked,
+//! and never offered again. Leaving the locked state is the one chance to undo
+//! that.
+void test_security_lock__unlocking_asks_the_phone_to_resend_what_was_refused(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  security_lock_note_write_refused(BlobDBIdPins);
+  security_lock_note_write_refused(BlobDBIdWeather);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert_equal_i(1, s_resync_reports);
+  cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdPins) | SECURITY_SHRED_DB_BIT(BlobDBIdWeather),
+                    s_resync_dbs);
+  // Nothing was wiped, and the reason field is what says so.
+  cl_assert_equal_i(SecurityShredReasonWritesRefused, s_resync_reason);
+}
+
+//! A spurious resync is not free: it costs the phone a full calendar re-push
+//! every time the watch is unlocked.
+void test_security_lock__unlocking_with_nothing_refused_asks_for_nothing(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert_equal_i(0, s_resync_reports);
+  cl_assert_equal_i(0, s_unfaithful_marks);
+}
+
+//! Reported once. The second unlock has nothing left to report, so it is
+//! indistinguishable from a watch that never refused anything.
+void test_security_lock__the_refusals_are_cleared_once_reported(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  security_lock_note_write_refused(BlobDBIdPins);
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+  cl_assert_equal_i(1, s_resync_reports);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert_equal_i(1, s_resync_reports);
+}
+
+//! Repeats collapse: the phone is asked for a database, not for a write count.
+void test_security_lock__repeated_refusals_of_one_database_report_once(void) {
+  security_lock_note_write_refused(BlobDBIdPins);
+  security_lock_note_write_refused(BlobDBIdPins);
+  security_lock_note_write_refused(BlobDBIdPins);
+
+  cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdPins), security_lock_take_refused_dbs());
+  cl_assert_equal_i(0, security_lock_take_refused_dbs());
+}
+
+//! The phone-side flag for the same request. Gadgetbridge stops parsing the
+//! version handshake long before it reaches this byte, so it cannot be the only
+//! mechanism, but the official app reads it and it costs nothing to be right
+//! for both.
+void test_security_lock__unlocking_marks_the_watch_unfaithful(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  security_lock_note_write_refused(BlobDBIdPins);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert_equal_i(1, s_unfaithful_marks);
+}
+
+//! The ordering that matters. The same transition releases the radio, and a
+//! request sent while it is still down would find no session and vanish. The
+//! release runs first, so the message is offered to a radio that is back.
+void test_security_lock__the_radio_is_back_before_the_phone_is_asked(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  security_lock_radio_blackout_engage();
+  cl_assert(bt_ctl_is_airplane_mode_on());
+  security_lock_note_write_refused(BlobDBIdPins);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert_equal_i(1, s_resync_reports);
+  cl_assert(!s_airplane_at_report);
+}
+
+//! Turning the feature off is another way out of the locked state, and it does
+//! not go through security_lock_set_state().
+void test_security_lock__clearing_the_pin_asks_the_phone_to_resend(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  security_lock_note_write_refused(BlobDBIdContacts);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_pin());
+
+  cl_assert_equal_i(1, s_resync_reports);
+  cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdContacts), s_resync_dbs);
+}
+
+//! Deliberately not persisted. A reboot while locked wipes, and the wipe asks
+//! for its own resend -- so nothing is lost by keeping this in RAM, and a
+//! persisted bitmap would mean a flash write per refused write.
+void test_security_lock__refusals_do_not_survive_a_reboot(void) {
+  security_lock_note_write_refused(BlobDBIdPins);
+
+  prv_simulate_reboot();
+
+  cl_assert_equal_i(0, security_lock_take_refused_dbs());
+}
+
+//! Locking is not a transition out of the locked state, so it reports nothing.
+void test_security_lock__locking_asks_for_nothing(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  security_lock_note_write_refused(BlobDBIdPins);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+
+  cl_assert_equal_i(0, s_resync_reports);
 }
