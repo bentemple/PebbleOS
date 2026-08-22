@@ -41,10 +41,21 @@ PEBBLE_PORT = 12344
 
 # --- Things to adjust when the UI changes -----------------------------------
 
-#: Row index of each Security menu entry. Rows that only exist once a PIN is
-#: set are marked; see SECURITY_ROWS_WITH_PIN.
-SECURITY_ROWS_NO_PIN = ["Set PIN", "PIN Length"]
-SECURITY_ROWS_WITH_PIN = ["Change PIN", "PIN Length", "Duress PIN", "Clear PIN", "Lock Now"]
+#: Row index of each Security menu entry, mirroring the SettingsSecurityRow
+#: order in src/fw/apps/system/settings/security.c. Most rows appear only once
+#: a PIN is set; "Show in Launcher" is present either way because the Lockdown
+#: app is in the launcher regardless.
+SECURITY_ROWS_NO_PIN = ["Set PIN", "PIN Length", "Show in Launcher"]
+SECURITY_ROWS_WITH_PIN = [
+    "Change PIN",
+    "PIN Length",
+    "Lock After",
+    "Erase After",
+    "Duress PIN",
+    "Clear PIN",
+    "Lock Now",
+    "Show in Launcher",
+]
 
 #: Downs needed from the top of the Settings menu to reach Security.
 SETTINGS_TO_SECURITY = 10
@@ -149,8 +160,11 @@ class Console:
     way to see inside things that leave no state behind -- a shred that ran,
     a message that was rejected.
 
-    Raises the log level on connect, because the security lock logs its
-    lifecycle at DEBUG and the default level swallows all of it.
+    Note the log level cannot be raised from here. PBL_SHOULD_LOG gates on the
+    module's compile-time level, so a DBG line the build dropped does not
+    exist to be re-enabled; `log level set` only moves g_pbl_log_level, a
+    later filter that already sits wide open. Seeing a module's DBG output
+    means configuring with -DCONFIG_<MODULE>_LOG_LEVEL_DEBUG=y and rebuilding.
     """
 
     def __init__(self):
@@ -167,7 +181,9 @@ class Console:
         self._pump = threading.Thread(target=self._pump_logs, daemon=True)
         self._pump.start()
         self._await_link()
-        self.command("log level set 200")   # DEBUG
+        # Kept for boards whose g_pbl_log_level default is lower than DEBUG.
+        # A no-op on qemu_emery; see the class docstring.
+        self.command("log level set 200")
 
     def _await_link(self, timeout=60.0):
         """PULSE takes a moment to negotiate, and longer if the watch is busy
