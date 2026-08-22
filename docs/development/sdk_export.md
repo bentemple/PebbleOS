@@ -12,9 +12,19 @@ not surface it to apps:
    `src/fw/syscall/syscall_internal.h`), either in the matching
    `src/fw/syscall/<area>_syscalls.c` or alongside the implementation it
    wraps.
+
+   Not every export needs a new syscall. Anything built on the event service
+   — the `*_service_subscribe()` family — rides the existing
+   `sys_event_service_client_subscribe`, and the event service creates its
+   entry lazily on first subscribe, so no registration is needed either.
 2. **Register the symbol** in
    `tools/generate_native_sdk/exported_symbols.json` under the matching
-   group, with an `addedRevision` matching the new SDK revision.
+   group, with an `addedRevision` matching the new SDK revision, **and bump
+   the file's own top-level `"revision"` field to match**. Both. If
+   `addedRevision` is greater than the file's `revision`, the generator logs
+   a warning and **silently omits your symbol** — the build succeeds, the
+   firmware compiles, and the function simply is not in the SDK. The warning
+   is easy to miss among the pre-existing ones.
 3. **Bump the SDK revision** in
    `src/fw/process_management/pebble_process_info.h`: increment
    `PROCESS_INFO_CURRENT_SDK_VERSION_MINOR` and add a comment line above the
@@ -101,11 +111,42 @@ Notes:
 - `types` are emitted in the order listed; put typedefs after the typedefs
   they depend on (`includeAfter` is the escape hatch for ordering
   exceptions).
-- The generator errors out on exports it cannot find in the parsed headers
-  and on inconsistent revision numbers, but it does not verify that the
-  resulting `pebble.h` compiles — review its output.
+- The generator errors out on exports it cannot find in the parsed headers,
+  but an `addedRevision` newer than the file's `revision` only warns, and the
+  symbol is dropped. It also does not verify that the resulting `pebble.h`
+  compiles — review its output.
+- Platforms frozen at an older revision (`FROZEN_AT_REVISION` in
+  `exports.py`) turn a too-new function into a stub define — basalt gets
+  `#define your_function(...) (0)`. That is the answer for a capability the
+  older platforms do not have: apps compile everywhere without an `#ifdef`,
+  so an export does not need guarding for their sake.
 - The comment ledger above `PROCESS_INFO_CURRENT_SDK_VERSION_MINOR` is the
   only mapping between SDK revisions and version minors: no formula relates
   them (the minor once jumped `0x19` → `0x20` between revs 35 and 36, and a
   few minors and revs are skipped or doubled up). Treat the ledger as
   append-only history.
+
+## Verifying the export actually landed
+
+Since the whole point is that a clean firmware build proves nothing, check
+the generated output rather than the compile:
+
+```bash
+grep -c '<your_function>' build/src/fw/pebble.auto.c build/sdk/<platform>/include/pebble.h
+```
+
+Both must be non-zero. A useful negative control: before registering the
+symbol, `arm-none-eabi-nm build/pebbleos.elf | grep <your_function>` will not
+find it at all — `--gc-sections` drops it, because nothing references it
+until `pebble.auto.c` does.
+
+Two further checks worth doing for anything ABI-visible:
+
+- Diff the function-pointer table against the previous build and confirm your
+  entries are **appended** with no reordering of existing ones. That ordering
+  is the ABI.
+- `tools/build_sdk.py` exposes `generate_shim_files()`, which runs the real
+  generator against a given symbol file into an output directory of your
+  choice. It is the only way to check platforms other than your configured
+  board without a full build, and it lets you test a change to
+  `exported_symbols.json` against a copy before touching the real one.
