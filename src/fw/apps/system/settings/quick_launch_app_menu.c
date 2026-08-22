@@ -20,8 +20,7 @@
 
 typedef struct {
   AppMenuDataSource data_source;
-  ButtonId button;
-  bool is_tap;
+  QuickLaunchBinding binding;
   QuickLaunchMenuCategory category;
   Window *parent;
   OptionMenu *option_menu;
@@ -71,24 +70,23 @@ static bool prv_app_filter_callback(struct AppMenuDataSource *source, AppInstall
     return false;
   }
 
-  // For tap buttons, filter Timeline apps based on button
-  if (data->is_tap) {
-    if (data->button == BUTTON_ID_UP) {
-      // Tap Up: Only show Timeline Past, hide Timeline Future and Timeline Full
-      if (uuid_equal(&entry->uuid, &timeline_future_uuid)) {
-        return false;
-      }
-      if (uuid_equal(&entry->uuid, &timeline_full_uuid)) {
-        return false;
-      }
-    } else if (data->button == BUTTON_ID_DOWN) {
-      // Tap Down: Only show Timeline Future, hide Timeline Past and Timeline Full
-      if (uuid_equal(&entry->uuid, &timeline_past_uuid)) {
-        return false;
-      }
-      if (uuid_equal(&entry->uuid, &timeline_full_uuid)) {
-        return false;
-      }
+  // For tap buttons, filter Timeline apps based on button. Held buttons and
+  // combos carry no timeline direction, so they show every Timeline app.
+  if (data->binding == QuickLaunchBindingTapUp) {
+    // Tap Up: Only show Timeline Past, hide Timeline Future and Timeline Full
+    if (uuid_equal(&entry->uuid, &timeline_future_uuid)) {
+      return false;
+    }
+    if (uuid_equal(&entry->uuid, &timeline_full_uuid)) {
+      return false;
+    }
+  } else if (data->binding == QuickLaunchBindingTapDown) {
+    // Tap Down: Only show Timeline Future, hide Timeline Past and Timeline Full
+    if (uuid_equal(&entry->uuid, &timeline_past_uuid)) {
+      return false;
+    }
+    if (uuid_equal(&entry->uuid, &timeline_full_uuid)) {
+      return false;
     }
   }
 
@@ -120,21 +118,11 @@ static void prv_menu_select(OptionMenu *option_menu, int selection, void *contex
 
   QuickLaunchAppMenuData *data = context;
   if (selection == 0) {
-    if (data->is_tap) {
-      quick_launch_single_click_set_app(data->button, INSTALL_ID_INVALID);
-      quick_launch_single_click_set_enabled(data->button, false);
-    } else {
-      quick_launch_set_app(data->button, INSTALL_ID_INVALID);
-      quick_launch_set_enabled(data->button, false);
-    }
+    quick_launch_binding_disable(data->binding);
   } else {
     AppMenuNode *app_menu_node =
         app_menu_data_source_get_node_at_index(&data->data_source, selection - NUM_CUSTOM_CELLS);
-    if (data->is_tap) {
-      quick_launch_single_click_set_app(data->button, app_menu_node->install_id);
-    } else {
-      quick_launch_set_app(data->button, app_menu_node->install_id);
-    }
+    quick_launch_binding_set_app(data->binding, app_menu_node->install_id);
   }
   // Unwind the category menu too, so that selecting returns to the Quick Launch settings.
   app_window_stack_remove(data->parent, false);
@@ -155,11 +143,10 @@ static void prv_menu_unload(OptionMenu *option_menu, void *context) {
   app_free(data);
 }
 
-void quick_launch_app_menu_window_push(ButtonId button, bool is_tap,
-                                       QuickLaunchMenuCategory category, Window *parent) {
+void quick_launch_app_menu_window_push(QuickLaunchBinding binding, QuickLaunchMenuCategory category,
+                                       Window *parent) {
   QuickLaunchAppMenuData *data = app_zalloc_check(sizeof(*data));
-  data->button = button;
-  data->is_tap = is_tap;
+  data->binding = binding;
   data->category = category;
   data->parent = parent;
 
@@ -173,8 +160,7 @@ void quick_launch_app_menu_window_push(ButtonId button, bool is_tap,
                             },
                             data);
 
-  const AppInstallId install_id =
-      is_tap ? quick_launch_single_click_get_app(button) : quick_launch_get_app(button);
+  const AppInstallId install_id = quick_launch_binding_get_app(binding);
   const uint16_t app_index =
       app_menu_data_source_get_index_of_app_with_install_id(&data->data_source, install_id);
 
