@@ -11,9 +11,10 @@ goal: >
   chasing it.
 
 now: >
-  The boot hang is fixed and root-caused. 17 commits are on the branch. Airplane
-  mode on lock is the last item in flight; test-hook gating and a live PIN-unlock
-  pass remain.
+  Both original blockers are closed and the whole queue is done. 25 commits on
+  the branch, build clean, 31/33 targeted suites (2 pre-existing DUMA failures),
+  e2e 25/25 through the real UI, stress 0 failures. Nothing has run on hardware.
+  Four questions in open_questions want a decision; none blocks anything.
 
 test: |
   PATH="$VENV/bin:$PATH" ./waf build
@@ -60,6 +61,21 @@ done_this_session:
   - task: Dirty-since-shred early-out, Lock/Erase delay settings with Never,
       Lockdown app, Quick Launch combos, SDK-exported shred event
     files: [many; see git log]
+  - task: Radio blackout while locked and shredded, prior airplane state saved
+      and restored, with the self-disconnect guarded so it cannot arm a fresh
+      countdown; CFG and RT record versions split so a runtime change no longer
+      discards the PIN
+    files: [src/fw/services/security_lock/service.c, endpoint.c, shred.c]
+  - task: Test hooks behind CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS, moved out
+      of prompt_commands.c into their own translation unit; verified absent from
+      an off build by nm, strings and the archive contents
+    files: [src/fw/services/security_lock/test_hooks.c, Kconfig]
+  - task: blob_db_insert() refuses writes to every shredded store while locked,
+      with the target list moved to its own TU so the guard and the wipe read
+      one list. Also fixed two live bugs on the notification path - a refused
+      write was marking the watch dirty, and was publishing an insert event for
+      a record that was never stored
+    files: [src/fw/services/blob_db/api.c, src/fw/services/security_lock/shred_targets.c]
 
 blockers: []
 
@@ -165,12 +181,9 @@ failed:
   - Editing files an agent still had open, which produced a half-applied change.
 
 next:
-  - "Guard blob_db_insert() for the six shredded stores still accepted while
-    locked - pins, reminders, contacts, weather, iOS prefs and app glances.
-    Still needed despite the radio blackout, because a watch with Erase After
-    set to Never locks without shredding and stays on the air."
   - "Decide the Never-erase gap above - blackout on lock rather than on shred,
-    or rely on the blob_db guard, or both."
+    or rely on the blob_db guard alone. The guard has landed, so this is now a
+    choice rather than a hole."
   - "Hardware validation. Nothing here has run on a real watch, and the bug
     that started all of this was one an emulator-only constant created."
   - "Gadgetbridge side: the watch->phone lockdown request, which the user has
