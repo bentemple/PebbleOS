@@ -2,7 +2,7 @@
 session: general
 date: 2026-08-21
 status: partial
-outcome: PARTIAL_PLUS
+outcome: PARTIAL_MINUS
 ---
 
 goal: Built the PebbleOS + Gadgetbridge security lockdown feature end to end; watch boots, locks and wipes, but the wipe never signals completion
