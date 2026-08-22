@@ -18,6 +18,8 @@
 #include "applib/health_service_private.h"
 #include "applib/pbl_std/locale.h"
 #include "applib/plugin_service_private.h"
+#include "applib/security_shred_service.h"
+#include "applib/security_shred_service_private.h"
 #include "applib/tick_timer_service.h"
 #include "applib/tick_timer_service_private.h"
 #include "applib/touch_service_private.h"
@@ -112,6 +114,8 @@ LogState *app_state_get_log_state(void);
 BatteryStateServiceState *app_state_get_battery_state_service_state(void);
 
 BacklightServiceState *app_state_get_backlight_service_state(void);
+
+SecurityShredServiceState *app_state_get_security_shred_service_state(void);
 
 TickTimerServiceState *app_state_get_tick_timer_service_state(void);
 

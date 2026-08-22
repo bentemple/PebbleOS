@@ -4,7 +4,7 @@
               "You should also make sure you are obeying our API design guidelines:",
               "https://pebbletechnology.atlassian.net/wiki/display/DEV/SDK+API+Design+Guidelines"
             ],
-  "revision" : "109",
+  "revision" : "110",
   "version" : "2.0",
   "files": [
     "include/pbl/drivers/ambient_light.h",
@@ -56,6 +56,7 @@
     "fw/applib/health_service.h",
     "fw/applib/moddable/moddable.h",
     "fw/applib/platform.h",
+    "fw/applib/security_shred_service.h",
     "fw/applib/tick_timer_service.h",
     "fw/applib/touch_service.h",
     "include/pbl/services/touch/touch_event.h",
@@ -458,6 +459,25 @@
                   "type": "function",
                   "name": "backlight_service_unsubscribe",
                   "addedRevision": "101"
+                }
+              ]
+            }, {
+              "type": "group",
+              "name": "SecurityShredService",
+              "addedRevision": "110",
+              "exports": [
+                {
+                  "type": "type",
+                  "name": "SecurityShredHandler",
+                  "addedRevision": "110"
+                }, {
+                  "type": "function",
+                  "name": "security_shred_service_subscribe",
+                  "addedRevision": "110"
+                }, {
+                  "type": "function",
+                  "name": "security_shred_service_unsubscribe",
+                  "addedRevision": "110"
                 }
               ]
             }, {
