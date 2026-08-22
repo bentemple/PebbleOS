@@ -77,6 +77,15 @@ verified_live_on_qemu:
       Was 34/34 HardFaults. Now completes, watch healthy at 46ms.
   - two_wipes_back_to_back: >
       Was a permanent wedge. Now the second is a no-op reporting 0x80000000.
+  - e2e_suite_25_of_25: >
+      tools/security_lock_e2e.py, which drives the real touch UI and the
+      protocol endpoint rather than the console, passes 25/25. The previous
+      handoff recorded 19/24. Covers phone-initiated LOCK reaching the
+      endpoint, the wipe finishing (1.0s, against never before), unlocking
+      through the pad, wrong-PIN counting and lockout, the attempt counter
+      resetting on success, disconnect arming both countdowns and reconnect
+      cancelling them, and clearing the PIN. Note it needs exclusive use of the
+      console, so shut the harness daemon down before running it.
   - stress_suite: >
       security_lock_stress.py, 0 failures across 30 valid trials on two seeds,
       QEMU instance count confirmed at 1 before and after each run.
