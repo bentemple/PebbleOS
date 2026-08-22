@@ -21,6 +21,7 @@
 
 #include "kernel/events.h"
 #include "kernel/pbl_malloc.h"
+#include "pbl/services/security_lock.h"
 #include <pbl/logging/logging.h>
 
 #include <inttypes.h>
@@ -242,6 +243,12 @@ status_t blob_db_insert(BlobDBId db_id,
 
   const BlobDB *db = &s_blob_dbs[db_id];
   if (db->insert) {
+    // The single dispatch point for every write into a blob db, which is what
+    // makes this the one place a security shred can learn that its targets may
+    // hold something new. Marked before dispatching and regardless of the
+    // result: a write that fails part way through has still landed on flash.
+    security_lock_mark_dirty_since_shred();
+
     status_t rv = db->insert(key, key_len, val, val_len);
     if (rv == S_SUCCESS) {
       blob_db_event_put(BlobDBEventTypeInsert, db_id, key, key_len);

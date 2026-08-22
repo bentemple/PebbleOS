@@ -20,6 +20,7 @@
 #include "stubs_layout_layer.h"
 #include "stubs_logging.h"
 #include "stubs_mutex.h"
+#include "fake_security_lock.h"
 #include "stubs_passert.h"
 #include "stubs_pbl_malloc.h"
 #include "stubs_pebble_tasks.h"

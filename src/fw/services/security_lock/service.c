@@ -24,7 +24,7 @@ PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LE
 #define SETTINGS_FILE_NAME "seclock"
 #define SETTINGS_FILE_SIZE KiBYTES(2)
 
-#define RECORD_VERSION 3
+#define RECORD_VERSION 4
 
 //! Config: written rarely (only when the PIN changes).
 static const char *CFG_KEY = "cfg";
@@ -50,6 +50,9 @@ typedef struct PACKED {
   uint8_t state;
   uint8_t failed_attempts;
   bool shred_pending;
+  //! Something has been written to the storage a shred destroys since the last
+  //! one ran. False means a shred has nothing new to destroy.
+  bool dirty_since_shred;
   //! Both measured from the disconnect, not from each other.
   time_t lock_deadline;
   time_t shred_deadline;
@@ -72,6 +75,10 @@ static void prv_runtime_defaults(SecurityLockRuntime *rt) {
   *rt = (SecurityLockRuntime){
       .version = RECORD_VERSION,
       .state = SecurityLockStateDisabled,
+      // Defaults are what a missing or unreadable record falls back to, so this
+      // is the answer given whenever the real state is unknown. It must be
+      // "dirty": a redundant shred is waste, a skipped one is a data leak.
+      .dirty_since_shred = true,
       .lock_delay_s = SECURITY_LOCK_DEFAULT_LOCK_DELAY_S,
       .shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S,
   };
@@ -513,6 +520,57 @@ status_t security_lock_set_shred_pending(bool pending) {
   mutex_lock(s_mutex);
   s_runtime_cache.shred_pending = pending;
   status_t rv = prv_flush_runtime();
+  mutex_unlock(s_mutex);
+  return rv;
+}
+
+bool security_lock_is_dirty_since_shred(void) {
+  if (!s_initialized) {
+    // The record has not been read yet, so nothing is known about it.
+    return true;
+  }
+  return s_runtime_cache.dirty_since_shred;
+}
+
+void security_lock_mark_dirty_since_shred(void) {
+  if (!s_initialized) {
+    return;
+  }
+  // Unlocked fast path. This runs on every stored notification and every
+  // inbound BlobDB write, and the flag stays set until a shred clears it, so
+  // all but the first of those must cost nothing and touch no flash.
+  if (s_runtime_cache.dirty_since_shred) {
+    return;
+  }
+
+  mutex_lock(s_mutex);
+  // Re-read under the lock: two writers racing the check above would otherwise
+  // both flush.
+  if (!s_runtime_cache.dirty_since_shred) {
+    s_runtime_cache.dirty_since_shred = true;
+    status_t rv = prv_flush_runtime();
+    if (rv != S_SUCCESS) {
+      // RAM still reads dirty, so this boot shreds; a reboot before the next
+      // successful write would not. Loud, because the consequence is a wipe
+      // that decides it has nothing to do.
+      PBL_LOG_ERR("Failed to persist the dirty flag: %" PRId32, (int32_t)rv);
+    }
+  }
+  mutex_unlock(s_mutex);
+}
+
+status_t security_lock_clear_dirty_since_shred(void) {
+  if (!s_initialized) {
+    return E_INVALID_OPERATION;
+  }
+  mutex_lock(s_mutex);
+  s_runtime_cache.dirty_since_shred = false;
+  status_t rv = prv_flush_runtime();
+  if (rv != S_SUCCESS) {
+    // Flash still says dirty. Match it rather than leave RAM claiming clean,
+    // which would talk the next shred out of running.
+    s_runtime_cache.dirty_since_shred = true;
+  }
   mutex_unlock(s_mutex);
   return rv;
 }

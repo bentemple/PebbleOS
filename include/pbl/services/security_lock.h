@@ -123,6 +123,31 @@ status_t security_lock_set_shred_pending(bool pending);
 //! entire point, and a detected clock rollback.
 bool security_lock_is_shredding(void);
 
+//! True when something has been written to the storage a shred destroys since
+//! the last shred ran.
+//!
+//! Almost everything a shred erases is content the phone sent, so a shred that
+//! runs before the phone has resynced has nothing new to destroy and can skip
+//! the filesystem half of the wipe.
+//!
+//! Reads true whenever the answer is not positively known -- no record yet, an
+//! unrecognised record version, the service not yet initialised. The flag may
+//! only ever err towards shredding: a redundant wipe is waste, a skipped one
+//! is a data leak.
+bool security_lock_is_dirty_since_shred(void);
+
+//! Record that content a shred would destroy has just been written.
+//!
+//! Called from the storage entry points themselves rather than attributed to a
+//! source, so nothing can be misclassified. Cheap once already dirty: only the
+//! clean-to-dirty transition writes flash, so this costs one write per shred
+//! cycle rather than one per notification.
+void security_lock_mark_dirty_since_shred(void);
+
+//! Clear the flag. For a shred to call as it begins destroying content, so
+//! anything written from that point on re-marks and the next shred runs whole.
+status_t security_lock_clear_dirty_since_shred(void);
+
 //! Absolute wall-clock deadlines armed when the phone disconnects. 0 means
 //! not armed.
 //!

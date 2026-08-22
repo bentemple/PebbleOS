@@ -176,19 +176,43 @@ static void prv_start_sweep(void) {
   prv_schedule_next_pass();
 }
 
+//! True when the filesystem half of a wipe would destroy nothing.
+//!
+//! Almost everything a wipe erases came from the phone, so if the phone has not
+//! written anything back since the last wipe there is nothing new to reach.
+//! shred_pending outranks the flag: an interrupted wipe has to finish, or a
+//! half-wiped filesystem passes for a clean one.
+static bool prv_storage_is_clean(void) {
+  return !security_lock_is_shred_pending() && !security_lock_is_dirty_since_shred();
+}
+
 //! @param dbs_running the blob dbs are up, so they have to be closed and
 //!                    reopened around the wipe and events can be published
 //! @param finish      run the tail here -- sector sweep, unfaithful flag,
 //!                    clearing shred_pending. False at early boot, where
 //!                    security_lock_finish_boot_shred() does it instead.
 static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool finish) {
-  PBL_LOG_INFO("Shredding: %s", security_lock_shred_reason_str(reason));
+  // Nothing written back since the last wipe means nothing new to destroy, so
+  // the filesystem half is skipped. The raw-flash regions below are not covered
+  // by the flag -- a crash writes a coredump whether or not the phone synced --
+  // so those are erased either way.
+  const bool clean = prv_storage_is_clean();
+
+  PBL_LOG_INFO("Shredding: %s%s", security_lock_shred_reason_str(reason),
+               clean ? " (nothing written since the last wipe)" : "");
 
   // Refuse fresh content for the duration. security_lock_is_locked() does not
   // cover this: the duress PIN and the clock-rollback trigger both wipe while
   // the watch is unlocked. Set before anything else so nothing slips in during
   // the teardown below.
   s_shredding = true;
+
+  // Cleared the moment the decision above is taken, not at the end. Everything
+  // from here on -- including the quiesce, which yields -- re-marks, so a write
+  // racing the wipe leaves the flag dirty and the next wipe runs in full.
+  if (!clean) {
+    security_lock_clear_dirty_since_shred();
+  }
 
   if (dbs_running) {
     // Not merely where every trigger already happens to run -- the teardown
@@ -204,6 +228,10 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
     // Synchronous and inline on purpose. security_lock_engage() used to do
     // this for itself, which is exactly why the lock trigger was safe and the
     // bare shred triggers were not; doing it here means no caller can forget.
+    //
+    // Run even when there is nothing to destroy: the lock triggers rely on it
+    // to take a notification off the screen, and that is true whether or not
+    // the file behind it has already been zeroed.
     security_lock_ui_quiesce();
   }
 
@@ -214,9 +242,13 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
   const PebbleTask task = pebble_task_get_current();
   task_watchdog_mask_clear(task);
 
-  // Set before anything is destroyed so a shred interrupted by power loss is
-  // resumed at next boot rather than left half done.
-  security_lock_set_shred_pending(true);
+  if (!clean) {
+    // Set before anything is destroyed so a shred interrupted by power loss is
+    // resumed at next boot rather than left half done. The clean path leaves it
+    // alone: it is only reached when the flag is already clear, and it destroys
+    // nothing that would need resuming.
+    security_lock_set_shred_pending(true);
+  }
 
   // Announce before wiping, so anything holding data of its own gets the
   // chance to destroy it rather than being told afterwards. Not emitted at
@@ -240,14 +272,14 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
   // or the wipe races their cached handles and the file is recreated from
   // stale state afterwards. At early boot they have not been initialised yet
   // and calling into them would be a use-before-init.
-  if (dbs_running) {
+  if (!clean && dbs_running) {
     timeline_event_deinit();
     reminder_db_deinit();
     pin_db_deinit();
   }
 
   uint32_t wiped = 0;
-  for (size_t i = 0; i < ARRAY_LENGTH(s_shred_targets); ++i) {
+  for (size_t i = 0; !clean && (i < ARRAY_LENGTH(s_shred_targets)); ++i) {
     status_t rv = pfs_shred(s_shred_targets[i].filename);
     if (rv == S_SUCCESS) {
       wiped |= SECURITY_SHRED_DB_BIT(s_shred_targets[i].db_id);
@@ -286,12 +318,13 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
   // It is also the slow half, and the least urgent: the live data is already
   // gone by this point, so this is cleanup. It runs in scheduled slices, and
   // at early boot it is left to security_lock_finish_boot_shred() entirely.
-  if (finish) {
+  const bool sweeping = (!clean && finish);
+  if (sweeping) {
     prv_start_sweep();
   }
-  PBL_LOG_INFO("SECSTAGE sweep started=%d", (int)finish);
+  PBL_LOG_INFO("SECSTAGE sweep started=%d", (int)sweeping);
 
-  if (dbs_running) {
+  if (!clean && dbs_running) {
     // Bring the databases back up against the now-empty files.
     pin_db_init();
     PBL_LOG_INFO("SECSTAGE pin_db_init done");
@@ -312,12 +345,15 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
   // Tell the phone its copy is authoritative. Gadgetbridge does not currently
   // read this flag (an explicit SHRED_COMPLETE message covers that), but the
   // official app does, and it costs nothing to be correct for both.
-  if (finish && notify_phone) {
+  //
+  // Not on the clean path: nothing of the phone's was destroyed, and asking for
+  // a resend there would only produce the writes that make the next wipe real.
+  if (!clean && finish && notify_phone) {
     bt_persistent_storage_set_unfaithful(true);
   }
 #endif
 
-  if (finish) {
+  if (!clean && finish) {
     security_lock_set_shred_pending(false);
   }
 
@@ -344,6 +380,21 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
 }
 
 uint32_t security_lock_shred(SecurityShredReason reason) {
+  // A wipe arriving while one is running has no correct behaviour other than
+  // "don't": the teardown closes and reopens databases whose re-init is
+  // asynchronous, so a second run walks into half-built state.
+  //
+  // Scoped to the synchronous body, not to the sector sweep that outlives it.
+  // The sweep runs for minutes over already-deleted sectors under the recursive
+  // filesystem mutex, so an overlapping wipe only ever waits out one pass --
+  // whereas refusing wipes for minutes would swallow a real duress or
+  // attempts-exhausted trigger, and this must only ever err towards shredding.
+  // The redundancy the sweep window used to cost is handled instead by the
+  // dirty flag, which stays clear across a sweep because a sweep writes nothing.
+  if (s_shredding) {
+    PBL_LOG_WRN("Shred already running; ignoring %s", security_lock_shred_reason_str(reason));
+    return 0;
+  }
   return prv_shred(reason, true /* dbs_running */, true /* finish */);
 }
 
@@ -410,10 +461,14 @@ void security_lock_handle_boot(void) {
   // exist -- that is the whole point of hooking early boot, and it is the fast
   // part. The sector sweep only erases superseded copies, so it waits for
   // security_lock_finish_boot_shred() rather than holding up the boot.
+  // Read before the wipe, which clears the flag it is derived from. A clean
+  // wipe touches no filesystem file, so there are no superseded copies for the
+  // sweep to find and no resend to ask the phone for.
+  const bool tail_owed = !prv_storage_is_clean();
   prv_shred(reason, false /* dbs_running */, false /* finish */);
-  s_boot_shred_tail_owed = true;
+  s_boot_shred_tail_owed = tail_owed;
 
-  PBL_LOG_INFO("SECBOOT handle_boot leave owed=1 skipped=0 locked=%d reason=%s",
+  PBL_LOG_INFO("SECBOOT handle_boot leave owed=%d skipped=0 locked=%d reason=%s", (int)tail_owed,
                (int)security_lock_is_locked(), security_lock_shred_reason_str(reason));
 }
 

@@ -9,6 +9,8 @@
 #include "pbl/services/security_lock_pin_hash.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/filesystem/pfs.h"
+#include "pbl/services/settings/settings_file.h"
+#include "util/units.h"
 
 // Stubs
 ////////////////////////////////////
@@ -99,6 +101,26 @@ bool security_lock_hash_equal(const uint8_t a[SECURITY_LOCK_HASH_LEN],
 static void prv_simulate_reboot(void) {
   security_lock_deinit();
   security_lock_init();
+}
+
+//! Rewrite the stored runtime record with a version the service does not know,
+//! which is what a downgrade or a record from a future build looks like.
+//! Length is preserved so only the version field is in question.
+static void prv_corrupt_runtime_version(void) {
+  SettingsFile file;
+  cl_assert_equal_i(S_SUCCESS, settings_file_open(&file, "seclock", KiBYTES(2)));
+  const int len = settings_file_get_len(&file, "rt", 2);
+  cl_assert(len > (int)sizeof(uint16_t));
+
+  uint8_t *record = malloc(len);
+  cl_assert_equal_i(S_SUCCESS, settings_file_get(&file, "rt", 2, record, len));
+  // The version is the first field of the record.
+  record[0] = 0xff;
+  record[1] = 0xff;
+  cl_assert_equal_i(S_SUCCESS, settings_file_set(&file, "rt", 2, record, len));
+
+  settings_file_close(&file);
+  free(record);
 }
 
 static const char *PIN = "1234";
@@ -322,6 +344,68 @@ void test_security_lock__shred_pending_survives_reboot(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_shred_pending(false));
   prv_simulate_reboot();
   cl_assert(!security_lock_is_shred_pending());
+}
+
+// Dirty-since-shred flag
+////////////////////////////////////
+
+//! A watch that has never recorded the flag knows nothing about what is on it,
+//! and a shred that believes an unknown watch is clean is a data leak. Reading
+//! dirty is the only safe answer.
+void test_security_lock__unrecorded_state_reads_dirty(void) {
+  cl_assert(security_lock_is_dirty_since_shred());
+}
+
+//! Before the record has been read at all -- which is where the boot shred
+//! decision would sit if the ordering ever changed.
+void test_security_lock__uninitialised_reads_dirty(void) {
+  security_lock_deinit();
+  cl_assert(security_lock_is_dirty_since_shred());
+  security_lock_init();
+}
+
+void test_security_lock__clearing_and_marking_survive_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_dirty_since_shred());
+  cl_assert(!security_lock_is_dirty_since_shred());
+  prv_simulate_reboot();
+  cl_assert(!security_lock_is_dirty_since_shred());
+
+  security_lock_mark_dirty_since_shred();
+  cl_assert(security_lock_is_dirty_since_shred());
+  prv_simulate_reboot();
+  cl_assert(security_lock_is_dirty_since_shred());
+}
+
+//! Marking runs on every stored notification and every inbound blob db write.
+//! Persisting each one would be a flash write per notification, so only the
+//! clean-to-dirty transition may touch flash.
+void test_security_lock__marking_only_writes_flash_on_the_transition(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_dirty_since_shred());
+
+  const uint32_t before_first = fake_flash_write_count();
+  security_lock_mark_dirty_since_shred();
+  const uint32_t after_first = fake_flash_write_count();
+  cl_assert(after_first > before_first);
+
+  for (int i = 0; i < 20; ++i) {
+    security_lock_mark_dirty_since_shred();
+  }
+  cl_assert_equal_i(after_first, fake_flash_write_count());
+  cl_assert(security_lock_is_dirty_since_shred());
+}
+
+//! A record written by a build that did not have the flag cannot be trusted to
+//! say anything about it, so the whole record is discarded -- and the defaults
+//! it falls back to have to read dirty, or the upgrade would talk the first
+//! shred out of running.
+void test_security_lock__record_from_an_unknown_version_reads_dirty(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_dirty_since_shred());
+  cl_assert(!security_lock_is_dirty_since_shred());
+
+  prv_corrupt_runtime_version();
+  prv_simulate_reboot();
+
+  cl_assert(security_lock_is_dirty_since_shred());
 }
 
 // Disconnect deadline

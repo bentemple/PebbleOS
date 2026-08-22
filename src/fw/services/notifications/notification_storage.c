@@ -7,6 +7,7 @@
 #include "pbl/util/uuid.h"
 #include "kernel/pbl_malloc.h"
 #include "pbl/services/filesystem/pfs.h"
+#include "pbl/services/security_lock.h"
 #include <pbl/logging/logging.h>
 #include <pbl/logging/logging.h>
 #include "pbl/os/mutex.h"
@@ -263,6 +264,11 @@ cleanup:
 void notification_storage_store(TimelineItem* notification) {
   PBL_ASSERTN(s_notif_storage_mutex != NULL);
   PBL_ASSERTN(notification != NULL);
+
+  // Notifications reach flash here whether they came from the phone or were
+  // raised on the watch, so marking here covers both without having to work out
+  // which. A security shred reads this to decide whether it has anything to do.
+  security_lock_mark_dirty_since_shred();
 
   SerializedTimelineItemHeader header = { .common.id = UUID_INVALID };
   timeline_item_serialize_header(notification, &header);

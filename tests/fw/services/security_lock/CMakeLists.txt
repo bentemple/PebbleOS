@@ -30,3 +30,11 @@ pbl_clar_test(test_sha256
     src/fw/services/security_lock/sha256.c
   OVERRIDES dummy_board
 )
+
+# Everything the shred drives is faked in the test, so nothing but shred.c is
+# built here: the subject is the shape of the sequence, not what each step does.
+pbl_clar_test(test_security_lock_shred
+  SOURCES
+    src/fw/services/security_lock/shred.c
+  OVERRIDES dummy_board
+)

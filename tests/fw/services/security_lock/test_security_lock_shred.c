@@ -1,0 +1,438 @@
+/* SPDX-FileCopyrightText: 2026 Core Devices LLC */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+//! Tests for what a shred does and, more importantly, what it declines to do.
+//!
+//! Everything the shred touches is faked, because the point here is the shape
+//! of the sequence -- which teardowns run, how many files are zeroed, whether
+//! the sector sweep is started -- rather than the behaviour of any one of them.
+
+#include "clar.h"
+
+#include <string.h>
+
+#include "pbl/services/security_lock.h"
+#include "pbl/services/security_lock_shred.h"
+
+// Stubs
+////////////////////////////////////
+#include "stubs_bootbits.h"
+#include "stubs_logging.h"
+#include "stubs_passert.h"
+#include "stubs_pebble_tasks.h"
+#include "stubs_print.h"
+#include "stubs_serial.h"
+#include "stubs_task_watchdog.h"
+
+// Fakes
+////////////////////////////////////
+
+//! Every observable effect of a shred, so a test can state the whole shape of
+//! a run rather than probing one call at a time.
+typedef struct {
+  int quiesces;
+  int events;
+  int shred_completes;
+  int timeline_deinits;
+  int timeline_inits;
+  int reminder_deinits;
+  int reminder_inits;
+  int pin_deinits;
+  int pin_inits;
+  int notif_resets;
+  int files_shredded;
+  int region_erases;
+  int sweeps_started;
+  int unfaithful_marks;
+  uint32_t last_complete_bitmap;
+} ShredTrace;
+
+static ShredTrace s_trace;
+
+//! Standing in for the settings-backed service, so the shred's decisions can be
+//! driven directly. The real record store is covered by test_security_lock.
+static bool s_shred_pending;
+static bool s_dirty;
+static bool s_locked;
+static uint8_t s_pin_len;
+static SecurityLockState s_state;
+
+//! Run inside security_lock_ui_quiesce(), which is called from within the shred
+//! with the in-flight flag already set. That is the only place a re-entrant
+//! trigger can be injected from.
+static void (*s_during_quiesce)(void);
+
+bool security_lock_is_shred_pending(void) {
+  return s_shred_pending;
+}
+
+status_t security_lock_set_shred_pending(bool pending) {
+  s_shred_pending = pending;
+  return S_SUCCESS;
+}
+
+bool security_lock_is_dirty_since_shred(void) {
+  return s_dirty;
+}
+
+void security_lock_mark_dirty_since_shred(void) {
+  s_dirty = true;
+}
+
+status_t security_lock_clear_dirty_since_shred(void) {
+  s_dirty = false;
+  return S_SUCCESS;
+}
+
+bool security_lock_is_locked(void) {
+  return s_locked;
+}
+
+SecurityLockState security_lock_get_state(void) {
+  return s_state;
+}
+
+status_t security_lock_set_state(SecurityLockState state) {
+  s_state = state;
+  s_locked = (state == SecurityLockStateLocked);
+  return S_SUCCESS;
+}
+
+uint8_t security_lock_get_pin_len(void) {
+  return s_pin_len;
+}
+
+time_t security_lock_get_lock_deadline(void) {
+  return 0;
+}
+
+time_t security_lock_get_shred_deadline(void) {
+  return 0;
+}
+
+bool security_lock_shred_deadline_expired(time_t now) {
+  return false;
+}
+
+bool security_lock_note_time(time_t now) {
+  return false;
+}
+
+time_t rtc_get_time(void) {
+  return 1000;
+}
+
+void security_lock_ui_quiesce(void) {
+  s_trace.quiesces++;
+  if (s_during_quiesce) {
+    void (*cb)(void) = s_during_quiesce;
+    s_during_quiesce = NULL;
+    cb();
+  }
+}
+
+void security_lock_endpoint_send_shred_complete(SecurityShredReason reason, uint32_t wiped) {
+  s_trace.shred_completes++;
+  s_trace.last_complete_bitmap = wiped;
+}
+
+void timeline_event_init(void) {
+  s_trace.timeline_inits++;
+}
+
+void timeline_event_deinit(void) {
+  s_trace.timeline_deinits++;
+}
+
+void reminder_db_init(void) {
+  s_trace.reminder_inits++;
+}
+
+void reminder_db_deinit(void) {
+  s_trace.reminder_deinits++;
+}
+
+void pin_db_init(void) {
+  s_trace.pin_inits++;
+}
+
+void pin_db_deinit(void) {
+  s_trace.pin_deinits++;
+}
+
+void notification_storage_reset_and_init(void) {
+  s_trace.notif_resets++;
+}
+
+status_t pfs_shred(const char *name) {
+  s_trace.files_shredded++;
+  return S_SUCCESS;
+}
+
+int pfs_gc_deleted_sectors(int max_sectors) {
+  return 0;
+}
+
+int pfs_get_erase_region_count(void) {
+  return 64;
+}
+
+void flash_region_erase_optimal_range_no_watchdog(uint32_t min_start, uint32_t max_start,
+                                                  uint32_t min_end, uint32_t max_end) {
+  s_trace.region_erases++;
+}
+
+void flash_logging_init(void) {}
+
+void flash_logging_set_enabled(bool enabled) {}
+
+void bt_persistent_storage_set_unfaithful(bool unfaithful) {
+  s_trace.unfaithful_marks++;
+}
+
+typedef void (*SystemTaskEventCallback)(void *data);
+bool system_task_add_callback(SystemTaskEventCallback cb, void *data) {
+  return true;
+}
+
+typedef uint32_t TimerID;
+typedef void (*NewTimerCallback)(void *data);
+TimerID new_timer_create(void) {
+  return 1;
+}
+
+bool new_timer_start(TimerID timer, uint32_t timeout_ms, NewTimerCallback cb, void *cb_data,
+                     uint32_t flags) {
+  // The sweep is the only thing this module schedules on a timer. Counted, not
+  // run: the tests care whether the slow half was started at all.
+  s_trace.sweeps_started++;
+  return true;
+}
+
+void event_put(void *event) {
+  s_trace.events++;
+}
+
+// Helpers
+////////////////////////////////////
+
+//! Number of files security_lock_shred() zeroes on a full run. Spelled out
+//! rather than derived, so shrinking the list has to be a deliberate edit here
+//! too.
+#define SHRED_TARGET_COUNT 7
+
+void test_security_lock_shred__initialize(void) {
+  memset(&s_trace, 0, sizeof(s_trace));
+  s_during_quiesce = NULL;
+  s_shred_pending = false;
+  s_dirty = true;
+  s_locked = false;
+  s_pin_len = 4;
+  s_state = SecurityLockStateArmed;
+}
+
+void test_security_lock_shred__cleanup(void) {}
+
+// A wipe with something to destroy
+////////////////////////////////////
+
+void test_security_lock_shred__dirty_storage_runs_the_whole_wipe(void) {
+  const uint32_t wiped = security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+  cl_assert_equal_i(1, s_trace.timeline_deinits);
+  cl_assert_equal_i(1, s_trace.reminder_deinits);
+  cl_assert_equal_i(1, s_trace.pin_deinits);
+  cl_assert_equal_i(1, s_trace.timeline_inits);
+  cl_assert_equal_i(1, s_trace.reminder_inits);
+  cl_assert_equal_i(1, s_trace.pin_inits);
+  cl_assert_equal_i(1, s_trace.notif_resets);
+  cl_assert_equal_i(1, s_trace.sweeps_started);
+  cl_assert_equal_i(1, s_trace.unfaithful_marks);
+  cl_assert(s_trace.region_erases > 0);
+
+  // The databases it names, plus the raw-flash regions.
+  cl_assert(wiped & SECURITY_SHRED_NON_BLOBDB_BIT);
+  cl_assert(wiped & ~SECURITY_SHRED_NON_BLOBDB_BIT);
+
+  // Nothing left half done, and the wipe consumed the reason it ran.
+  cl_assert(!security_lock_is_shred_pending());
+  cl_assert(!security_lock_is_dirty_since_shred());
+}
+
+//! The flag is cleared before anything is destroyed, so a write that lands
+//! while the wipe is running is not swallowed by it -- the next wipe has to
+//! know that write happened.
+void test_security_lock_shred__a_write_during_the_wipe_leaves_it_dirty(void) {
+  s_during_quiesce = security_lock_mark_dirty_since_shred;
+  security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert(security_lock_is_dirty_since_shred());
+}
+
+// A wipe with nothing to destroy
+////////////////////////////////////
+
+//! Almost everything a wipe erases came from the phone, so a wipe that arrives
+//! before the phone has written anything back has nothing new to reach. The
+//! filesystem half is where both the cost and the hang live, so that is what is
+//! skipped.
+void test_security_lock_shred__clean_storage_skips_the_filesystem(void) {
+  s_dirty = false;
+
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(0, s_trace.files_shredded);
+  cl_assert_equal_i(0, s_trace.timeline_deinits);
+  cl_assert_equal_i(0, s_trace.reminder_deinits);
+  cl_assert_equal_i(0, s_trace.pin_deinits);
+  cl_assert_equal_i(0, s_trace.timeline_inits);
+  cl_assert_equal_i(0, s_trace.reminder_inits);
+  cl_assert_equal_i(0, s_trace.pin_inits);
+  cl_assert_equal_i(0, s_trace.notif_resets);
+  cl_assert_equal_i(0, s_trace.sweeps_started);
+  // Nothing of the phone's was destroyed, so there is nothing to ask it to
+  // resend -- and asking would only produce the writes that make the next wipe
+  // real.
+  cl_assert_equal_i(0, s_trace.unfaithful_marks);
+}
+
+//! Coredumps and debug logs accumulate whether or not the phone ever synced --
+//! a crash writes a RAM snapshot either way -- so the flag says nothing about
+//! them and they are erased on every run. The blank check makes it near-free.
+void test_security_lock_shred__clean_storage_still_erases_raw_flash(void) {
+  s_dirty = false;
+  security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert(s_trace.region_erases > 0);
+}
+
+//! An app's own persist storage is not tracked by the flag and only the app
+//! knows what it holds, so it has to be told regardless.
+void test_security_lock_shred__clean_storage_still_announces(void) {
+  s_dirty = false;
+  security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert_equal_i(1, s_trace.events);
+  cl_assert_equal_i(1, s_trace.shred_completes);
+  // Honest about what it did: the raw-flash regions and nothing else.
+  cl_assert_equal_i(SECURITY_SHRED_NON_BLOBDB_BIT, s_trace.last_complete_bitmap);
+}
+
+//! The lock triggers rely on the shred to take a notification off the screen,
+//! and that is needed whether or not the file behind it still has contents.
+void test_security_lock_shred__clean_storage_still_quiesces_the_ui(void) {
+  s_dirty = false;
+  security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert_equal_i(1, s_trace.quiesces);
+}
+
+//! An interrupted wipe has to finish or a half-wiped filesystem is mistaken for
+//! a clean one, so the pending flag outranks the dirty flag in both directions.
+void test_security_lock_shred__pending_outranks_a_clean_flag(void) {
+  s_dirty = false;
+  s_shred_pending = true;
+
+  security_lock_shred(SecurityShredReasonUnknown);
+
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+  cl_assert_equal_i(1, s_trace.sweeps_started);
+  cl_assert(!security_lock_is_shred_pending());
+}
+
+// Re-entrancy
+////////////////////////////////////
+
+static void prv_shred_again(void) {
+  cl_assert(security_lock_is_shredding());
+  // Nothing was wiped, because nothing ran.
+  cl_assert_equal_i(0, security_lock_shred(SecurityShredReasonDuressPin));
+}
+
+//! A wipe arriving while one is running has no correct behaviour other than
+//! "don't": the teardown closes databases whose re-init is asynchronous, so a
+//! second run walks into half-built state and blocks on it forever.
+void test_security_lock_shred__a_wipe_during_a_wipe_is_refused(void) {
+  s_during_quiesce = prv_shred_again;
+
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  // Exactly one wipe's worth of work, not two.
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+  cl_assert_equal_i(1, s_trace.timeline_deinits);
+  cl_assert_equal_i(1, s_trace.timeline_inits);
+  cl_assert_equal_i(1, s_trace.quiesces);
+  cl_assert_equal_i(1, s_trace.sweeps_started);
+}
+
+//! The guard covers the wipe, not the sector sweep that outlives it. The sweep
+//! runs for minutes, and refusing wipes for that long would swallow a real
+//! duress trigger.
+void test_security_lock_shred__a_wipe_after_one_finishes_is_not_refused(void) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert(!security_lock_is_shredding());
+
+  security_lock_mark_dirty_since_shred();
+  security_lock_shred(SecurityShredReasonDuressPin);
+
+  cl_assert_equal_i(2 * SHRED_TARGET_COUNT, s_trace.files_shredded);
+}
+
+// Boot
+////////////////////////////////////
+
+//! The boot wipe zeroes files inline and leaves the slow half to
+//! security_lock_finish_boot_shred(), which is a no-op unless the wipe that ran
+//! actually destroyed something.
+void test_security_lock_shred__boot_wipe_with_something_to_destroy_owes_a_tail(void) {
+  s_locked = true;
+  s_state = SecurityLockStateLocked;
+
+  security_lock_handle_boot();
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+  // Deferred out of the boot path, so nothing yet.
+  cl_assert_equal_i(0, s_trace.sweeps_started);
+
+  security_lock_finish_boot_shred();
+  cl_assert_equal_i(1, s_trace.sweeps_started);
+  cl_assert_equal_i(1, s_trace.unfaithful_marks);
+  cl_assert(!security_lock_is_shred_pending());
+}
+
+//! A clean boot wipe touches no file, so there are no superseded copies for the
+//! sweep to find and no resend to ask the phone for.
+void test_security_lock_shred__clean_boot_wipe_owes_no_tail(void) {
+  s_dirty = false;
+  s_locked = true;
+  s_state = SecurityLockStateLocked;
+
+  security_lock_handle_boot();
+  cl_assert_equal_i(0, s_trace.files_shredded);
+  cl_assert(s_trace.region_erases > 0);
+
+  security_lock_finish_boot_shred();
+  cl_assert_equal_i(0, s_trace.sweeps_started);
+  cl_assert_equal_i(0, s_trace.unfaithful_marks);
+}
+
+//! An interrupted wipe has to complete on the next boot however clean the flag
+//! claims to be, or a half-wiped filesystem is mistaken for an untouched one.
+void test_security_lock_shred__a_pending_wipe_still_runs_at_boot_when_clean(void) {
+  s_dirty = false;
+  s_shred_pending = true;
+
+  security_lock_handle_boot();
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+
+  security_lock_finish_boot_shred();
+  cl_assert_equal_i(1, s_trace.sweeps_started);
+  cl_assert(!security_lock_is_shred_pending());
+}
+
+//! Nothing armed and nothing pending is an ordinary boot: no wipe at all, not
+//! even the cheap half.
+void test_security_lock_shred__an_ordinary_boot_wipes_nothing(void) {
+  s_state = SecurityLockStateDisabled;
+
+  security_lock_handle_boot();
+
+  cl_assert_equal_i(0, s_trace.files_shredded);
+  cl_assert_equal_i(0, s_trace.region_erases);
+}

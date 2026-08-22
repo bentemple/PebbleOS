@@ -14,6 +14,7 @@
 
 // Stubs
 ////////////////////////////////////
+#include "fake_security_lock.h"
 #include "fake_spi_flash.h"
 #include "fake_rtc.h"
 #include "stubs_analytics.h"
@@ -100,6 +101,7 @@ PebblePhoneCaller* phone_call_util_create_caller(const char *number, const char 
 ////////////////////////////////////
 
 void test_notification_storage__initialize(void) {
+  fake_security_lock_reset();
   fake_spi_flash_init(0, 0x1000000);
   pfs_init(false);
   pfs_format(false /* write erase headers */);
@@ -198,6 +200,41 @@ void test_notification_storage__basic(void) {
   Uuid invalid_uuid;
   uuid_generate(&invalid_uuid);
   cl_assert_equal_b(notification_storage_get(&invalid_uuid, &r), false);
+}
+
+// A security shred skips its filesystem work when nothing has been written
+// since the last one, so every path that lands a notification on flash has to
+// say so. Storing is the only such path, and it covers locally raised
+// notifications as well as anything mirrored from the phone.
+void test_notification_storage__store_marks_dirty_since_shred(void) {
+  Uuid id;
+  uuid_generate(&id);
+  TimelineItem e = {
+    .header = {
+      .id = id,
+      .status = 0,
+      .layout = LayoutIdGeneric,
+      .type = TimelineItemTypeNotification,
+    },
+    .attr_list = {
+      .num_attributes = ARRAY_LENGTH(attributes),
+      .attributes = attributes,
+    },
+    .action_group = {
+      .num_actions = ARRAY_LENGTH(actions),
+      .actions = actions,
+    }
+  };
+
+  cl_assert_equal_i(0, fake_security_lock_get_dirty_marks());
+  notification_storage_store(&e);
+  cl_assert_equal_i(1, fake_security_lock_get_dirty_marks());
+
+  // Reading is not writing, so it must not mark.
+  TimelineItem r;
+  cl_assert(notification_storage_get(&id, &r));
+  free(r.allocated_buffer);
+  cl_assert_equal_i(1, fake_security_lock_get_dirty_marks());
 }
 
 void test_notification_storage__multiple(void) {

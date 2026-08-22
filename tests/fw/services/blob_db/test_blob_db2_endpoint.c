@@ -35,6 +35,7 @@
 #include "stubs_events.h"
 #include "stubs_hexdump.h"
 #include "stubs_logging.h"
+#include "fake_security_lock.h"
 #include "stubs_passert.h"
 #include "stubs_pbl_malloc.h"
 #include "stubs_reminders.h"
