@@ -170,6 +170,13 @@ extern status_t pfs_shred(const char *name);
 //!           a failing region rather than aborting.
 extern int pfs_gc_deleted_sectors(int max_sectors);
 
+//! Number of erase sectors the filesystem spans.
+//!
+//! The upper bound on what a single pass of pfs_gc_deleted_sectors() can
+//! collect, so a caller sweeping in slices can size its own ceiling from the
+//! filesystem rather than hard-coding a board's layout. 0 before pfs_init().
+extern int pfs_get_erase_region_count(void);
+
 //! Returns the size of the file. (The amount of bytes that can be read out)
 extern size_t pfs_get_file_size(int fd);
 

@@ -2142,6 +2142,11 @@ status_t pfs_shred(const char *name) {
   return (rv);
 }
 
+int pfs_get_erase_region_count(void) {
+  // Fixed once pfs_init() has sized the filesystem, so no lock is needed.
+  return (s_pfs_page_count / PFS_PAGES_PER_ERASE_SECTOR);
+}
+
 int pfs_gc_deleted_sectors(int max_sectors) {
   mutex_lock_recursive(s_pfs_mutex);
 
@@ -2150,7 +2155,7 @@ int pfs_gc_deleted_sectors(int max_sectors) {
     return (0);
   }
 
-  const int num_erase_regions = s_pfs_page_count / PFS_PAGES_PER_ERASE_SECTOR;
+  const int num_erase_regions = pfs_get_erase_region_count();
   int regions_collected = 0;
 
   for (uint16_t region = 0; region < (uint16_t)num_erase_regions; region++) {
@@ -2201,10 +2206,8 @@ int pfs_gc_deleted_sectors(int max_sectors) {
     }
     regions_collected++;
 
-    // Erases are slow (~150ms per 64K sector) and there can be hundreds. Feed
-    // every task, not just this one: anything blocked waiting on us would
-    // otherwise miss its own check-in and take the watch down with it.
-    task_watchdog_bit_set_all();
+    // Erases are slow (~150ms per 64K sector) and there can be hundreds.
+    task_watchdog_bit_set(pebble_task_get_current());
   }
 
   PBL_LOG_DBG("Shred GC swept %d region(s)", regions_collected);
