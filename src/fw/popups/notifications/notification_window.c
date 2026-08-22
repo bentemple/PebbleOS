@@ -119,7 +119,15 @@ static TimelineItem *prv_get_current_notification(NotificationWindowData *data) 
     return NULL;
   }
 
+  // Being in the presented list does not mean there is a layout: swap_layer
+  // leaves current NULL whenever prv_get_layout_handler() cannot read the
+  // backing record. layout_get_context() dereferences its argument's vtable
+  // unguarded, so passing that NULL through is a wild jump, not a NULL return.
   LayoutLayer *current = swap_layer_get_current_layout(&data->swap_layer);
+  if (!current) {
+    return NULL;
+  }
+
   TimelineItem *item = (TimelineItem *)layout_get_context(current);
   return item;
 }
@@ -445,6 +453,13 @@ static void prv_show_peek_for_notification(NotificationWindowData *data, Uuid *i
   // Get color and icon
   const LayoutColors *colors = layout_get_notification_colors(layout);
   TimelineItem *item = prv_get_current_notification(data);
+  if (!item) {
+    // A shred can empty the presented list under us between the focus above and
+    // here. Same handling as a missing layout: nothing to peek at.
+    peek_layer_destroy(data->peek_layer);
+    data->peek_layer = NULL;
+    return;
+  }
   TimelineResourceId timeline_res_id;
   const TimelineResourceId fallback_icon_id =
       notification_layout_get_fallback_icon_id(item->header.type);
@@ -715,6 +730,11 @@ static bool prv_should_show_action_in_action_menu(NotificationWindowData *data,
 
 static bool prv_should_provide_action_menu_for_item(NotificationWindowData *data,
                                                     const TimelineItem *item) {
+  if (!item) {
+    // Callers pass prv_get_current_notification() straight through, and that
+    // returns NULL once there is nothing presented. No item, no action menu.
+    return false;
+  }
   for (int i = 0; i < item->action_group.num_actions; i++) {
     TimelineItemAction *action = &item->action_group.actions[i];
     if (prv_should_show_action_in_action_menu(data, item, action)) {
@@ -749,6 +769,10 @@ static void prv_snooze_reminder_cb(ActionMenu *action_menu, const ActionMenuItem
                                    void *context) {
   NotificationWindowData *window_data = (NotificationWindowData *)action_menu_item->action_data;
   TimelineItem *item = prv_get_current_notification(window_data);
+  if (!item) {
+    // The reminder can be gone by the time the menu item fires, e.g. shredded.
+    return;
+  }
 
   // Snooze reminder.
   // It's highly unlikely we'll get E_INVALID_OPERATION based on the snooze logic parameters.
@@ -778,6 +802,10 @@ static void prv_push_muted_dialog(void) {
 static void prv_mute_notification(const ActionMenuItem *action_menu_item, uint8_t muted_bitfield) {
   NotificationWindowData *window_data = action_menu_item->action_data;
   TimelineItem *item = prv_get_current_notification(window_data);
+  if (!item) {
+    // The notification can be gone by the time the menu item fires, e.g. shredded.
+    return;
+  }
 
   const char *app_id = attribute_get_string(&item->attr_list, AttributeIdiOSAppIdentifier, "");
   if (!*app_id) {
@@ -826,6 +854,10 @@ static void prv_mute_notification_timed(const ActionMenuItem *action_menu_item,
                                         int duration_seconds) {
   NotificationWindowData *window_data = action_menu_item->action_data;
   TimelineItem *item = prv_get_current_notification(window_data);
+  if (!item) {
+    // The notification can be gone by the time the menu item fires, e.g. shredded.
+    return;
+  }
 
   const char *app_id = attribute_get_string(&item->attr_list, AttributeIdiOSAppIdentifier, "");
   if (!app_id || !*app_id) {
