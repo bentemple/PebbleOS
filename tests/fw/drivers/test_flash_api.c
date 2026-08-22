@@ -30,6 +30,10 @@ status_t return_error(void) {
   return E_ERROR;
 }
 
+status_t return_busy(void) {
+  return E_BUSY;
+}
+
 status_t flash_impl_init(bool coredump_mode) {
   return S_SUCCESS;
 }
@@ -101,12 +105,14 @@ status_t flash_impl_erase_resume(FlashAddress addr) {
   return S_SUCCESS;
 }
 
+uint32_t typical_subsector_erase_duration_ms = 100;
 uint32_t flash_impl_get_typical_subsector_erase_duration_ms(void) {
-  return 100;
+  return typical_subsector_erase_duration_ms;
 }
 
+uint32_t typical_sector_erase_duration_ms = 100;
 uint32_t flash_impl_get_typical_sector_erase_duration_ms(void) {
-  return 100;
+  return typical_sector_erase_duration_ms;
 }
 
 status_t flash_impl_get_write_status(void) {
@@ -196,6 +202,8 @@ void test_flash_api__initialize(void) {
   get_erase_status_fn = return_success;
   blank_check_subsector_calls = 0;
   blank_check_sector_calls = 0;
+  typical_subsector_erase_duration_ms = 100;
+  typical_sector_erase_duration_ms = 100;
 
   flash_api_reset_for_test();
   flash_init();
@@ -249,4 +257,68 @@ void test_flash_api__handle_uncorrectable_erase_error(void) {
   }
   cl_assert(i > 1 && i < 20);
   cl_assert_equal_i(uncorrectable_erase_error_cb_called, true);
+}
+
+///////////////////////////////////////////////////////////////////////
+// A backend reporting a 1ms typical erase duration (QEMU does) used to make
+// the erase start/poll helpers round their remaining time down to zero, which
+// means "finished" to their callers.
+
+void test_flash_api__blocking_sector_erase_with_1ms_duration(void) {
+  typical_sector_erase_duration_ms = 1;
+
+  flash_erase_sector_blocking(0);
+  cl_assert_equal_i(erase_sector_begin_calls, 1);
+  // The erase must have been polled to completion, not assumed finished.
+  cl_assert(get_erase_status_calls > 0);
+
+  // A stranded erase never returns the erase semaphore, so this one would
+  // block forever on it.
+  flash_erase_sector_blocking(0x1000);
+  cl_assert_equal_i(erase_sector_begin_calls, 2);
+}
+
+void test_flash_api__blocking_subsector_erase_with_1ms_duration(void) {
+  typical_subsector_erase_duration_ms = 1;
+
+  flash_erase_subsector_blocking(0);
+  cl_assert_equal_i(erase_subsector_begin_calls, 1);
+  cl_assert(get_erase_status_calls > 0);
+
+  flash_erase_subsector_blocking(0x100);
+  cl_assert_equal_i(erase_subsector_begin_calls, 2);
+}
+
+void test_flash_api__outstanding_erase_reports_nonzero_remaining_time(void) {
+  typical_sector_erase_duration_ms = 1;
+  get_erase_status_fn = return_busy;
+  TimerID erase_timer = flash_api_get_erase_poll_timer_for_test();
+
+  flash_erase_sector(0, callback, NULL);
+
+  // The poll timer is only armed with the non-zero remaining time the erase
+  // start reported back.
+  cl_assert_equal_i(erase_sector_begin_calls, 1);
+  cl_assert(stub_new_timer_is_scheduled(erase_timer));
+  cl_assert(stub_new_timer_timeout(erase_timer) != 0);
+}
+
+void test_flash_api__async_erase_repolls_with_1ms_duration(void) {
+  typical_sector_erase_duration_ms = 1;
+  get_erase_status_fn = return_busy;
+  TimerID erase_timer = flash_api_get_erase_poll_timer_for_test();
+
+  flash_erase_sector(0, callback, NULL);
+  cl_assert(stub_new_timer_is_scheduled(erase_timer));
+
+  stub_new_timer_fire(erase_timer);
+  cl_assert_equal_i(get_erase_status_calls, 1);
+  cl_assert_equal_i(callback_status, -12345);
+  cl_assert(stub_new_timer_is_scheduled(erase_timer));
+  cl_assert(stub_new_timer_timeout(erase_timer) != 0);
+
+  get_erase_status_fn = return_success;
+  stub_new_timer_fire(erase_timer);
+  cl_assert_equal_i(callback_status, S_SUCCESS);
+  cl_assert(!stub_new_timer_is_scheduled(erase_timer));
 }

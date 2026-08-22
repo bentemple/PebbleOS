@@ -17,6 +17,7 @@
 #include "pbl/services/new_timer/new_timer.h"
 #include "pbl/services/analytics/analytics.h"
 #include <pbl/logging/logging.h>
+#include "pbl/util/math.h"
 #include "system/passert.h"
 #include "kernel/util/sleep.h"
 
@@ -218,7 +219,12 @@ static uint32_t prv_flash_erase_start(uint32_t addr,
 
   if (PASSED(status)) {
     mutex_unlock(s_flash_lock);
-    return (s_erase.expected_duration * 7 / 8);
+    // Never round down to zero. Zero is this function's "already finished, and
+    // the semaphore is already back" signal, so a backend with a sub-8ms
+    // typical duration -- QEMU reports 1ms -- would report a live erase as
+    // finished, the caller would skip polling, and the poll that gives the
+    // semaphore back would never run. The next erase then blocks on it forever.
+    return MAX(1, s_erase.expected_duration * 7 / 8);
   } else {
     s_erase.in_progress = false;
     mutex_unlock(s_flash_lock);
@@ -256,7 +262,10 @@ static uint32_t prv_flash_erase_poll(void) {
   mutex_unlock(s_flash_lock);
 
   if (!erase_finished) {
-    return s_erase.expected_duration / 8;
+    // Same reason as in prv_flash_erase_start(): a zero here stops
+    // prv_flash_erase_async() from re-arming the poll timer, stranding the
+    // erase and the semaphore with it.
+    return MAX(1, s_erase.expected_duration / 8);
   }
 
   xSemaphoreGive(s_erase_semphr);
