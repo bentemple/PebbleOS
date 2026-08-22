@@ -1,0 +1,105 @@
+---
+session: general
+date: 2026-08-21
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: Built the PebbleOS + Gadgetbridge security lockdown feature end to end; watch boots, locks and wipes, but the wipe never signals completion
+now: Find why prv_shred() never reaches shred.c:292 (set_shred_pending(false)) - suspect the db re-init at shred.c:270-276 blocking the launcher task
+test: PATH="$VENV/bin:$PATH" ./waf test -M '.*(security_lock|settings_security|pin_entry|sha256|test_pfs).*'  # 6/6; then ./pbl qemu && python3 tools/security_lock_e2e.py  # 19/24
+
+done_this_session:
+  - task: Design proposal covering threat model, scope and the honest limits
+    files: [docs/proposals/security-lockdown.md]
+  - task: Persistent lock state store (PIN verifier, attempts, deadlines, delays)
+    files: [src/fw/services/security_lock/service.c, include/pbl/services/security_lock.h]
+  - task: pfs_shred() and budgeted pfs_gc_deleted_sectors(); tests assert on raw flash
+    files: [src/fw/services/filesystem/pfs.c, tests/fw/services/test_pfs_shred.c]
+  - task: Vendored FIPS 180-4 SHA-256 with NIST known-answer tests
+    files: [src/fw/services/security_lock/sha256.c, tests/fw/services/security_lock/test_sha256.c]
+  - task: Shred engine, boot handling, system-wide PEBBLE_SECURITY_SHRED_EVENT
+    files: [src/fw/services/security_lock/shred.c, src/fw/kernel/events.h]
+  - task: Lock screen modal, 3x3 touch PIN pad, global button lockout
+    files: [src/fw/popups/security/lock_screen.c, src/fw/popups/security/pin_entry_window.c, src/fw/kernel/event_loop.c]
+  - task: Security protocol endpoint 11300/0x2C24 and dual disconnect deadlines
+    files: [src/fw/services/security_lock/endpoint.c, src/fw/services/comm_session/protocol_endpoints_table.json]
+  - task: Duress PIN that unlocks and silently wipes without telling the phone
+    files: [src/fw/services/security_lock/service.c]
+  - task: Watch Settings > Security menu
+    files: [src/fw/apps/system/settings/security.c, src/fw/apps/system/settings/menu.c]
+  - task: Gadgetbridge half - is_unfaithful parsing, endpoint, lockdown detection, settings
+    files: [Gadgetbridge worktree, 6 commits on ben.temple/security-lockdown]
+  - task: Reusable QEMU end-to-end harness asserting on state and logs, not pixels
+    files: [tools/security_lock_e2e.py, tools/security_lock_qemu_test.py]
+
+blockers:
+  - shred_pending stays 1 after a wipe, so every boot re-runs one and the watch sits permanently mid-wipe with a lock screen that ignores taps
+
+questions:
+  - Does prv_shred() reach shred.c:292, or block earlier in the db re-init at :270-276? Note the blocking work should only be ~2s, so a stall is a deadlock rather than slowness.
+  - Should reconnecting the phone auto-unlock, or only cancel the countdown (currently only cancels)?
+  - Export PEBBLE_SECURITY_SHRED_EVENT to third-party apps via the SDK (applib wrapper, syscall, exported_symbols.json, SDK bump)?
+
+decisions:
+  - shred_scope_is_restorable_only: Health/step data, app persist storage and BT pairing are never wiped. The phone cannot restore them, so wiping would make the feature too destructive to enable. Cost - a seized watch still yields step and sleep history.
+  - reboot_while_armed_always_shreds: SELECT+BACK for 5s hard resets from the button ISR below anything software can intercept, so restarting must never be cheaper than waiting. User explicitly rejected a phone-connected exception.
+  - no_pfs_format: Would take health data and pairing with it, so the shred zeroes files then sweeps sectors instead. Best-effort against chip-off; FTL may retain remapped pages.
+  - sha256_vendored_not_mbedtls: third_party/wscript_build only recurses mbedtls under CONFIG_BT_FW_NIMBLE, so qemu_emery never builds it. A lock that only works on some boards is not a lock.
+  - duress_does_not_notify_phone: SHRED_COMPLETE and the unfaithful flag are suppressed for duress, or the phone restores everything in seconds and the duress PIN achieves nothing.
+  - pin_gate_is_the_current_pin: An earlier phone-connected requirement was removed; knowing the current PIN is the control, and the Settings flow already demands it.
+  - feature_gated_on_SERVICE_TOUCH: Emery/gabbro only. Verified enabled on qemu_emery, disabled on asterix.
+  - wipe_runs_after_boot_not_during: Nothing touches flash inside services_normal_early_init(). Deferring does not weaken the threat model - an attacker reading the flash directly never boots the watch - and the blocking work is only about 2s anyway (7 small file zeroes plus ~10 sector erases for the 640KB coredump and debug regions). The sweep, the only long part, is budgeted and runs in the background. Holding the UI for that is fine; blocking the boot was not.
+
+findings:
+  - shred_pending_stuck: prv_shred sets it at shred.c:201 and clears at :292, but starts the async sweep at :267 and re-inits four databases at :270-276 in between. Console (KernelBG) still answers while the launcher task is blocked, which matches the observed "lock screen visible, taps ignored".
+  - pin_pad_input_is_fine: Instrumented probes showed touchdown and liftoff at identical coordinates resolving to keys 0,1,2,3 for "1234". Entry works; the watch never leaves the wipe.
+  - db_deinit_is_launcher_task_only: pin_db_deinit/reminder_db_deinit/timeline_event_deinit deadlock if driven from KernelBG. factory_reset_fast runs them from the launcher task for this reason.
+  - watchdog_masking_hid_a_deadlock: Masking only the current task turned a reset loop into a permanent hang. Long loops must call task_watchdog_bit_set_all(), not bit_set(current).
+  - nothing_may_touch_flash_before_boot_completes: The wipe ran inside services_normal_early_init() and blocked boot for as long as it took, presenting as a watch stuck on the boot splash.
+  - security_lock_logs_are_compiled_out: PBL_SHOULD_LOG gates on the compile-time module level and CONFIG_SERVICE_SECURITY_LOCK_LOG_LEVEL is 0, so PBL_LOG_DBG never emits. Cost several cycles chasing an endpoint that was never broken.
+  - gadgetbridge_ignores_is_unfaithful: Upstream GB never parses it; the flag is at payload offset 150 of 155 and GB's parse stops at 47.
+  - REASON_LOCKDOWN_is_a_real_signal: NotificationListenerService.REASON_LOCKDOWN (23) fires per notification on lockdown, but not at all if zero notifications are active - hence the mandatory manual panic action.
+
+worked:
+  - Driving the real UI in QEMU - found four bugs no unit test caught (RNG stub, boot loop, KernelBG deadlock, flash logging)
+  - Asserting on `security status` console output and log lines rather than screenshots
+  - Instrumenting stage markers and probes to locate a hang instead of guessing
+  - Delegating self-contained halves (Gadgetbridge, lock screen UI) to subagents
+
+failed:
+  - Guessing at causes and patching symptoms (watchdog masking, sweep budget, pass gaps) before instrumenting - the boot hang was structural, not tuning
+  - Regex-editing C control flow - deleted two switch case bodies in settings/security.c, silently no-oping Change PIN and Clear PIN
+  - Two QEMU instances per worktree - the monitor socket, QMP socket and ports 12344/12345 are fixed paths and collide
+  - Asserting on PBL_LOG_DBG lines that are compiled out
+
+next:
+  - Add a log immediately before shred.c:292 and after each of the four db re-inits at :270-276 to find where prv_shred stops
+  - If the db re-init blocks, consider deferring it or reordering set_shred_pending(false) before prv_start_sweep()
+  - Re-run tools/security_lock_e2e.py; the five remaining failures are all downstream of shred_pending
+  - Revert the temporary INFO log levels in shred.c/endpoint.c to DBG once diagnosed, per the project logging rule
+  - Decide the reconnect auto-unlock question
+  - Round-display (gabbro) pad layout has never been rendered; only rect was tested
+
+files:
+  created:
+    - docs/proposals/security-lockdown.md
+    - src/fw/services/security_lock/{service.c,shred.c,lock.c,endpoint.c,pin_hash.c,sha256.c,sha256.h,Kconfig,wscript_build}
+    - include/pbl/services/{security_lock.h,security_lock_shred.h,security_lock_endpoint.h,security_lock_ui.h,security_lock_pin_hash.h}
+    - src/fw/popups/security/{lock_screen.c,lock_screen.h,pin_entry_window.c,pin_entry_window.h}
+    - src/fw/apps/system/settings/{security.c,security.h}
+    - tools/{security_lock_e2e.py,security_lock_qemu_test.py}
+    - tests/fw/services/test_pfs_shred.c
+    - tests/fw/services/security_lock/{test_security_lock.c,test_sha256.c,wscript_build}
+    - tests/fw/popups/security/{test_pin_entry_window.c,wscript_build}
+    - tests/fw/apps/system_apps/settings/{test_settings_security.c,wscript_build}
+  modified:
+    - src/fw/services/filesystem/pfs.c
+    - include/pbl/services/filesystem/pfs.h
+    - src/fw/kernel/event_loop.c
+    - src/fw/kernel/events.h
+    - src/fw/services/services_normal/service.c
+    - src/fw/console/prompt_commands.{c,h}
+    - src/fw/services/comm_session/protocol_endpoints_table.json
+    - src/fw/shell/normal/watchface.c
+    - tests/stubs/stubs_task_watchdog.h
