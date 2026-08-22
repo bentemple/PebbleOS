@@ -63,6 +63,24 @@ done_this_session:
 
 blockers: []
 
+verified_live_on_qemu:
+  - the_pin_pad_unlocks: >
+      Previously the second unresolved blocker. Verified end to end: taps on
+      digits 1-4 advance entered 1,2,3 and the fourth dismisses the lock screen,
+      state 2 -> 1, "lock.c:148> Unlocked". It was never broken the way it
+      looked -- auto-unlock-on-reconnect meant the watch unlocked itself before
+      a PIN could be typed (QEMU always has an open session), on top of a flash
+      wedge that made the path untestable at all.
+  - airplane_released_on_unlock: >
+      Same run shows "Session event: is_open=1" immediately after the unlock.
+  - shred_with_a_notification_window_open: >
+      Was 34/34 HardFaults. Now completes, watch healthy at 46ms.
+  - two_wipes_back_to_back: >
+      Was a permanent wedge. Now the second is a no-op reporting 0x80000000.
+  - stress_suite: >
+      security_lock_stress.py, 0 failures across 30 valid trials on two seeds,
+      QEMU instance count confirmed at 1 before and after each run.
+
 decisions:
   - reconnect_never_unlocks: >
       An earlier revision unlocked on reconnect, reasoning that Gadgetbridge
@@ -83,6 +101,14 @@ decisions:
       skipped one is a security failure.
 
 open_questions:
+  - never_erase_leaves_the_radio_up: >
+      Airplane mode engages at the tail of security_lock_shred(), gated on
+      is_locked(). With Erase After set to Never the lock deadline calls
+      engage_lock_only() and no shred ever runs, so a locked watch stays on the
+      air and keeps accepting the six unguarded BlobDB stores. That is exactly
+      the configuration the overnight-phone-off case wants. Either engage the
+      blackout on locking rather than on shredding, or land the
+      blob_db_insert() guard, or both. NOT YET ADDRESSED.
   - record_version_shared: >
       RECORD_VERSION covers both the config record (holds the PIN) and the
       runtime record, so a runtime-only change discards the PIN and silently
