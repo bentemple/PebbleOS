@@ -119,7 +119,15 @@ static TimelineItem *prv_get_current_notification(NotificationWindowData *data) 
     return NULL;
   }
 
+  // Being in the presented list does not mean there is a layout: swap_layer
+  // leaves current NULL whenever prv_get_layout_handler() cannot read the
+  // backing record. layout_get_context() dereferences its argument's vtable
+  // unguarded, so passing that NULL through is a wild jump, not a NULL return.
   LayoutLayer *current = swap_layer_get_current_layout(&data->swap_layer);
+  if (!current) {
+    return NULL;
+  }
+
   TimelineItem *item = (TimelineItem *)layout_get_context(current);
   return item;
 }
