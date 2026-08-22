@@ -35,6 +35,9 @@ static uint8_t s_stored_duress_len;
 static uint8_t s_failed_attempts;
 static int s_reset_attempts_calls;
 static int s_engage_calls;
+static uint32_t s_lock_delay_s;
+static uint32_t s_shred_delay_s;
+static int s_rejected_delays;
 
 uint8_t security_lock_get_pin_len(void) {
   return s_stored_pin_len;
@@ -112,6 +115,29 @@ bool security_lock_attempts_exhausted(void) {
 
 void security_lock_engage(SecurityShredReason reason) {
   s_engage_calls++;
+}
+
+uint32_t security_lock_get_lock_delay_s(void) {
+  return s_lock_delay_s;
+}
+
+uint32_t security_lock_get_shred_delay_s(void) {
+  return s_shred_delay_s;
+}
+
+//! Mirrors the service's ordering rule, including its one exception: Never is
+//! not an erase that happens sooner than the lock, it is no timed erase at all.
+//! Rejections are counted rather than ignored -- the menu must never be able to
+//! provoke one, and a silently swallowed E_INVALID_ARGUMENT looks exactly like
+//! a setting that saved.
+status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s) {
+  if ((shred_delay_s != SECURITY_LOCK_SHRED_DELAY_NEVER) && (shred_delay_s < lock_delay_s)) {
+    s_rejected_delays++;
+    return E_INVALID_ARGUMENT;
+  }
+  s_lock_delay_s = lock_delay_s;
+  s_shred_delay_s = shred_delay_s;
+  return S_SUCCESS;
 }
 
 // Fake UI surface
@@ -231,8 +257,21 @@ void launcher_task_add_callback(void (*callback)(void *data), void *data) {
   s_deferred_callback = callback;
 }
 
+// What the last drawn row put on screen. The subtitles are the only place the
+// "measured from the disconnect" framing is stated, so they are asserted on.
+static char s_drawn_title[64];
+static char s_drawn_subtitle[64];
+
+static void prv_copy_drawn(char *dest, size_t size, const char *src) {
+  strncpy(dest, src ? src : "", size - 1);
+  dest[size - 1] = '\0';
+}
+
 void menu_cell_basic_draw(GContext *ctx, const Layer *cell_layer, const char *title,
-                          const char *subtitle, GBitmap *icon) {}
+                          const char *subtitle, GBitmap *icon) {
+  prv_copy_drawn(s_drawn_title, sizeof(s_drawn_title), title);
+  prv_copy_drawn(s_drawn_subtitle, sizeof(s_drawn_subtitle), subtitle);
+}
 
 const char *i18n_get(const char *string, const void *owner) {
   return string;
@@ -255,10 +294,12 @@ void i18n_free_all(const void *owner) {}
 //! Row order once one is.
 #define ROW_CHANGE_PIN 0
 #define ROW_PIN_LENGTH_SET 1
-#define ROW_DURESS_PIN 2
-#define ROW_CLEAR_PIN 3
-#define ROW_LOCK_NOW 4
-#define ROWS_WITH_PIN 5
+#define ROW_LOCK_AFTER 2
+#define ROW_ERASE_AFTER 3
+#define ROW_DURESS_PIN 4
+#define ROW_CLEAR_PIN 5
+#define ROW_LOCK_NOW 6
+#define ROWS_WITH_PIN 7
 
 static void prv_open_settings(void) {
   settings_security_get_info()->init();
@@ -272,6 +313,10 @@ static uint16_t prv_num_rows(void) {
 
 static void prv_select(uint16_t row) {
   s_module->select_click(s_module, row);
+}
+
+static void prv_draw(uint16_t row) {
+  s_module->draw_row(s_module, NULL, NULL, row, false /* selected */);
 }
 
 static void prv_submit(const char *pin) {
@@ -293,6 +338,11 @@ void test_settings_security__initialize(void) {
   s_failed_attempts = 0;
   s_reset_attempts_calls = 0;
   s_engage_calls = 0;
+  s_lock_delay_s = SECURITY_LOCK_DEFAULT_LOCK_DELAY_S;
+  s_shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S;
+  s_rejected_delays = 0;
+  s_drawn_title[0] = '\0';
+  s_drawn_subtitle[0] = '\0';
   s_module = NULL;
   s_prompt = NULL;
   s_prompt_submit = NULL;
@@ -727,4 +777,242 @@ void test_settings_security__lock_now_defers_engage_to_the_kernel(void) {
 
   s_deferred_callback(NULL);
   cl_assert_equal_i(1, s_engage_calls);
+}
+
+// Lock After / Erase After
+////////////////////////////////////
+
+//! The options each picker must offer, in order. Stated here rather than read
+//! back from the module, so that trimming the list or reordering it fails.
+static const uint32_t s_expected_lock_delays[] = {60, 5 * 60, 15 * 60, 30 * 60, 60 * 60};
+static const uint32_t s_expected_shred_delays[] = {
+    30 * 60,      60 * 60,       2 * 60 * 60, 4 * 60 * 60,
+    8 * 60 * 60,  24 * 60 * 60,  SECURITY_LOCK_SHRED_DELAY_NEVER,
+};
+
+//! The Erase After rows that must be offered for a given Lock After: nothing
+//! shorter than the lock delay, and Never regardless. Re-derived here rather
+//! than asked of the module, because that rule is the requirement.
+static int prv_expected_shred_rows(uint32_t lock_delay_s, uint32_t *out) {
+  int count = 0;
+  for (size_t i = 0; i < ARRAY_LENGTH(s_expected_shred_delays); ++i) {
+    const uint32_t value = s_expected_shred_delays[i];
+    if ((value == SECURITY_LOCK_SHRED_DELAY_NEVER) || (value >= lock_delay_s)) {
+      out[count++] = value;
+    }
+  }
+  return count;
+}
+
+static void prv_choose_option(int index) {
+  cl_assert(s_option_select != NULL);
+  cl_assert(index < (int)s_option_num_rows);
+  s_option_select(&s_option_menu, index, NULL);
+  s_module->appear(s_module);
+}
+
+static void prv_choose_lock_delay(uint32_t seconds) {
+  prv_select(ROW_LOCK_AFTER);
+  for (size_t i = 0; i < ARRAY_LENGTH(s_expected_lock_delays); ++i) {
+    if (s_expected_lock_delays[i] == seconds) {
+      prv_choose_option(i);
+      return;
+    }
+  }
+  cl_fail("that lock delay is not offered");
+}
+
+static void prv_choose_shred_delay(uint32_t seconds) {
+  uint32_t expected[ARRAY_LENGTH(s_expected_shred_delays)];
+  const int count = prv_expected_shred_rows(s_lock_delay_s, expected);
+
+  prv_select(ROW_ERASE_AFTER);
+  for (int i = 0; i < count; ++i) {
+    if (expected[i] == seconds) {
+      prv_choose_option(i);
+      return;
+    }
+  }
+  cl_fail("that erase delay is not offered");
+}
+
+// The delays only do anything once a PIN exists: without one nothing locks and
+// nothing is erased on a disconnect, so offering to time either would be the
+// same lie Lock Now is hidden to avoid.
+void test_settings_security__delay_rows_appear_with_the_pin(void) {
+  prv_open_settings();
+  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
+
+  prv_select(ROW_SET_PIN);
+  prv_submit("1234");
+  prv_submit("1234");
+  s_module->appear(s_module);
+
+  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
+  prv_draw(ROW_LOCK_AFTER);
+  cl_assert_equal_s("Lock After", s_drawn_title);
+  prv_draw(ROW_ERASE_AFTER);
+  cl_assert_equal_s("Erase After", s_drawn_title);
+}
+
+// Both delays run from the disconnect, not from each other. Read as "erase 30
+// minutes after it locks" the defaults look like 35 minutes of grace instead of
+// 30, so the row has to say what it is counting from.
+void test_settings_security__subtitles_say_what_the_delay_is_measured_from(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_draw(ROW_LOCK_AFTER);
+  cl_assert(strstr(s_drawn_subtitle, "5 min") != NULL);
+  cl_assert(strstr(s_drawn_subtitle, "disconnect") != NULL);
+
+  prv_draw(ROW_ERASE_AFTER);
+  cl_assert(strstr(s_drawn_subtitle, "30 min") != NULL);
+  cl_assert(strstr(s_drawn_subtitle, "disconnect") != NULL);
+}
+
+void test_settings_security__lock_after_offers_minutes_not_days(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_LOCK_AFTER);
+  cl_assert_equal_i(ARRAY_LENGTH(s_expected_lock_delays), s_option_num_rows);
+
+  for (size_t i = 0; i < ARRAY_LENGTH(s_expected_lock_delays); ++i) {
+    prv_choose_option(i);
+    cl_assert_equal_i(s_expected_lock_delays[i], s_lock_delay_s);
+    prv_select(ROW_LOCK_AFTER);
+  }
+}
+
+void test_settings_security__erase_after_offers_the_long_options(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  // At the default lock delay every option is legal, Never included.
+  prv_select(ROW_ERASE_AFTER);
+  cl_assert_equal_i(ARRAY_LENGTH(s_expected_shred_delays), s_option_num_rows);
+
+  // An overnight disconnect is the case these exist for.
+  prv_choose_shred_delay(8 * 60 * 60);
+  cl_assert_equal_i(8 * 60 * 60, s_shred_delay_s);
+  prv_choose_shred_delay(24 * 60 * 60);
+  cl_assert_equal_i(24 * 60 * 60, s_shred_delay_s);
+}
+
+// Never means "lock on disconnect but never erase on a timer". The lock delay
+// is untouched, so the watch still locks itself.
+void test_settings_security__erase_after_can_be_never(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_choose_shred_delay(SECURITY_LOCK_SHRED_DELAY_NEVER);
+
+  cl_assert_equal_i(SECURITY_LOCK_SHRED_DELAY_NEVER, s_shred_delay_s);
+  cl_assert_equal_i(SECURITY_LOCK_DEFAULT_LOCK_DELAY_S, s_lock_delay_s);
+  cl_assert_equal_i(0, s_rejected_delays);
+
+  // And the row says so rather than showing a bare zero.
+  prv_draw(ROW_ERASE_AFTER);
+  cl_assert(strstr(s_drawn_subtitle, "Never") != NULL);
+  cl_assert(strstr(s_drawn_subtitle, "disconnect") == NULL);
+}
+
+// An erase that would land before the lock is not offered at all, so the user
+// cannot pick one and be silently refused.
+void test_settings_security__erase_after_hides_options_below_the_lock_delay(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_choose_lock_delay(60 * 60);
+
+  uint32_t expected[ARRAY_LENGTH(s_expected_shred_delays)];
+  const int count = prv_expected_shred_rows(60 * 60, expected);
+
+  prv_select(ROW_ERASE_AFTER);
+  cl_assert_equal_i(count, s_option_num_rows);
+  // 30 minutes has gone; 1 hour, the longer ones and Never remain.
+  cl_assert_equal_i(ARRAY_LENGTH(s_expected_shred_delays) - 1, s_option_num_rows);
+
+  for (int i = 0; i < count; ++i) {
+    prv_choose_option(i);
+    cl_assert_equal_i(expected[i], s_shred_delay_s);
+    cl_assert_equal_i(0, s_rejected_delays);
+    prv_select(ROW_ERASE_AFTER);
+  }
+}
+
+// Raising the lock delay past the erase delay must push the erase delay up, not
+// hand the store a pair it will refuse.
+void test_settings_security__raising_the_lock_delay_pushes_the_erase_delay_up(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_choose_shred_delay(30 * 60);
+  prv_choose_lock_delay(60 * 60);
+
+  cl_assert_equal_i(60 * 60, s_lock_delay_s);
+  // The nearest option that is still at or past the lock delay, not Never.
+  cl_assert_equal_i(60 * 60, s_shred_delay_s);
+  cl_assert_equal_i(0, s_rejected_delays);
+}
+
+// Pushing the erase delay up must not quietly turn the timed erase off either.
+void test_settings_security__never_survives_raising_the_lock_delay(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_choose_shred_delay(SECURITY_LOCK_SHRED_DELAY_NEVER);
+  prv_choose_lock_delay(60 * 60);
+
+  cl_assert_equal_i(60 * 60, s_lock_delay_s);
+  cl_assert_equal_i(SECURITY_LOCK_SHRED_DELAY_NEVER, s_shred_delay_s);
+  cl_assert_equal_i(0, s_rejected_delays);
+}
+
+// The property that matters more than any single case: no sequence of ordinary
+// navigation may leave the two delays in a state the store rejects.
+void test_settings_security__no_navigation_produces_a_rejected_pair(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  for (size_t s = 0; s < ARRAY_LENGTH(s_expected_shred_delays); ++s) {
+    for (size_t l = 0; l < ARRAY_LENGTH(s_expected_lock_delays); ++l) {
+      // Back down to the shortest lock delay first so every erase option is
+      // reachable, then set the pair under test.
+      prv_choose_lock_delay(s_expected_lock_delays[0]);
+      prv_choose_shred_delay(s_expected_shred_delays[s]);
+      prv_choose_lock_delay(s_expected_lock_delays[l]);
+
+      cl_assert_equal_i(s_expected_lock_delays[l], s_lock_delay_s);
+      cl_assert((s_shred_delay_s == SECURITY_LOCK_SHRED_DELAY_NEVER) ||
+                (s_shred_delay_s >= s_lock_delay_s));
+      cl_assert_equal_i(0, s_rejected_delays);
+    }
+  }
+}
+
+// Whatever the phone last set is what the row has to report, even if it is not
+// a value the picker offers. Rounding it to the nearest offered option in the
+// subtitle would tell the user they have longer than they do.
+void test_settings_security__row_reports_a_delay_the_picker_does_not_offer(void) {
+  prv_install_pin("1234");
+  s_lock_delay_s = 45 * 60;
+  prv_open_settings();
+
+  prv_draw(ROW_LOCK_AFTER);
+  cl_assert(strstr(s_drawn_subtitle, "45 min") != NULL);
+}
+
+void test_settings_security__delay_pickers_open_on_the_current_choice(void) {
+  prv_install_pin("1234");
+  s_lock_delay_s = 15 * 60;
+  s_shred_delay_s = 4 * 60 * 60;
+  prv_open_settings();
+
+  prv_select(ROW_LOCK_AFTER);
+  cl_assert_equal_i(2, s_option_choice);  // 1, 5, 15 minutes
+
+  prv_select(ROW_ERASE_AFTER);
+  cl_assert_equal_i(3, s_option_choice);  // 30m, 1h, 2h, 4h
 }

@@ -35,6 +35,18 @@
 
 #define SUBTITLE_BUF_SIZE 32
 
+//! Wider than the others: these subtitles carry the value and what it is
+//! counted from.
+#define DELAY_SUBTITLE_BUF_SIZE 48
+
+//! Erase After options, before the ones that would land before the lock are
+//! filtered out. A macro so the filtered row buffer can be sized before the
+//! table itself is declared.
+#define NUM_SHRED_DELAY_OPTIONS 7
+
+#define DELAY_SECONDS_PER_MINUTE 60
+#define DELAY_SECONDS_PER_HOUR (60 * 60)
+
 //! What the PIN prompt currently on screen is collecting.
 typedef enum {
   //! Prove you know the existing PIN before being allowed to set another.
@@ -69,8 +81,23 @@ typedef struct SettingsSecurityData {
   //! Cached so drawing a row does not read flash on every MenuLayer redraw.
   uint8_t current_pin_len;
 
+  //! Both measured from the disconnect. Cached for the same reason, and so the
+  //! two pickers can constrain each other without re-reading the store.
+  uint32_t lock_delay_s;
+  uint32_t shred_delay_s;
+
   char pin_subtitle[SUBTITLE_BUF_SIZE];
   char length_subtitle[SUBTITLE_BUF_SIZE];
+  char lock_delay_subtitle[DELAY_SUBTITLE_BUF_SIZE];
+  char shred_delay_subtitle[DELAY_SUBTITLE_BUF_SIZE];
+
+  //! Erase After rows, filtered down to those still legal for the current Lock
+  //! After. Held here because the option menu keeps the array rather than
+  //! copying it, and this menu is always below it on the stack.
+  const char *shred_rows[NUM_SHRED_DELAY_OPTIONS];
+  //! Index into the unfiltered option table for each of those rows.
+  uint8_t shred_row_option[NUM_SHRED_DELAY_OPTIONS];
+  uint8_t num_shred_rows;
 } SettingsSecurityData;
 
 //! The two lengths a PIN may be. Deliberately a list and not a range:
@@ -103,6 +130,31 @@ static bool prv_pin_is_set(SettingsSecurityData *data) {
   return data->current_pin_len >= SECURITY_LOCK_PIN_MIN_LEN;
 }
 
+//! Render a delay for a menu row.
+//!
+//! Says what it is counted from, because both delays are counted from the
+//! disconnect and neither from the other: with the defaults the watch locks at
+//! five minutes and erases at thirty, which is twenty-five minutes after the
+//! lock rather than thirty. Read the other way round the user believes they
+//! have longer than they do.
+//!
+//! Formatted from the stored value rather than looked up in the option tables,
+//! so a delay the phone set that this picker does not offer is still reported
+//! as what it actually is.
+static void prv_format_delay(uint32_t seconds, char *buf, size_t buf_size) {
+  char format[DELAY_SUBTITLE_BUF_SIZE];
+  if ((seconds >= DELAY_SECONDS_PER_HOUR) && ((seconds % DELAY_SECONDS_PER_HOUR) == 0)) {
+    /// Subtitle on the Lock After and Erase After rows, in hours. "%u hr after
+    /// the phone disconnected", abbreviated to fit one line.
+    i18n_get_with_buffer(i18n_noop("%u hr after disconnect"), format, sizeof(format));
+    sniprintf(buf, buf_size, format, (unsigned)(seconds / DELAY_SECONDS_PER_HOUR));
+  } else {
+    /// Same, in minutes.
+    i18n_get_with_buffer(i18n_noop("%u min after disconnect"), format, sizeof(format));
+    sniprintf(buf, buf_size, format, (unsigned)(seconds / DELAY_SECONDS_PER_MINUTE));
+  }
+}
+
 //! Recompute the cached state the rows are drawn from. Reads flash, so it is
 //! done here rather than in draw_row, which MenuLayer calls on every redraw.
 static void prv_update_state(SettingsSecurityData *data) {
@@ -127,6 +179,20 @@ static void prv_update_state(SettingsSecurityData *data) {
 
   i18n_get_with_buffer(s_pin_length_labels[prv_length_index(data->new_pin_len)],
                        data->length_subtitle, sizeof(data->length_subtitle));
+
+  data->lock_delay_s = security_lock_get_lock_delay_s();
+  data->shred_delay_s = security_lock_get_shred_delay_s();
+  prv_format_delay(data->lock_delay_s, data->lock_delay_subtitle,
+                   sizeof(data->lock_delay_subtitle));
+  if (data->shred_delay_s == SECURITY_LOCK_SHRED_DELAY_NEVER) {
+    /// Erase After when the timed erase is off. Says the watch still locks,
+    /// because turning the erase off is not turning the feature off.
+    i18n_get_with_buffer(i18n_noop("Never, locks only"), data->shred_delay_subtitle,
+                         sizeof(data->shred_delay_subtitle));
+  } else {
+    prv_format_delay(data->shred_delay_s, data->shred_delay_subtitle,
+                     sizeof(data->shred_delay_subtitle));
+  }
 }
 
 //! Only safe once the settings window exists: settings_menu_reload_data() goes
@@ -341,6 +407,176 @@ static void prv_length_menu_push(SettingsSecurityData *data) {
                             s_pin_length_labels, data);
 }
 
+// Lock After / Erase After
+//////////////////////////////////////////////////////////////////////////////
+//
+// Both delays run from the moment the phone went away, so each constrains the
+// other: an erase scheduled before the lock would destroy the data without the
+// lock screen ever having offered a way to stop it, and
+// security_lock_set_delays() refuses that pair outright. Nothing reachable by
+// ordinary navigation may produce it.
+
+//! Longest offered Lock After. Beyond an hour this is no longer riding out a
+//! phone reboot or a walk out of range, it is just not locking.
+#define LOCK_DELAY_MAX_S (60 * 60)
+
+//! Longest offered Erase After. A phone that stays off overnight is exactly
+//! what this has to be able to survive.
+#define SHRED_DELAY_MAX_S (24 * 60 * 60)
+
+static const uint32_t s_lock_delays_s[] = {60, 5 * 60, 15 * 60, 30 * 60, LOCK_DELAY_MAX_S};
+
+static const char *s_lock_delay_labels[] = {
+    i18n_noop("1 Minute"),   i18n_noop("5 Minutes"), i18n_noop("15 Minutes"),
+    i18n_noop("30 Minutes"), i18n_noop("1 Hour"),
+};
+
+//! Never is last rather than first: it is the weakest choice on the list, not
+//! the one to land on by accident.
+static const uint32_t s_shred_delays_s[] = {
+    30 * 60,
+    60 * 60,
+    2 * 60 * 60,
+    4 * 60 * 60,
+    8 * 60 * 60,
+    SHRED_DELAY_MAX_S,
+    SECURITY_LOCK_SHRED_DELAY_NEVER,
+};
+
+static const char *s_shred_delay_labels[] = {
+    i18n_noop("30 Minutes"),
+    i18n_noop("1 Hour"),
+    i18n_noop("2 Hours"),
+    i18n_noop("4 Hours"),
+    i18n_noop("8 Hours"),
+    i18n_noop("24 Hours"),
+    /// Erase After option that arms no erase timer at all.
+    i18n_ctx_noop("SecurityLock", "Never"),
+};
+
+_Static_assert(ARRAY_LENGTH(s_lock_delays_s) == ARRAY_LENGTH(s_lock_delay_labels),
+               "Every offered lock delay needs a label");
+_Static_assert(ARRAY_LENGTH(s_shred_delays_s) == ARRAY_LENGTH(s_shred_delay_labels),
+               "Every offered erase delay needs a label");
+_Static_assert(ARRAY_LENGTH(s_shred_delays_s) == NUM_SHRED_DELAY_OPTIONS,
+               "The filtered row buffer has to hold every erase option");
+//! Otherwise raising Lock After to its longest would leave Never as the only
+//! legal Erase After, turning the timed erase off without being asked to.
+_Static_assert(LOCK_DELAY_MAX_S <= SHRED_DELAY_MAX_S,
+               "The longest lock delay needs a real erase option at or past it");
+
+//! Never schedules no erase at all, so it is never "before the lock".
+static bool prv_shred_delay_is_valid(uint32_t shred_delay_s, uint32_t lock_delay_s) {
+  return (shred_delay_s == SECURITY_LOCK_SHRED_DELAY_NEVER) || (shred_delay_s >= lock_delay_s);
+}
+
+//! Index of the option holding `value`, or OPTION_MENU_CHOICE_NONE for a delay
+//! the phone set that is not offered here. No row highlighted beats the wrong
+//! row highlighted.
+static int prv_option_index(uint32_t value, const uint32_t *values, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    if (values[i] == value) {
+      return (int)i;
+    }
+  }
+  return OPTION_MENU_CHOICE_NONE;
+}
+
+//! Raise an erase delay the lock delay has overtaken to the shortest option
+//! still at or past it, so moving Lock After up can never leave the pair in a
+//! state the store refuses.
+static uint32_t prv_clamp_shred_delay(uint32_t shred_delay_s, uint32_t lock_delay_s) {
+  if (prv_shred_delay_is_valid(shred_delay_s, lock_delay_s)) {
+    return shred_delay_s;
+  }
+  // Ascending with Never last, so this lands on a real erase rather than
+  // turning the timed erase off behind the user's back.
+  for (size_t i = 0; i < ARRAY_LENGTH(s_shred_delays_s); ++i) {
+    if (prv_shred_delay_is_valid(s_shred_delays_s[i], lock_delay_s)) {
+      return s_shred_delays_s[i];
+    }
+  }
+  return SECURITY_LOCK_SHRED_DELAY_NEVER;
+}
+
+static void prv_apply_delays(SettingsSecurityData *data, uint32_t lock_delay_s,
+                             uint32_t shred_delay_s) {
+  const uint32_t erase_delay_s = prv_clamp_shred_delay(shred_delay_s, lock_delay_s);
+  const status_t rv = security_lock_set_delays(lock_delay_s, erase_delay_s);
+  if (rv != S_SUCCESS) {
+    // Unreachable from the pickers, which only offer legal pairs. Logged rather
+    // than swallowed: a refusal and a saved setting look identical on screen.
+    PBL_LOG_ERR("Rejected delays lock=%" PRIu32 "s erase=%" PRIu32 "s (%" PRId32 ")", lock_delay_s,
+                erase_delay_s, (int32_t)rv);
+  }
+  // Re-reads what the store actually kept, so a refusal shows the old value
+  // rather than the one that never took.
+  prv_refresh(data);
+}
+
+static void prv_lock_delay_menu_select(OptionMenu *option_menu, int selection, void *context) {
+  SettingsSecurityData *data = settings_option_menu_get_context(context);
+  if ((selection >= 0) && (selection < (int)ARRAY_LENGTH(s_lock_delays_s))) {
+    prv_apply_delays(data, s_lock_delays_s[selection], data->shred_delay_s);
+  }
+  app_window_stack_remove(&option_menu->window, true /* animated */);
+}
+
+static void prv_lock_delay_menu_push(SettingsSecurityData *data) {
+  const OptionMenuCallbacks callbacks = {
+    .select = prv_lock_delay_menu_select,
+  };
+  settings_option_menu_push(
+      i18n_noop("Lock After"), OptionMenuContentType_SingleLine,
+      prv_option_index(data->lock_delay_s, s_lock_delays_s, ARRAY_LENGTH(s_lock_delays_s)),
+      &callbacks, ARRAY_LENGTH(s_lock_delay_labels), false /* icons_enabled */, s_lock_delay_labels,
+      data);
+}
+
+//! Collect the Erase After rows that are still legal for the current Lock
+//! After. Filtered rather than shown-and-refused: a row that cannot be chosen
+//! is a row that should not be on the list.
+static void prv_build_shred_rows(SettingsSecurityData *data) {
+  data->num_shred_rows = 0;
+  for (size_t i = 0; i < ARRAY_LENGTH(s_shred_delays_s); ++i) {
+    if (!prv_shred_delay_is_valid(s_shred_delays_s[i], data->lock_delay_s)) {
+      continue;
+    }
+    data->shred_rows[data->num_shred_rows] = s_shred_delay_labels[i];
+    data->shred_row_option[data->num_shred_rows] = (uint8_t)i;
+    data->num_shred_rows++;
+  }
+}
+
+static void prv_shred_delay_menu_select(OptionMenu *option_menu, int selection, void *context) {
+  SettingsSecurityData *data = settings_option_menu_get_context(context);
+  if ((selection >= 0) && (selection < (int)data->num_shred_rows)) {
+    // Back through the same map the rows were built with; the picker's indices
+    // are into the filtered list, not the table.
+    prv_apply_delays(data, data->lock_delay_s, s_shred_delays_s[data->shred_row_option[selection]]);
+  }
+  app_window_stack_remove(&option_menu->window, true /* animated */);
+}
+
+static void prv_shred_delay_menu_push(SettingsSecurityData *data) {
+  prv_build_shred_rows(data);
+
+  int choice = OPTION_MENU_CHOICE_NONE;
+  for (uint8_t i = 0; i < data->num_shred_rows; ++i) {
+    if (s_shred_delays_s[data->shred_row_option[i]] == data->shred_delay_s) {
+      choice = i;
+      break;
+    }
+  }
+
+  const OptionMenuCallbacks callbacks = {
+    .select = prv_shred_delay_menu_select,
+  };
+  settings_option_menu_push(i18n_noop("Erase After"), OptionMenuContentType_SingleLine, choice,
+                            &callbacks, data->num_shred_rows, false /* icons_enabled */,
+                            data->shred_rows, data);
+}
+
 // Lock Now
 //////////////////////////////////////////////////////////////////////////////
 
@@ -385,6 +621,8 @@ static void prv_lock_now_push(SettingsSecurityData *data) {
 enum SettingsSecurityItem {
   SettingsSecurityPin,
   SettingsSecurityPinLength,
+  SettingsSecurityLockDelay,
+  SettingsSecurityShredDelay,
   SettingsSecurityDuressPin,
   SettingsSecurityClearPin,
   SettingsSecurityLockNow,
@@ -402,6 +640,11 @@ enum SettingsSecurityItem {
 //! the real PIN.
 static bool prv_item_is_visible(SettingsSecurityData *data, uint16_t item) {
   switch (item) {
+    case SettingsSecurityLockDelay:
+    case SettingsSecurityShredDelay:
+      // Without a PIN the watch neither locks nor erases when the phone goes
+      // away, so a configured delay would be a countdown that never runs.
+      return prv_pin_is_set(data);
     case SettingsSecurityDuressPin:
       // Follows the real PIN, which the row above already announces. Nothing
       // about the duress PIN itself is being disclosed.
@@ -459,6 +702,17 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       title = i18n_noop("PIN Length");
       subtitle = data->length_subtitle;
       break;
+    case SettingsSecurityLockDelay:
+      /// How long after the phone disconnects the watch locks itself.
+      title = i18n_noop("Lock After");
+      subtitle = data->lock_delay_subtitle;
+      break;
+    case SettingsSecurityShredDelay:
+      /// How long after the phone disconnects the watch erases its copy of the
+      /// phone's content. Measured from the disconnect, not from the lock.
+      title = i18n_noop("Erase After");
+      subtitle = data->shred_delay_subtitle;
+      break;
     case SettingsSecurityDuressPin:
       title = i18n_noop("Duress PIN");
       // No subtitle, deliberately: any state shown here is the state that has
@@ -494,6 +748,12 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
       break;
     case SettingsSecurityPinLength:
       prv_length_menu_push(data);
+      break;
+    case SettingsSecurityLockDelay:
+      prv_lock_delay_menu_push(data);
+      break;
+    case SettingsSecurityShredDelay:
+      prv_shred_delay_menu_push(data);
       break;
     case SettingsSecurityDuressPin:
       // Always straight to setting a new one. Asking "set or clear?" would
