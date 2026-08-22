@@ -101,14 +101,26 @@ decisions:
       skipped one is a security failure.
 
 open_questions:
+  - security_deadlines_hook_does_not_start_the_timer: >
+      The `security deadlines` test command writes the deadline timestamps but
+      does not start the periodic check in endpoint.c, so they expire unnoticed
+      -- observed sitting at lock_in=-72 still Armed. Use `security session 0`
+      to exercise the deadline paths; it goes through the real handler, which
+      arms and starts the timer. Fixing the hook means exposing a timer-start
+      API from endpoint.c purely for testing, which may not be worth it.
   - never_erase_leaves_the_radio_up: >
       Airplane mode engages at the tail of security_lock_shred(), gated on
       is_locked(). With Erase After set to Never the lock deadline calls
       engage_lock_only() and no shred ever runs, so a locked watch stays on the
-      air and keeps accepting the six unguarded BlobDB stores. That is exactly
-      the configuration the overnight-phone-off case wants. Either engage the
-      blackout on locking rather than on shredding, or land the
-      blob_db_insert() guard, or both. NOT YET ADDRESSED.
+      air and keeps accepting the six unguarded BlobDB stores. CONFIRMED BY
+      EXPERIMENT: `security delays 5 0` then `security session 0` gives
+      "Engaging lock: disconnect timeout", state=2, and no blackout line at all.
+      Arguably correct rather than a bug -- the stated model tied the blackout
+      to shredding, and with Never there is no shred -- so the mitigation is the
+      blob_db_insert() guard, which refuses the writes whatever the radio is
+      doing. Whether to ALSO black out on plain locking is a UX trade: the phone
+      connection would drop the moment the watch locks, before anything is
+      erased. User's call.
   - record_version_shared: >
       RECORD_VERSION covers both the config record (holds the PIN) and the
       runtime record, so a runtime-only change discards the PIN and silently
