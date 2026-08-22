@@ -15,7 +15,9 @@
 //! implemented as an app. Modals are not reachable from that path.
 //!
 //! It is not pushed when the watch locks -- the clock stays up and the first
-//! button press raises this, from launcher_handle_button_event().
+//! button press raises this, from launcher_handle_button_event(). BACK puts it
+//! away again, returning to that same state: still locked, still inaccessible,
+//! and one button press away from the pad.
 
 //! The highest real modal priority, so nothing can be pushed above the lock
 //! screen. Not ModalPriorityMax, which is the "no modals at all" sentinel.
@@ -25,6 +27,8 @@
 //! KernelMain only.
 void security_lock_screen_push(void);
 
+//! Takes the pad off the screen and clears anything typed into it. Says nothing
+//! about the lock state: unlocking pops the screen, but so does BACK.
 void security_lock_screen_pop(void);
 
 bool security_lock_screen_is_visible(void);

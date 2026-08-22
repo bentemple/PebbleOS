@@ -21,8 +21,9 @@
 //!
 //! BACK clears the whole entry rather than the last digit: there is no cursor
 //! to walk back along, and a lock screen should not reward guessing one digit
-//! at a time. A cancelable window has no BACK handler at all and is dismissed
-//! by it instead.
+//! at a time. A cancelable window has no BACK handler at all and is popped by
+//! the enclosing stack instead; a window with a dismiss callback hands BACK to
+//! its owner.
 
 #define SECURITY_PIN_MESSAGE_BUF_SIZE 48
 
@@ -35,6 +36,9 @@
 //!        for the duration of the call.
 typedef void (*SecurityPinEntrySubmitCb)(const char *digits, uint8_t len, void *context);
 
+//! @param context the context passed to security_pin_entry_window_init().
+typedef void (*SecurityPinEntryDismissCb)(void *context);
+
 typedef struct SecurityPinEntryWindow {
   //! Must stay first: the update proc casts the root Layer back to this.
   Window window;
@@ -45,6 +49,8 @@ typedef struct SecurityPinEntryWindow {
   const char *title;
   char message[SECURITY_PIN_MESSAGE_BUF_SIZE];
   SecurityPinEntrySubmitCb submit;
+  //! NULL unless the owner wants BACK for itself.
+  SecurityPinEntryDismissCb dismiss;
   void *context;
   bool cancelable;
   //! Whether the raw touch subscription is currently held. Taken on appear and
@@ -68,6 +74,21 @@ void security_pin_entry_window_init(SecurityPinEntryWindow *pin_window, uint8_t 
 //! PIN from Settings. Never for the lock screen, where BACK dismissing the
 //! window is exactly the thing being defended against.
 void security_pin_entry_window_set_cancelable(SecurityPinEntryWindow *pin_window, bool cancelable);
+
+//! Hand BACK to the owner instead of clearing the entry.
+//!
+//! For a window whose dismissal is more than taking it off a stack. The lock
+//! screen has to stop reporting itself visible and put back the touch setting
+//! it forced on for the pad, neither of which the window stack knows about, so
+//! it does the removal itself rather than find the window gone from under it.
+//!
+//! The entry is cleared before the callback runs, so a half typed PIN is never
+//! left behind in a window that is off screen. Nothing is submitted, so this
+//! costs no attempt.
+//!
+//! Wins over `cancelable`, whichever order the two are set in.
+void security_pin_entry_window_set_dismiss_cb(SecurityPinEntryWindow *pin_window,
+                                              SecurityPinEntryDismissCb dismiss);
 
 void security_pin_entry_window_set_title(SecurityPinEntryWindow *pin_window, const char *title);
 

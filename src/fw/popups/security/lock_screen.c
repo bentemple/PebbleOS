@@ -70,6 +70,17 @@ static void prv_submit(const char *digits, uint8_t len, void *context) {
   prv_show_failure(attempts_remaining);
 }
 
+//! BACK hides the pad. It does not unlock anything: the state stays Locked, the
+//! UI lockout stays held, and the next button press raises the pad again from
+//! launcher_handle_button_event().
+//!
+//! Done here rather than by letting the window stack pop the window, because
+//! s_visible and the forced touch setting are ours to unwind.
+static void prv_dismiss(void *unused) {
+  PBL_LOG_DBG("Lock screen dismissed; still locked");
+  security_lock_screen_pop();
+}
+
 void security_lock_screen_push(void) {
   PBL_ASSERT_TASK(PebbleTask_KernelMain);
 
@@ -88,6 +99,7 @@ void security_lock_screen_push(void) {
   i18n_get_with_buffer(i18n_noop("Locked"), s_title, sizeof(s_title));
 
   security_pin_entry_window_init(&s_pin_window, pin_len, prv_submit, NULL);
+  security_pin_entry_window_set_dismiss_cb(&s_pin_window, prv_dismiss);
   security_pin_entry_window_set_title(&s_pin_window, s_title);
 
   // The pad is the only way in, so the global touch switch cannot be allowed to

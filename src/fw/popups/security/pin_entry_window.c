@@ -218,11 +218,31 @@ static void prv_back_click_handler(ClickRecognizerRef recognizer, void *context)
   security_pin_entry_window_reset(pin_window);
 }
 
+static void prv_dismiss_click_handler(ClickRecognizerRef recognizer, void *context) {
+  SecurityPinEntryWindow *pin_window = context;
+  // Clear first: the callback is free to leave this window allocated but off
+  // screen, and a half typed PIN must not survive there.
+  security_pin_entry_window_reset(pin_window);
+  pin_window->dismiss(pin_window->context);
+}
+
+//! Whether the enclosing stack owns BACK, or this window does.
+//!
+//! A dismiss callback needs the button, so it wins over cancelable: BACK
+//! cannot both reach a handler and pop the window. Derived in one place so the
+//! answer does not depend on the order the setters are called in.
+static void prv_update_back_override(SecurityPinEntryWindow *pin_window) {
+  const bool stack_pops_it = pin_window->cancelable && (pin_window->dismiss == NULL);
+  window_set_overrides_back_button(&pin_window->window, !stack_pops_it);
+}
+
 static void prv_click_config_provider(void *context) {
   SecurityPinEntryWindow *pin_window = context;
-  if (!pin_window->cancelable) {
+  if (pin_window->dismiss) {
+    window_single_click_subscribe(BUTTON_ID_BACK, prv_dismiss_click_handler);
+  } else if (!pin_window->cancelable) {
     // Clears the entry. Subscribing also overrides the back button, which is
-    // what stops the lock screen being dismissed with it.
+    // what stops the pad being taken off the stack with it.
     window_single_click_subscribe(BUTTON_ID_BACK, prv_back_click_handler);
   }
   // Nothing is bound to UP, DOWN or SELECT: the pad is the input.
@@ -276,7 +296,13 @@ void security_pin_entry_window_init(SecurityPinEntryWindow *pin_window, uint8_t 
 
 void security_pin_entry_window_set_cancelable(SecurityPinEntryWindow *pin_window, bool cancelable) {
   pin_window->cancelable = cancelable;
-  window_set_overrides_back_button(&pin_window->window, !cancelable);
+  prv_update_back_override(pin_window);
+}
+
+void security_pin_entry_window_set_dismiss_cb(SecurityPinEntryWindow *pin_window,
+                                              SecurityPinEntryDismissCb dismiss) {
+  pin_window->dismiss = dismiss;
+  prv_update_back_override(pin_window);
 }
 
 void security_pin_entry_window_set_pin_len(SecurityPinEntryWindow *pin_window, uint8_t pin_len) {

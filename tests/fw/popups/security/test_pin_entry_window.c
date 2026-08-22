@@ -119,6 +119,19 @@ static void prv_submit_cb(const char *digits, uint8_t len, void *context) {
   s_entered_at_submit_time = s_pin_window.entered;
 }
 
+static int s_dismiss_count;
+static void *s_dismiss_context;
+//! Proves the window has already cleared itself by the time the callback runs.
+static char s_digits_at_dismiss_time[SECURITY_LOCK_PIN_MAX_LEN];
+static uint8_t s_entered_at_dismiss_time;
+
+static void prv_dismiss_cb(void *context) {
+  s_dismiss_count++;
+  s_dismiss_context = context;
+  memcpy(s_digits_at_dismiss_time, s_pin_window.digits, sizeof(s_digits_at_dismiss_time));
+  s_entered_at_dismiss_time = s_pin_window.entered;
+}
+
 static void prv_open(uint8_t pin_len) {
   security_pin_entry_window_init(&s_pin_window, pin_len, prv_submit_cb, NULL);
   s_pin_window.window.layer.bounds = GRect(0, 0, TEST_W, TEST_H);
@@ -161,6 +174,20 @@ static void prv_tap_pin(const char *pin) {
   }
 }
 
+//! Re-run the click config provider, as the window stack does on every push.
+//! The BACK binding is decided there, so anything that changes it only takes
+//! effect once this has run.
+static void prv_reconfigure_clicks(void) {
+  memset(s_handlers, 0, sizeof(s_handlers));
+  cl_assert(s_click_config_provider != NULL);
+  s_click_config_provider(s_click_config_context);
+}
+
+static void prv_press_back(void) {
+  cl_assert(s_handlers[BUTTON_ID_BACK] != NULL);
+  s_handlers[BUTTON_ID_BACK](NULL, s_click_config_context);
+}
+
 void test_pin_entry_window__initialize(void) {
   memset(s_handlers, 0, sizeof(s_handlers));
   memset(&s_window_handlers, 0, sizeof(s_window_handlers));
@@ -177,6 +204,10 @@ void test_pin_entry_window__initialize(void) {
   memset(s_submitted, 0, sizeof(s_submitted));
   memset(s_digits_at_submit_time, 0, sizeof(s_digits_at_submit_time));
   s_entered_at_submit_time = 0xff;
+  s_dismiss_count = 0;
+  s_dismiss_context = NULL;
+  memset(s_digits_at_dismiss_time, 0, sizeof(s_digits_at_dismiss_time));
+  s_entered_at_dismiss_time = 0xff;
 
   prv_open(4);
 }
@@ -428,7 +459,7 @@ void test_pin_entry_window__back_clears_the_whole_entry(void) {
   prv_tap_pin("123");
   cl_assert_equal_i(3, s_pin_window.entered);
 
-  s_handlers[BUTTON_ID_BACK](NULL, s_click_config_context);
+  prv_press_back();
 
   cl_assert_equal_i(0, s_pin_window.entered);
   for (int i = 0; i < SECURITY_LOCK_PIN_MAX_LEN; ++i) {
@@ -454,8 +485,131 @@ void test_pin_entry_window__cancelable_only_when_asked_for(void) {
   cl_assert(!s_overrides_back_button);
 
   // And with no BACK handler bound, so the stack below pops the window.
-  memset(s_handlers, 0, sizeof(s_handlers));
-  s_click_config_provider(s_click_config_context);
+  prv_reconfigure_clicks();
+  cl_assert(s_handlers[BUTTON_ID_BACK] == NULL);
+}
+
+// Dismissal
+////////////////////////////////////
+//
+// A third BACK behaviour, alongside clearing and letting the stack pop: hand
+// the button to the owner. The lock screen needs it because dismissing that
+// window means more than taking it off a stack -- it also has to stop claiming
+// to be visible, and put back the touch setting it forced on for the pad.
+
+void test_pin_entry_window__a_dismiss_handler_keeps_back_overridden(void) {
+  security_pin_entry_window_set_dismiss_cb(&s_pin_window, prv_dismiss_cb);
+  prv_reconfigure_clicks();
+
+  // Overridden, so the window stack cannot pop this from under the owner: the
+  // dismissal is the owner's to do.
+  cl_assert(s_overrides_back_button);
+  cl_assert(s_handlers[BUTTON_ID_BACK] != NULL);
+}
+
+void test_pin_entry_window__back_calls_the_dismiss_handler(void) {
+  security_pin_entry_window_set_dismiss_cb(&s_pin_window, prv_dismiss_cb);
+  prv_reconfigure_clicks();
+
+  prv_press_back();
+  cl_assert_equal_i(1, s_dismiss_count);
+}
+
+void test_pin_entry_window__the_dismiss_handler_gets_the_window_context(void) {
+  int context;
+  security_pin_entry_window_init(&s_pin_window, 4, prv_submit_cb, &context);
+  security_pin_entry_window_set_dismiss_cb(&s_pin_window, prv_dismiss_cb);
+  prv_reconfigure_clicks();
+
+  prv_press_back();
+  cl_assert(s_dismiss_context == &context);
+}
+
+// Coming back to a half typed PIN would be confusing, and the digits must not
+// be left sitting in a window that is off screen either. Cleared before the
+// callback runs, which is free to pop and forget the window.
+void test_pin_entry_window__dismissing_clears_the_entry_first(void) {
+  security_pin_entry_window_set_dismiss_cb(&s_pin_window, prv_dismiss_cb);
+  prv_reconfigure_clicks();
+
+  prv_tap_pin("12");
+  cl_assert_equal_i(2, s_pin_window.entered);
+
+  prv_press_back();
+
+  cl_assert_equal_i(1, s_dismiss_count);
+  cl_assert_equal_i(0, s_entered_at_dismiss_time);
+  for (int i = 0; i < SECURITY_LOCK_PIN_MAX_LEN; ++i) {
+    cl_assert_equal_i('\0', s_digits_at_dismiss_time[i]);
+  }
+  cl_assert_equal_i(0, s_pin_window.entered);
+}
+
+// Dismissing is not a failed attempt. Nothing is submitted, so nothing above
+// this window is given a PIN to check or an attempt to count.
+void test_pin_entry_window__dismissing_does_not_submit(void) {
+  security_pin_entry_window_set_dismiss_cb(&s_pin_window, prv_dismiss_cb);
+  prv_reconfigure_clicks();
+
+  prv_tap_pin("123");
+  prv_press_back();
+  cl_assert_equal_i(0, s_submit_count);
+}
+
+// What the user types once the pad is back is a whole PIN, not the tail of the
+// one they walked away from.
+void test_pin_entry_window__a_dismissed_pad_starts_over(void) {
+  security_pin_entry_window_set_dismiss_cb(&s_pin_window, prv_dismiss_cb);
+  prv_reconfigure_clicks();
+
+  prv_tap_pin("12");
+  prv_press_back();
+
+  prv_tap_pin("1234");
+  cl_assert_equal_i(1, s_submit_count);
+  cl_assert_equal_s("1234", s_submitted);
+}
+
+// A pad whose owner has not claimed dismissal must not become dismissable by
+// accident, so the default stays "BACK clears".
+void test_pin_entry_window__back_still_clears_without_a_dismiss_handler(void) {
+  prv_tap_pin("12");
+  prv_press_back();
+
+  cl_assert_equal_i(0, s_dismiss_count);
+  cl_assert_equal_i(0, s_pin_window.entered);
+}
+
+// The two are alternatives, not layers: BACK cannot both reach a handler and
+// pop the window. Asserted both ways round, so the outcome does not depend on
+// the order the owner happens to call the setters in.
+void test_pin_entry_window__a_dismiss_handler_wins_over_cancelable(void) {
+  security_pin_entry_window_set_cancelable(&s_pin_window, true);
+  security_pin_entry_window_set_dismiss_cb(&s_pin_window, prv_dismiss_cb);
+  prv_reconfigure_clicks();
+
+  cl_assert(s_overrides_back_button);
+  prv_press_back();
+  cl_assert_equal_i(1, s_dismiss_count);
+}
+
+void test_pin_entry_window__cancelable_does_not_take_back_off_a_dismiss_handler(void) {
+  security_pin_entry_window_set_dismiss_cb(&s_pin_window, prv_dismiss_cb);
+  security_pin_entry_window_set_cancelable(&s_pin_window, true);
+  prv_reconfigure_clicks();
+
+  cl_assert(s_overrides_back_button);
+  prv_press_back();
+  cl_assert_equal_i(1, s_dismiss_count);
+}
+
+// Settings sets no dismiss handler, so its prompts keep being popped by the
+// stack exactly as before.
+void test_pin_entry_window__cancelable_alone_is_unchanged(void) {
+  security_pin_entry_window_set_cancelable(&s_pin_window, true);
+  prv_reconfigure_clicks();
+
+  cl_assert(!s_overrides_back_button);
   cl_assert(s_handlers[BUTTON_ID_BACK] == NULL);
 }
 
