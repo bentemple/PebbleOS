@@ -5,8 +5,8 @@ status: partial
 outcome: PARTIAL_MINUS
 ---
 
-goal: Built the PebbleOS + Gadgetbridge security lockdown feature end to end; watch boots, locks and wipes, but the wipe never signals completion
-now: Find why prv_shred() never reaches shred.c:292 (set_shred_pending(false)) - suspect the db re-init at shred.c:270-276 blocking the launcher task
+goal: Built the PebbleOS + Gadgetbridge security lockdown feature end to end, but the watch intermittently hangs on the boot splash and the PIN pad does not unlock
+now: Fix the boot hang - the watch still freezes on the PebbleOS splash. Not fixed despite several attempts; do not assume a single successful boot means it is resolved
 test: PATH="$VENV/bin:$PATH" ./waf test -M '.*(security_lock|settings_security|pin_entry|sha256|test_pfs).*'  # 6/6; then ./pbl qemu && python3 tools/security_lock_e2e.py  # 19/24
 
 done_this_session:
@@ -34,12 +34,14 @@ done_this_session:
     files: [tools/security_lock_e2e.py, tools/security_lock_qemu_test.py]
 
 blockers:
-  - shred_pending stays 1 after a wipe, so every boot re-runs one and the watch sits permanently mid-wipe with a lock screen that ignores taps
+  - BOOT HANG, UNRESOLVED. The watch freezes on the PebbleOS splash, sometimes with no progress bar and no log output at all. Intermittent - it sometimes boots fine, which repeatedly misled this session into thinking it was fixed. Several attempted fixes did not resolve it (watchdog masking, budgeted sweep, gaps between sweep passes, moving the wipe off KernelBG, making the boot path read-only). Treat every "it boots now" observation as unproven until it survives many cold boots.
+  - The PIN pad does not unlock the watch. Digit entry is confirmed working; something between the last digit and security_lock_verify_pin() is not firing.
+  - shred_pending was observed stuck at 1, but the readings were taken on a watch carrying state from earlier runs, so this is unconfirmed and may be a symptom of the boot hang rather than a separate fault.
 
 questions:
   - Does prv_shred() reach shred.c:292, or block earlier in the db re-init at :270-276? Note the blocking work should only be ~2s, so a stall is a deadlock rather than slowness.
-  - Should reconnecting the phone auto-unlock, or only cancel the countdown (currently only cancels)?
-  - Export PEBBLE_SECURITY_SHRED_EVENT to third-party apps via the SDK (applib wrapper, syscall, exported_symbols.json, SDK bump)?
+  - RESOLVED: reconnecting auto-unlocks (implemented, uncommitted).
+  - RESOLVED: yes, SDK-export the shred event. Not started.
 
 decisions:
   - shred_scope_is_restorable_only: Health/step data, app persist storage and BT pairing are never wiped. The phone cannot restore them, so wiping would make the feature too destructive to enable. Cost - a seized watch still yields step and sleep history.
@@ -56,7 +58,7 @@ findings:
   - pin_pad_input_is_fine: Instrumented probes showed touchdown and liftoff at identical coordinates resolving to keys 0,1,2,3 for "1234". Entry works; the watch never leaves the wipe.
   - db_deinit_is_launcher_task_only: pin_db_deinit/reminder_db_deinit/timeline_event_deinit deadlock if driven from KernelBG. factory_reset_fast runs them from the launcher task for this reason.
   - watchdog_masking_hid_a_deadlock: Masking only the current task turned a reset loop into a permanent hang. Long loops must call task_watchdog_bit_set_all(), not bit_set(current).
-  - nothing_may_touch_flash_before_boot_completes: The wipe ran inside services_normal_early_init() and blocked boot for as long as it took, presenting as a watch stuck on the boot splash.
+  - boot_hang_is_still_open: The wipe originally ran inside services_normal_early_init() and blocked boot outright. That was made read-only and the wipe deferred, and a boot was seen to succeed - but the hang came back. Whatever the real cause is, it has not been found. A frozen splash with no progress bar and no log output suggests it hangs before logging is usable, i.e. earlier than services_normal_init().
   - security_lock_logs_are_compiled_out: PBL_SHOULD_LOG gates on the compile-time module level and CONFIG_SERVICE_SECURITY_LOCK_LOG_LEVEL is 0, so PBL_LOG_DBG never emits. Cost several cycles chasing an endpoint that was never broken.
   - gadgetbridge_ignores_is_unfaithful: Upstream GB never parses it; the flag is at payload offset 150 of 155 and GB's parse stops at 47.
   - REASON_LOCKDOWN_is_a_real_signal: NotificationListenerService.REASON_LOCKDOWN (23) fires per notification on lockdown, but not at all if zero notifications are active - hence the mandatory manual panic action.
@@ -74,12 +76,13 @@ failed:
   - Asserting on PBL_LOG_DBG lines that are compiled out
 
 next:
-  - Add a log immediately before shred.c:292 and after each of the four db re-inits at :270-276 to find where prv_shred stops
-  - If the db re-init blocks, consider deferring it or reordering set_shred_pending(false) before prv_start_sweep()
-  - Re-run tools/security_lock_e2e.py; the five remaining failures are all downstream of shred_pending
-  - Revert the temporary INFO log levels in shred.c/endpoint.c to DBG once diagnosed, per the project logging rule
-  - Decide the reconnect auto-unlock question
-  - Round-display (gabbro) pad layout has never been rendered; only rect was tested
+  - Commit the uncommitted work in the PebbleOS worktree after reviewing it (read-only boot path, auto-unlock on reconnect, harness freeze detection with a 15s wipe budget)
+  - FIX THE BOOT HANG. Reproduce by cold-booting repeatedly rather than once. Consider bisecting by disabling security_lock_handle_boot() entirely to confirm the feature is the cause at all, then reintroducing it piecewise. GDB via ./pbl debug will give a backtrace, which guessing has repeatedly failed to
+  - Then the PIN pad unlock: instrument prv_submit in lock_screen.c through to service.c verify_pin. Raise CONFIG_SERVICE_SECURITY_LOCK_LOG_LEVEL or switch the lines to INFO first, or you are debugging blind
+  - Re-check shred_pending on a genuinely clean flash before treating it as a separate bug
+  - SDK-export PEBBLE_SECURITY_SHRED_EVENT per docs/development/sdk_export.md
+  - Revert temporary INFO log levels in shred.c/endpoint.c to DBG once diagnosed
+  - Gabbro round display deferred by the user; do not spend time on it
 
 files:
   created:

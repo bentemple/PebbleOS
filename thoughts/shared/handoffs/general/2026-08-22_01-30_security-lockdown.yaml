@@ -1,0 +1,129 @@
+---
+session: general
+date: 2026-08-22
+status: in_progress
+outcome: GOOD
+---
+
+goal: >
+  Resume the security lockdown work, build a test harness that does not require
+  UI interaction, find the intermittent boot hang, and clean up the changes made
+  chasing it.
+
+now: >
+  The boot hang is fixed and root-caused. 17 commits are on the branch. Airplane
+  mode on lock is the last item in flight; test-hook gating and a live PIN-unlock
+  pass remain.
+
+test: |
+  PATH="$VENV/bin:$PATH" ./waf build
+  PATH="$VENV/bin:$PATH" ./waf test -M '.*(security_lock|settings_security|pin_entry|sha256|test_pfs|flash_api|notification|blob_db).*'
+  # 29/31. test_health_db and test_weather_db are pre-existing DUMA stack
+  # smashes; they link nothing this branch touches (verified).
+
+the_headline: >
+  The "boot hang" was never in security_lock. prv_flash_erase_start() returned
+  expected_duration * 7 / 8, the QEMU flash HAL reports 1ms, and 1*7/8 == 0 --
+  which is that function's "already finished, semaphore released" signal. The
+  caller skipped polling, prv_flash_erase_poll() never ran, and the erase
+  semaphore was leaked, so the next erase blocked forever on portMAX_DELAY.
+  Four fixes had been made to the wrong subsystem for it. Only the QEMU HAL
+  truncates today; real backends return 150/50ms. UNTESTED ON HARDWARE.
+
+done_this_session:
+  - task: Root-caused and fixed the flash erase semaphore leak, with tests that
+      stub 1ms durations (the harness default of 100ms cannot reach the bug)
+    files: [src/fw/drivers/flash/flash_api.c, tests/fw/drivers/test_flash_api.c]
+  - task: Interactive QEMU harness - one owned PULSE link, continuous log
+      capture, JSON client, screen/health snapshots
+    files: [tools/pebble_harness.py]
+  - task: Shred race stress driver; found a deterministic UsageFault, did not
+      reproduce the pfs_remove race in 45 valid trials
+    files: [tools/security_lock_stress.py]
+  - task: Console control surface so tests never touch the UI
+    files: [src/fw/console/prompt_commands.c]
+  - task: Reverted the phantom workarounds; restored the clock-rollback trigger,
+      which a refactor had silently killed
+    files: [src/fw/services/security_lock/shred.c, src/fw/services/filesystem/pfs.c]
+  - task: Fixed engage() always shredding - the disconnect path erased at the
+      lock delay, so the shred delay was dead code
+    files: [src/fw/services/security_lock/lock.c]
+  - task: Notifications dropped while locked or shredding, at all three
+      ingresses (the blob_db one is how Gadgetbridge delivers)
+    files: [src/fw/services/notifications/, src/fw/services/blob_db/notif_db.c]
+  - task: Fixed the UsageFault - layout_get_context() deref'd a NULL layout's
+      vtable; wipe now quiesces the UI synchronously first
+    files: [src/fw/popups/notifications/notification_window.c, src/fw/services/security_lock/lock.c]
+  - task: Fixed mutex_lock(NULL) from async init vs sync deinit - the cause of
+      the two-wipes-in-a-row hang
+    files: [src/fw/services/timeline/event.c]
+  - task: Dirty-since-shred early-out, Lock/Erase delay settings with Never,
+      Lockdown app, Quick Launch combos, SDK-exported shred event
+    files: [many; see git log]
+
+blockers: []
+
+decisions:
+  - reconnect_never_unlocks: >
+      An earlier revision unlocked on reconnect, reasoning that Gadgetbridge
+      could not reach the watch unless the phone was unlocked. False - Android
+      keeps Bluetooth up while locked and GB reconnects unattended. A shielded
+      bag defeats it. Only the PIN clears a lock now.
+  - datalogging_not_shredded: >
+      dls files are the outbound watch-to-phone queue, so wiping them destroys
+      data the phone does not have. They also carry activity samples, making it
+      a partial wipe of the one category the design promises never to touch.
+      ~8-9KB per phone-absent night is what the phone would never receive.
+  - shred_reason_not_exposed_to_apps: >
+      The SDK handler takes no arguments. Collapsing duress into unknown is not
+      enough: an app can correlate the remaining values against state it can
+      already read and recover duress by elimination.
+  - dirty_flag_fails_toward_shredding: >
+      Unknown or unreadable state means dirty. A redundant wipe is wasteful; a
+      skipped one is a security failure.
+
+open_questions:
+  - record_version_shared: >
+      RECORD_VERSION covers both the config record (holds the PIN) and the
+      runtime record, so a runtime-only change discards the PIN and silently
+      disarms the lock. The airplane-mode work was asked to split the constants.
+      If it did not, this needs doing before ship.
+  - shred_complete_no_db_bits: >
+      A clean (no-op) wipe reports SHRED_COMPLETE with 0x80000000 - the
+      non-BlobDB bit only. Confirm Gadgetbridge tolerates that.
+  - pfs_remove_croak_race: >
+      pfs_shred -> pfs_remove PBL_CROAKs if the fd is IN_USE.
+      notification_storage_store() releases s_pfs_mutex between pfs_open and
+      pfs_close, and the wipe runs on a different task, so the window is real.
+      Not reproduced in 45 valid trials. Unproven, still plausible.
+  - lockdown_app_without_pin: >
+      With no PIN set, engage() shreds without locking, so an app called
+      "Lockdown" erases without locking. Fix belongs in lock.c or in the name,
+      not in a second copy of the rule.
+
+worked:
+  - Instrumenting before patching. Every fix that missed was a guess; the ones
+    that landed came from a recovered FreeRTOS backtrace and from stage markers.
+  - `log dump current` - replays the whole boot from on-flash log, including
+    everything before PULSE attaches. Without it the early-boot window is
+    invisible and a hang looks identical to a healthy quiet boot.
+  - Driving state from the console instead of the touch UI.
+
+failed:
+  - Running two QEMU instances. They collide on the fixed monitor/QMP/console
+    sockets and produce "reproducible" failures that are pure artefact. This was
+    listed as a known trap in the previous handoff and still caught me.
+  - `pkill -f qemu-pebble` matches the calling shell's own command line and
+    kills it. Kill by PID.
+  - Editing files an agent still had open, which produced a half-applied change.
+
+next:
+  - Airplane mode on lock (in flight): engage on lock, restore prior state on
+    unlock, must NOT fire for duress (unlocked, so restore never runs, and it is
+    visible)
+  - Gate the SECTEST console commands behind CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS
+    and move them out of prompt_commands.c
+  - Guard blob_db_insert() for the six shredded stores still accepted while
+    locked - pins, reminders, contacts, weather, iOS prefs, app glances
+  - Live PIN-unlock pass. Never verified. Now testable since auto-unlock is gone
+  - Hardware validation - nothing here has run on a real watch
