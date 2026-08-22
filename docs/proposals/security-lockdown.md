@@ -21,11 +21,24 @@ be aggressive about triggering it.
 ### Explicitly out of scope
 
 Health and step history (`activity` settings file, `healthdb`), third-party app
-persistent storage, the app DB, and BT pairing keys are **not** shredded. Health
-data is sensitive and this is an accepted cost — it is not restorable from the
-phone, and wiping it would make the feature destructive enough that nobody would
-turn it on. Preserving pairing also means the watch silently reconnects and
-resyncs, which is what makes reboot-while-locked a non-event.
+persistent storage, the app DB, BT pairing keys, and **datalogging buffers**
+(`dls*`) are **not** shredded. Health data is sensitive and this is an accepted
+cost — it is not restorable from the phone, and wiping it would make the feature
+destructive enough that nobody would turn it on. Preserving pairing also means
+the watch silently reconnects and resyncs, which is what makes
+reboot-while-locked a non-event.
+
+Datalogging deserves its own note, because an earlier draft did shred it. Those
+files are the outbound watch→phone queue: by definition they hold data the phone
+does *not* have yet, so wiping them is unrecoverable loss rather than a resync.
+They also carry activity samples, which means shredding them quietly destroyed
+part of the one category this document promises never to touch. The rule that
+resolves it: **the shred only ever destroys data the phone can give back.**
+Anything that fails that test does not belong in the target list.
+
+Shredding health data was considered as an opt-in setting and deliberately not
+built. It would be the only control here capable of destroying something the
+user cannot get back, and no threat in the model above justifies offering it.
 
 This has a consequence that must not be glossed over: **a seized watch still
 yields step, sleep, and heart-rate history.** That is a deliberate trade, not
@@ -201,7 +214,6 @@ live records and tombstones together — no need to walk records individually.
 | Weather | `weatherdb` |
 | iOS notif prefs | `iosnotifprefdb` |
 | App glances | `appglancedb` |
-| Datalogging buffers | `dls_storage.c:39-40`, per-session files |
 
 Plus non-PFS flash regions that can hold leaked content — a coredump is a RAM
 snapshot and can contain notification text: raw erase of `FLASH_REGION_CD_*` and
@@ -584,10 +596,89 @@ and the link fail there. A lock that only works on some boards is not a lock.
   worth revisiting if the KernelMain watchdog is ever tightened.
 - **Changing PIN length is a two-step flow** (PIN Length, then Change PIN)
   rather than a picker inside the change flow. Contained, but slightly awkward.
-- **Nothing has run on hardware or in QEMU.** Every claim here is from unit
-  tests, the host build and code reading. The screen layouts in particular have
-  never been rendered.
+- **Nothing has run on hardware yet.** It has now been driven extensively under
+  QEMU (`tools/pebble_harness.py`, `tools/security_lock_stress.py`), which is
+  where most of the bugs below were found — but no claim here has been checked
+  on a real watch, and the emulator's flash timings differ enough from real
+  hardware to have hidden a deadlock for an entire session. Hardware validation
+  is planned. See "What running it actually found".
 - **Endpoint ID 0x2C24 is self-assigned.**
 - Unverified: whether ANCS caches caller ID to flash (`ancs/ancs_phone_call.c`),
   and whether the voice/audio endpoints buffer audio to flash. Both need a read
   before finalising the shred target list.
+
+## What running it actually found
+
+Everything above was written from code reading and unit tests. Driving the real
+firmware under QEMU contradicted several of its conclusions. Recorded here
+because the wrong explanations were confidently held for a long time.
+
+### The "boot hang" was never in this feature
+
+A locked watch would freeze on the boot splash, intermittently, with no log
+output. It was blamed in turn on the watchdog, on the sector sweep being slow,
+on the wipe running at early boot, and on a KernelBG deadlock. Each theory got a
+fix; none of them was the cause.
+
+The actual cause was a pre-existing bug in the generic flash driver.
+`prv_flash_erase_start()` documents "returns 0 if the erase has completed" and
+returned `expected_duration * 7 / 8`. The QEMU flash HAL reports a 1 ms typical
+erase duration, and `1 * 7 / 8 == 0` — so a live erase reported itself finished,
+the caller skipped polling, and `prv_flash_erase_poll()` (the only thing on the
+normal path that releases `s_erase_semphr`) never ran. The next erase blocked
+forever on a `portMAX_DELAY` take. Fixed by clamping both truncating returns.
+
+The shred was simply the first code path to erase a non-blank, non-sector-aligned
+region: `CD` is 64K-aligned and never written, so its erases all took the
+blank-check early exit, which does release the semaphore. `DEBUG_DB` starts at
+`0x11FCF000` and holds the live log page, so it took a real erase — and wedged.
+
+Three lessons worth keeping:
+
+- **The watch appearing dead is not evidence about the subsystem you are
+  working on.** Four fixes were made to `security_lock` for a fault in
+  `drivers/flash`.
+- **Instrument before patching.** Every fix that missed was a guess; the one
+  that worked came from a recovered FreeRTOS backtrace.
+- **An emulator-only constant hid it.** Real backends return 150/50 ms, which
+  never truncates. Whether hardware can reach the same wedged state by another
+  route is untested.
+
+### Bugs the design intended to prevent, but did not
+
+- **The disconnect path erased at the *lock* delay.** `security_lock_engage()`
+  ended with an unconditional `security_lock_shred()`, and the lock deadline
+  called it, so the shred delay was dead code on the only trigger that used it.
+  With the defaults, a disconnect erased at 5 minutes rather than 30. Split into
+  `security_lock_engage()` and `security_lock_engage_lock_only()`.
+- **The clock-rollback trigger never fired at boot.** A refactor moved
+  `security_lock_note_time()` and discarded its return value, dropping
+  `rolled_back` from the decision entirely.
+- **A locked watch still stored notifications.** The requirement to drop rather
+  than store them was specified above and never implemented, and there are
+  *three* ingresses to `notification_storage_store()`, not one — including the
+  blob\_db path, which is how Gadgetbridge delivers them.
+
+### What `PEBBLE_SECURITY_SHRED_EVENT` is and is not
+
+The shred broadcasts this before wiping so that anything holding data of its own
+gets the chance to destroy it. Nothing in the firmware subscribes, and that is
+deliberate: it exists for **third-party apps**, which is why it is on the list
+to be SDK-exported. `event_put()` delivery is asynchronous, which is fine for an
+app — apps run on their own task.
+
+It is specifically *not* a general-purpose "everything gets to clean up first"
+hook. A subscriber living on KernelMain would not be woken until the shred had
+already finished, because the shred occupies that task for its whole duration.
+Anything KernelMain-resident that holds references into shredded storage — the
+notification window, for one — has to be torn down synchronously, in-line,
+before the first file is zeroed.
+
+### Reconnecting must never unlock
+
+An earlier revision unlocked the watch when the phone reconnected, reasoning
+that Gadgetbridge could not reach the watch unless the phone had been unlocked.
+That is false: Android keeps Bluetooth up while the screen is locked and
+Gadgetbridge reconnects on its own. A reconnect is something an attacker can
+arrange — a shielded bag, or simply carrying the phone out of range and back —
+so it proves nothing. Only the PIN clears a lock, whatever caused it.
