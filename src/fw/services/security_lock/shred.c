@@ -418,11 +418,12 @@ static bool s_boot_shred_tail_owed;
 void security_lock_handle_boot(void) {
   PBL_LOG_INFO("SECBOOT handle_boot enter");
 
-#if !defined(CONFIG_RELEASE)
+#if defined(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS)
   // Test/debug affordance. A watch that wipes on every boot cannot be
   // instrumented, because each run starts from a different filesystem and the
-  // wipe is the thing under suspicion. Deliberately not honoured in a release
-  // build, where nothing should be able to talk the watch out of the wipe.
+  // wipe is the thing under suspicion. `boot bit set` is itself ungated, so the
+  // check has to be compiled out with the rest of the hooks: without the hooks
+  // nothing can talk the watch out of the wipe.
   if (boot_bit_test(BOOT_BIT_SECURITY_SKIP_BOOT_WIPE)) {
     s_boot_shred_tail_owed = false;
     PBL_LOG_INFO("SECBOOT handle_boot leave owed=0 skipped=1");

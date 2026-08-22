@@ -31,6 +31,8 @@ typedef enum BootBitValue {
   //! than a setting because it has to be readable from
   //! security_lock_handle_boot(), where an RTC backup register is the only
   //! store that costs no flash access. Does not survive a battery pull.
+  //! Only honoured under CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS; the number
+  //! stays reserved either way.
   BOOT_BIT_SECURITY_SKIP_BOOT_WIPE = 0x1 << 20,
 } BootBitValue;
 

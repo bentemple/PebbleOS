@@ -18,4 +18,12 @@ module = SERVICE_SECURITY_LOCK
 module-str = Security lock
 source "subsys/logging/Kconfig.template.log_level"
 
+config SERVICE_SECURITY_LOCK_TEST_HOOKS
+    bool "Security lock test hooks"
+    depends on !RELEASE && !RECOVERY_FW
+    default y if BOARD_QEMU_EMERY || BOARD_QEMU_FLINT || BOARD_QEMU_GABBRO
+    help
+      Console commands that set PINs, lock, unlock and suppress the boot
+      wipe, bypassing every user-facing control. Emulator-only; never ship.
+
 endif

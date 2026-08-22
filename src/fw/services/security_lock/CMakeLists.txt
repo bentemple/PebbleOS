@@ -10,3 +10,4 @@ pbl_library_sources(
   lock.c
   endpoint.c
 )
+pbl_library_sources_ifdef(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS test_hooks.c)

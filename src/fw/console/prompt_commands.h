@@ -45,8 +45,12 @@ extern void command_factory_reset_fast(void);
 #if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
 extern void command_security_shred(void);
 extern void command_security_status(void);
+#endif
+
+// Test hooks: implemented in services/security_lock/test_hooks.c, which is the
+// only place any of this lives. Never built into a shipping firmware.
+#if defined(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS)
 extern void command_security_ui(void);
-#if !defined(CONFIG_RELEASE)
 extern void command_security_set_pin(const char*);
 extern void command_security_set_duress(const char*);
 extern void command_security_clear_pin(void);
@@ -56,7 +60,6 @@ extern void command_security_delays(const char*, const char*);
 extern void command_security_deadlines(const char*, const char*);
 extern void command_security_session(const char*);
 extern void command_security_boot_wipe(const char*);
-#endif
 #endif
 
 extern void command_infinite_loop(void);
@@ -340,11 +343,12 @@ static const Command s_prompt_commands[] = {
 #if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
   { "security status", command_security_status, 0 },
   { "security shred", command_security_shred, 0 },
-  { "security ui", command_security_ui, 0 },
-#if !defined(CONFIG_RELEASE)
+#endif
+#if defined(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS)
   // Console control surface, so a harness never has to drive the touch UI to
   // set up a state. Commands are matched by prefix in table order, so none of
   // these may be a prefix of another.
+  { "security ui", command_security_ui, 0 },
   { "security set pin", command_security_set_pin, 1 },
   { "security set duress", command_security_set_duress, 1 },
   { "security clear pin", command_security_clear_pin, 0 },
@@ -354,7 +358,6 @@ static const Command s_prompt_commands[] = {
   { "security deadlines", command_security_deadlines, 2 },
   { "security session", command_security_session, 1 },
   { "security boot wipe", command_security_boot_wipe, 1 },
-#endif
 #endif
   { "set time", command_set_time, 1 },
   { "version", command_version_info, 0 },
