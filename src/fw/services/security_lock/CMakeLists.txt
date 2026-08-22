@@ -7,6 +7,7 @@ pbl_library_sources(
   pin_hash.c
   sha256.c
   shred.c
+  shred_targets.c
   lock.c
   endpoint.c
 )

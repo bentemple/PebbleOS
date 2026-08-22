@@ -3,6 +3,8 @@
 
 #include "pbl/services/security_lock_shred.h"
 
+#include "shred_targets.h"
+
 #include <inttypes.h>
 
 #include <pbl/drivers/flash.h>
@@ -23,7 +25,6 @@
 #include "pbl/services/security_lock_ui.h"
 #include "pbl/services/system_task.h"
 #include "pbl/services/timeline/event.h"
-#include "pbl/util/size.h"
 #include "system/bootbits.h"
 #include "system/passert.h"
 
@@ -32,36 +33,6 @@
 #endif
 
 PBL_LOG_MODULE_DECLARE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LEVEL);
-
-//! Files whose entire contents are destroyed, and the BlobDB each one backs.
-//!
-//! Health/activity ("activity", "healthdb"), app persist storage ("ps<uuid>"),
-//! the app database ("appdb"), the BT bonding store and the datalogging queue
-//! ("dls<session>") are deliberately absent: the phone cannot restore them, so
-//! wiping them would make the feature destructive enough that nobody would turn
-//! it on. That is a conscious trade and it means a seized watch still yields
-//! step and sleep history.
-//!
-//! Datalogging is the sharpest case. It is the outbound watch-to-phone queue,
-//! so by definition it holds the one thing the phone does not have yet, and
-//! most of what it holds is the activity data this list already spares.
-static const struct {
-  const char *filename;
-  BlobDBId db_id;
-} s_shred_targets[] = {
-    // Notification bodies and senders mirrored from the phone.
-    {"notifstr", BlobDBIdNotifs},
-    // Calendar events: titles, times, locations, attendees.
-    {"pindb", BlobDBIdPins},
-    {"reminderdb", BlobDBIdReminders},
-    // Names, phone numbers and email addresses.
-    {"contactsdb", BlobDBIdContacts},
-    // Reveals the locations the user watches.
-    {"weatherdb", BlobDBIdWeather},
-    // Reveals which apps the user has and their reply configuration.
-    {"iosnotifprefdb", BlobDBIdiOSNotifPref},
-    {"appglancedb", BlobDBIdAppGlance},
-};
 
 //! True for the duration of prv_shred(). See security_lock_is_shredding().
 static bool s_shredding;
@@ -278,13 +249,16 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
     pin_db_deinit();
   }
 
+  size_t num_targets;
+  const SecurityShredTarget *targets = security_lock_shred_targets(&num_targets);
+
   uint32_t wiped = 0;
-  for (size_t i = 0; !clean && (i < ARRAY_LENGTH(s_shred_targets)); ++i) {
-    status_t rv = pfs_shred(s_shred_targets[i].filename);
+  for (size_t i = 0; !clean && (i < num_targets); ++i) {
+    status_t rv = pfs_shred(targets[i].filename);
     if (rv == S_SUCCESS) {
-      wiped |= SECURITY_SHRED_DB_BIT(s_shred_targets[i].db_id);
+      wiped |= SECURITY_SHRED_DB_BIT(targets[i].db_id);
     } else {
-      PBL_LOG_ERR("Failed to shred %s: %" PRId32, s_shred_targets[i].filename, (int32_t)rv);
+      PBL_LOG_ERR("Failed to shred %s: %" PRId32, targets[i].filename, (int32_t)rv);
     }
     task_watchdog_bit_set(pebble_task_get_current());
   }

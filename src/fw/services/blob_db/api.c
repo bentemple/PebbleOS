@@ -22,6 +22,9 @@
 #include "kernel/events.h"
 #include "kernel/pbl_malloc.h"
 #include "pbl/services/security_lock.h"
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+#include "pbl/services/security_lock_shred.h"
+#endif
 #include <pbl/logging/logging.h>
 
 #include <inttypes.h>
@@ -180,6 +183,44 @@ static bool prv_db_valid(BlobDBId db_id) {
 
 }
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+//! Writes dropped since the last one was accepted. Bookkeeping for the log
+//! below, not a statistic anybody reads.
+static uint32_t s_writes_dropped;
+
+//! True when an inbound write must not reach flash.
+//!
+//! A locked or shredding watch that accepted these would write back in
+//! cleartext exactly what the wipe just erased. Scoped to the databases the
+//! wipe destroys, asked of the wipe's own list: the ones it spares are not
+//! sensitive in this sense and blocking them would break things for no gain.
+//!
+//! The in-flight check is not redundant with the lock state -- the duress and
+//! clock-rollback wipes both run unlocked.
+//!
+//! Also owns the log bookkeeping: one line when the drops start and one when
+//! they stop, never one per write. A locked watch with a chatty phone reaches
+//! this per message, and this module's level compiles PBL_LOG_DBG out.
+static bool prv_should_drop_write(BlobDBId db_id) {
+  if (!security_lock_is_locked() && !security_lock_is_shredding()) {
+    if (s_writes_dropped != 0) {
+      PBL_LOG_INFO("Accepting blob db writes again, %" PRIu32 " dropped", s_writes_dropped);
+      s_writes_dropped = 0;
+    }
+    return false;
+  }
+
+  if (!security_lock_shred_covers_db(db_id)) {
+    return false;
+  }
+
+  if (s_writes_dropped++ == 0) {
+    PBL_LOG_INFO("Locked or shredding, dropping writes to blob db %d", (int)db_id);
+  }
+  return true;
+}
+#endif
+
 void blob_db_event_put(BlobDBEventType type, BlobDBId db_id, const uint8_t *key, int key_len) {
   // copy key for event
   uint8_t *key_bytes = NULL;
@@ -240,6 +281,19 @@ status_t blob_db_insert(BlobDBId db_id,
   if (!prv_db_valid(db_id)) {
     return E_RANGE;
   }
+
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  // Ahead of the dirty marking below, deliberately. Nothing is stored, so
+  // marking would have the next wipe do real work for no reason -- and the flag
+  // is persisted, so it would survive a reboot.
+  //
+  // Success so the phone gets its usual ack, does not retry, and learns nothing
+  // about the watch's state. That is what notif_db_insert() has always
+  // reported, and Gadgetbridge ignores blob db acks anyway.
+  if (prv_should_drop_write(db_id)) {
+    return S_SUCCESS;
+  }
+#endif
 
   const BlobDB *db = &s_blob_dbs[db_id];
   if (db->insert) {

@@ -18,10 +18,10 @@ void notif_db_init(void) {
 
 status_t notif_db_insert(const uint8_t *key, int key_len, const uint8_t *val, int val_len) {
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
-  // Drop before deserializing, so nothing is allocated and no part of the
-  // payload is logged. Reported as success so the phone gets its usual ack.
-  // The in-progress check is not redundant with the lock state: the duress and
-  // clock-rollback wipes both run unlocked.
+  // A backstop. blob_db_insert() drops earlier than this and covers every
+  // store the wipe destroys, so on that path -- the only one today -- this is
+  // unreachable. Kept for a future direct caller, and loud because reaching it
+  // would mean one exists.
   if (security_lock_is_locked() || security_lock_is_shredding()) {
     PBL_LOG_INFO("Locked or shredding, notification dropped");
     return S_SUCCESS;

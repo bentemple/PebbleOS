@@ -514,3 +514,43 @@ void test_security_lock_shred__an_ordinary_boot_wipes_nothing(void) {
   cl_assert_equal_i(0, s_trace.files_shredded);
   cl_assert_equal_i(0, s_trace.region_erases);
 }
+
+// What the wipe covers
+////////////////////////////////////
+
+//! The predicate the write guard in blob_db_insert() consults. It answers from
+//! the same list the wipe walks, which is the point: a second list would drift
+//! and the watch would accept back, in cleartext, a store it had just erased.
+void test_security_lock_shred__covered_dbs_are_the_ones_the_wipe_destroys(void) {
+  cl_assert(security_lock_shred_covers_db(BlobDBIdNotifs));
+  cl_assert(security_lock_shred_covers_db(BlobDBIdPins));
+  cl_assert(security_lock_shred_covers_db(BlobDBIdReminders));
+  cl_assert(security_lock_shred_covers_db(BlobDBIdContacts));
+  cl_assert(security_lock_shred_covers_db(BlobDBIdWeather));
+  cl_assert(security_lock_shred_covers_db(BlobDBIdiOSNotifPref));
+  cl_assert(security_lock_shred_covers_db(BlobDBIdAppGlance));
+}
+
+//! The stores the wipe deliberately spares. Blocking writes to these while
+//! locked would break things for no gain: none of them holds message, calendar
+//! or contact content.
+void test_security_lock_shred__spared_dbs_are_not_covered(void) {
+  cl_assert(!security_lock_shred_covers_db(BlobDBIdApps));
+  cl_assert(!security_lock_shred_covers_db(BlobDBIdPrefs));
+  cl_assert(!security_lock_shred_covers_db(BlobDBIdWatchAppPrefs));
+  cl_assert(!security_lock_shred_covers_db(BlobDBIdHealth));
+  cl_assert(!security_lock_shred_covers_db(BlobDBIdSettings));
+  cl_assert(!security_lock_shred_covers_db(BlobDBIdTest));
+}
+
+//! The anti-drift check, stated against the wipe's own output rather than
+//! against a list written out here: every database bit the wipe reports having
+//! erased is one the guard refuses writes to, and no other id is.
+void test_security_lock_shred__coverage_matches_the_wiped_bitmap(void) {
+  const uint32_t wiped = security_lock_shred(SecurityShredReasonManualPanic);
+
+  for (int id = 0; id < NumBlobDBs; ++id) {
+    const bool in_bitmap = ((wiped & SECURITY_SHRED_DB_BIT(id)) != 0);
+    cl_assert_equal_b(in_bitmap, security_lock_shred_covers_db((BlobDBId)id));
+  }
+}

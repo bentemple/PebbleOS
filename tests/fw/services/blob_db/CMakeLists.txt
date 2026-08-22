@@ -40,6 +40,16 @@ pbl_clar_test(test_pin_db
     tests/fakes/test_db.c
 )
 
+# Links the shred's target list rather than faking it: the guard under test has
+# to cover exactly what the wipe destroys, so the real list is the subject.
+pbl_clar_test(test_blob_db_api
+  SOURCES
+    src/fw/services/blob_db/api.c
+    src/fw/services/security_lock/shred_targets.c
+  DEFINES CONFIG_SERVICE_SECURITY_LOCK=1
+  OVERRIDES dummy_board
+)
+
 pbl_clar_test(test_blob_db_sync
   SOURCES
     src/fw/services/blob_db/util.c

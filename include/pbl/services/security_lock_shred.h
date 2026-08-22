@@ -3,9 +3,10 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
-#include "pbl/services/blob_db/api_types.h"
+#include "pbl/services/blob_db/api.h"
 
 //! Why a shred was run. Mirrors the reason codes on the security protocol
 //! endpoint; see docs/proposals/security-lockdown.md.
@@ -82,3 +83,11 @@ void security_lock_handle_boot(void);
 
 //! Name of the shred reason, for logs and the console.
 const char *security_lock_shred_reason_str(SecurityShredReason reason);
+
+//! True if a shred destroys what this database holds.
+//!
+//! Answered from the list the wipe itself walks, so the two cannot disagree.
+//! For the write paths that have to refuse fresh content while the watch is
+//! locked: accepting a store the wipe just erased would write it straight back
+//! in cleartext.
+bool security_lock_shred_covers_db(BlobDBId db_id);
