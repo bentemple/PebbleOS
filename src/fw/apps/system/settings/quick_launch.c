@@ -23,16 +23,8 @@
 #include "shell/normal/quick_launch.h"
 #include "system/passert.h"
 
-#define NUM_ROWS (NUM_BUTTONS + 2)  // 4 hold buttons + 2 tap buttons (up and down)
-
-typedef enum {
-  ROW_TAP_UP = 0,
-  ROW_TAP_DOWN,
-  ROW_HOLD_UP,
-  ROW_HOLD_SELECT,
-  ROW_HOLD_DOWN,
-  ROW_HOLD_BACK,
-} QuickLaunchRow;
+//! One row per binding, in QuickLaunchBinding order.
+#define NUM_ROWS QuickLaunchBindingCount
 
 typedef struct QuickLaunchData {
   SettingsCallbacks callbacks;
@@ -41,18 +33,111 @@ typedef struct QuickLaunchData {
 
 static const char *s_row_titles[NUM_ROWS] = {
   /// Shown in Quick Launch Settings as the title of the tap up button option.
-  [ROW_TAP_UP]       = i18n_noop("Tap Up"),
+  [QuickLaunchBindingTapUp]        = i18n_noop("Tap Up"),
   /// Shown in Quick Launch Settings as the title of the tap down button option.
-  [ROW_TAP_DOWN]     = i18n_noop("Tap Down"),
+  [QuickLaunchBindingTapDown]      = i18n_noop("Tap Down"),
   /// Shown in Quick Launch Settings as the title of the hold up button quick launch option.
-  [ROW_HOLD_UP]      = i18n_noop("Hold Up"),
+  [QuickLaunchBindingHoldUp]       = i18n_noop("Hold Up"),
   /// Shown in Quick Launch Settings as the title of the hold center button quick launch option.
-  [ROW_HOLD_SELECT]  = i18n_noop("Hold Center"),
+  [QuickLaunchBindingHoldSelect]   = i18n_noop("Hold Center"),
   /// Shown in Quick Launch Settings as the title of the hold down button quick launch option.
-  [ROW_HOLD_DOWN]    = i18n_noop("Hold Down"),
+  [QuickLaunchBindingHoldDown]     = i18n_noop("Hold Down"),
   /// Shown in Quick Launch Settings as the title of the hold back button quick launch option.
-  [ROW_HOLD_BACK]    = i18n_noop("Hold Back"),
+  [QuickLaunchBindingHoldBack]     = i18n_noop("Hold Back"),
+  /// Shown in Quick Launch Settings as the title of the hold back and up buttons quick launch
+  /// option.
+  [QuickLaunchBindingComboBackUp]  = i18n_noop("Hold Back + Up"),
+  /// Shown in Quick Launch Settings as the title of the hold up and down buttons quick launch
+  /// option.
+  [QuickLaunchBindingComboUpDown]  = i18n_noop("Hold Up + Down"),
 };
+
+AppInstallId quick_launch_binding_get_app(QuickLaunchBinding binding) {
+  switch (binding) {
+    case QuickLaunchBindingTapUp:
+      return quick_launch_single_click_get_app(BUTTON_ID_UP);
+    case QuickLaunchBindingTapDown:
+      return quick_launch_single_click_get_app(BUTTON_ID_DOWN);
+    case QuickLaunchBindingHoldUp:
+      return quick_launch_get_app(BUTTON_ID_UP);
+    case QuickLaunchBindingHoldSelect:
+      return quick_launch_get_app(BUTTON_ID_SELECT);
+    case QuickLaunchBindingHoldDown:
+      return quick_launch_get_app(BUTTON_ID_DOWN);
+    case QuickLaunchBindingHoldBack:
+      return quick_launch_get_app(BUTTON_ID_BACK);
+    case QuickLaunchBindingComboBackUp:
+      return quick_launch_combo_back_up_get_app();
+    case QuickLaunchBindingComboUpDown:
+      return quick_launch_combo_up_down_get_app();
+    case QuickLaunchBindingCount:
+      break;
+  }
+  return INSTALL_ID_INVALID;
+}
+
+void quick_launch_binding_set_app(QuickLaunchBinding binding, AppInstallId app_id) {
+  switch (binding) {
+    case QuickLaunchBindingTapUp:
+      quick_launch_single_click_set_app(BUTTON_ID_UP, app_id);
+      return;
+    case QuickLaunchBindingTapDown:
+      quick_launch_single_click_set_app(BUTTON_ID_DOWN, app_id);
+      return;
+    case QuickLaunchBindingHoldUp:
+      quick_launch_set_app(BUTTON_ID_UP, app_id);
+      return;
+    case QuickLaunchBindingHoldSelect:
+      quick_launch_set_app(BUTTON_ID_SELECT, app_id);
+      return;
+    case QuickLaunchBindingHoldDown:
+      quick_launch_set_app(BUTTON_ID_DOWN, app_id);
+      return;
+    case QuickLaunchBindingHoldBack:
+      quick_launch_set_app(BUTTON_ID_BACK, app_id);
+      return;
+    case QuickLaunchBindingComboBackUp:
+      quick_launch_combo_back_up_set_app(app_id);
+      return;
+    case QuickLaunchBindingComboUpDown:
+      quick_launch_combo_up_down_set_app(app_id);
+      return;
+    case QuickLaunchBindingCount:
+      break;
+  }
+}
+
+void quick_launch_binding_disable(QuickLaunchBinding binding) {
+  quick_launch_binding_set_app(binding, INSTALL_ID_INVALID);
+  switch (binding) {
+    case QuickLaunchBindingTapUp:
+      quick_launch_single_click_set_enabled(BUTTON_ID_UP, false);
+      return;
+    case QuickLaunchBindingTapDown:
+      quick_launch_single_click_set_enabled(BUTTON_ID_DOWN, false);
+      return;
+    case QuickLaunchBindingHoldUp:
+      quick_launch_set_enabled(BUTTON_ID_UP, false);
+      return;
+    case QuickLaunchBindingHoldSelect:
+      quick_launch_set_enabled(BUTTON_ID_SELECT, false);
+      return;
+    case QuickLaunchBindingHoldDown:
+      quick_launch_set_enabled(BUTTON_ID_DOWN, false);
+      return;
+    case QuickLaunchBindingHoldBack:
+      quick_launch_set_enabled(BUTTON_ID_BACK, false);
+      return;
+    case QuickLaunchBindingComboBackUp:
+      quick_launch_combo_back_up_set_enabled(false);
+      return;
+    case QuickLaunchBindingComboUpDown:
+      quick_launch_combo_up_down_set_enabled(false);
+      return;
+    case QuickLaunchBindingCount:
+      break;
+  }
+}
 
 static void prv_get_subtitle_string(AppInstallId app_id, QuickLaunchData *data,
                                     char *buffer, uint8_t buf_len) {
@@ -81,21 +166,10 @@ static void prv_deinit_cb(SettingsCallbacks *context) {
 }
 
 static void prv_update_app_names(QuickLaunchData *data) {
-  // Tap buttons
-  prv_get_subtitle_string(quick_launch_single_click_get_app(BUTTON_ID_UP), data,
-                          data->app_names[ROW_TAP_UP], APP_NAME_SIZE_BYTES);
-  prv_get_subtitle_string(quick_launch_single_click_get_app(BUTTON_ID_DOWN), data,
-                          data->app_names[ROW_TAP_DOWN], APP_NAME_SIZE_BYTES);
-  
-  // Hold buttons
-  prv_get_subtitle_string(quick_launch_get_app(BUTTON_ID_UP), data,
-                          data->app_names[ROW_HOLD_UP], APP_NAME_SIZE_BYTES);
-  prv_get_subtitle_string(quick_launch_get_app(BUTTON_ID_SELECT), data,
-                          data->app_names[ROW_HOLD_SELECT], APP_NAME_SIZE_BYTES);
-  prv_get_subtitle_string(quick_launch_get_app(BUTTON_ID_DOWN), data,
-                          data->app_names[ROW_HOLD_DOWN], APP_NAME_SIZE_BYTES);
-  prv_get_subtitle_string(quick_launch_get_app(BUTTON_ID_BACK), data,
-                          data->app_names[ROW_HOLD_BACK], APP_NAME_SIZE_BYTES);
+  for (QuickLaunchBinding binding = 0; binding < QuickLaunchBindingCount; binding++) {
+    prv_get_subtitle_string(quick_launch_binding_get_app(binding), data,
+                            data->app_names[binding], APP_NAME_SIZE_BYTES);
+  }
 }
 
 static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx,
@@ -108,57 +182,29 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx,
 }
 
 static uint16_t prv_get_initial_selection_cb(SettingsCallbacks *context) {
-  // If launched by quick launch, select the row of the button pressed, otherwise default to 0
-  if (app_launch_reason() == APP_LAUNCH_QUICK_LAUNCH) {
-    ButtonId button = app_launch_button();
-    // Map button to hold row (quick launch is always hold/long press)
-    switch (button) {
-      case BUTTON_ID_UP:     return ROW_HOLD_UP;
-      case BUTTON_ID_SELECT: return ROW_HOLD_SELECT;
-      case BUTTON_ID_DOWN:   return ROW_HOLD_DOWN;
-      case BUTTON_ID_BACK:   return ROW_HOLD_BACK;
-      default: break;
-    }
+  // If launched by quick launch, select the row of the binding used, otherwise default to 0
+  if (app_launch_reason() != APP_LAUNCH_QUICK_LAUNCH) {
+    return 0;
+  }
+  const ButtonId button = app_launch_button();
+  if (app_launch_get_quick_launch_action() == APP_QUICK_LAUNCH_ACTION_COMBO) {
+    // A combo reports the button it leads with: back for back+up, up for up+down
+    return (button == BUTTON_ID_BACK) ? QuickLaunchBindingComboBackUp
+                                      : QuickLaunchBindingComboUpDown;
+  }
+  switch (button) {
+    case BUTTON_ID_UP:     return QuickLaunchBindingHoldUp;
+    case BUTTON_ID_SELECT: return QuickLaunchBindingHoldSelect;
+    case BUTTON_ID_DOWN:   return QuickLaunchBindingHoldDown;
+    case BUTTON_ID_BACK:   return QuickLaunchBindingHoldBack;
+    default: break;
   }
   return 0;
 }
 
 static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
   PBL_ASSERTN(row < NUM_ROWS);
-  
-  ButtonId button;
-  bool is_tap;
-  
-  switch (row) {
-    case ROW_TAP_UP:
-      button = BUTTON_ID_UP;
-      is_tap = true;
-      break;
-    case ROW_TAP_DOWN:
-      button = BUTTON_ID_DOWN;
-      is_tap = true;
-      break;
-    case ROW_HOLD_UP:
-      button = BUTTON_ID_UP;
-      is_tap = false;
-      break;
-    case ROW_HOLD_SELECT:
-      button = BUTTON_ID_SELECT;
-      is_tap = false;
-      break;
-    case ROW_HOLD_DOWN:
-      button = BUTTON_ID_DOWN;
-      is_tap = false;
-      break;
-    case ROW_HOLD_BACK:
-      button = BUTTON_ID_BACK;
-      is_tap = false;
-      break;
-    default:
-      return;
-  }
-  
-  quick_launch_app_menu_window_push(button, is_tap);
+  quick_launch_app_menu_window_push((QuickLaunchBinding)row);
 }
 
 static uint16_t prv_num_rows_cb(SettingsCallbacks *context) {

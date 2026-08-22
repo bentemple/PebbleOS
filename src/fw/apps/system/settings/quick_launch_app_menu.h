@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "shell/normal/quick_launch.h"
-#include <stdbool.h>
+#include "apps/system/settings/quick_launch.h"
 
-void quick_launch_app_menu_window_push(ButtonId button, bool is_tap);
+void quick_launch_app_menu_window_push(QuickLaunchBinding binding);
