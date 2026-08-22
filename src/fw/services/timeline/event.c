@@ -168,7 +168,12 @@ static void prv_update_status(void) {
 }
 
 static void prv_init(void *PBL_UNUSED data) {
-  s_mutex = mutex_create();
+  // init() is asynchronous, so two of these can be queued back to back with no
+  // deinit in between. Recreating the mutex would leak the first one and leave
+  // anything already blocked on it waiting forever.
+  if (!s_mutex) {
+    s_mutex = mutex_create();
+  }
   mutex_lock(s_mutex);
 
   for (unsigned int i = 0; i < TimelineEventServiceCount; i++) {
@@ -187,6 +192,12 @@ void timeline_event_init(void) {
 }
 
 void timeline_event_deinit(void) {
+  // init() only queues its work, so a deinit can land before that work has
+  // run. There is nothing set up to tear down, and mutex_lock(NULL) blocks the
+  // calling task forever.
+  if (!s_mutex) {
+    return;
+  }
   mutex_lock(s_mutex);
 
   new_timer_delete(s_timer);
