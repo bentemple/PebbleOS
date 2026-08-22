@@ -315,7 +315,7 @@ watch locking when the phone is seized.
 
 | Cmd | Msg | Direction | Payload |
 |---|---|---|---|
-| `0x01` | `CONFIGURE` | phone → watch | `uint8 enabled`, `uint16 disconnect_timeout_s`, `uint8 lock_on_disconnect` |
+| `0x01` | `CONFIGURE` | phone → watch | `uint8 enabled`, `uint16 lock_delay_s`, `uint16 shred_delay_s` |
 | `0x02` | `LOCK` | phone → watch | `uint8 reason` |
 | `0x03` | `STATUS_REQUEST` | phone → watch | — |
 | `0x82` | `LOCK_ACK` | watch → phone | `uint8 reason` |
@@ -326,6 +326,21 @@ watch locking when the phone is seized.
 Reason codes: `0x00` unknown, `0x01` phone lockdown, `0x02` manual panic,
 `0x03` disconnect timeout, `0x04` reboot while locked, `0x05` PIN attempts
 exhausted, `0x06` clock rollback.
+
+Both delays in `CONFIGURE` are counted **from the disconnect**, not from each
+other, so the defaults lock at five minutes and erase at thirty — twenty-five
+minutes after locking, not thirty. A zero in either field means "leave that
+delay alone" rather than "set it to zero", so a phone that does not care about
+the timings can send zeroes and change nothing.
+
+That encoding has a consequence worth stating: `SECURITY_LOCK_SHRED_DELAY_NEVER`
+is also zero, so **"never erase" cannot currently be expressed over the wire** —
+it is reachable only from the watch's own Settings menu. Fixing that means
+either swapping the sentinels (`0xffff` for "leave alone", freeing zero for its
+natural meaning) or appending a flags byte, which would also require relaxing
+the handler's length check so existing six-byte messages keep working.
+`STATUS_RESPONSE.deadline_remaining_s` has the same ambiguity: zero means both
+"never" and "no countdown running".
 
 State values match `SecurityLockState`: `0` disabled, `1` armed, `2` locked.
 
