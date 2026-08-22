@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 #include "kernel/ui/modals/modal_manager.h"
+#include "popups/security/pin_entry_window.h"
 
 //! The PIN screen shown while the watch is in SecurityLockStateLocked.
 //!
@@ -27,3 +28,11 @@ void security_lock_screen_push(void);
 void security_lock_screen_pop(void);
 
 bool security_lock_screen_is_visible(void);
+
+//! The pad behind the lock screen, for console introspection, or NULL when the
+//! screen is not up -- the window is only meaningful once it has been
+//! initialised by a push.
+//!
+//! const because the caller has no business driving it: entering a PIN from
+//! the console would defeat the attempt counter.
+const SecurityPinEntryWindow *security_lock_screen_get_pin_window(void);

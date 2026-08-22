@@ -311,6 +311,26 @@ Window *security_pin_entry_window_get_window(SecurityPinEntryWindow *pin_window)
   return &pin_window->window;
 }
 
+uint8_t security_pin_entry_window_get_entered(const SecurityPinEntryWindow *pin_window) {
+  return pin_window->entered;
+}
+
+uint8_t security_pin_entry_window_get_pin_len(const SecurityPinEntryWindow *pin_window) {
+  return pin_window->pin_len;
+}
+
+const char *security_pin_entry_window_get_message(const SecurityPinEntryWindow *pin_window) {
+  return pin_window->message;
+}
+
+const char *security_pin_entry_window_get_title(const SecurityPinEntryWindow *pin_window) {
+  return (pin_window->title != NULL) ? pin_window->title : "";
+}
+
+int8_t security_pin_entry_window_get_pressed_key(const SecurityPinEntryWindow *pin_window) {
+  return pin_window->pressed_key;
+}
+
 char security_pin_entry_window_digit_at(const SecurityPinEntryWindow *pin_window, GPoint point) {
   const int8_t key = prv_key_at(&pin_window->window.layer.bounds, point);
   return (key < 0) ? '\0' : (char)('1' + key);

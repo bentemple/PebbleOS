@@ -129,3 +129,7 @@ void security_lock_screen_pop(void) {
 bool security_lock_screen_is_visible(void) {
   return s_visible;
 }
+
+const SecurityPinEntryWindow *security_lock_screen_get_pin_window(void) {
+  return s_visible ? &s_pin_window : NULL;
+}

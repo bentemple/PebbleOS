@@ -85,6 +85,22 @@ void security_pin_entry_window_reset(SecurityPinEntryWindow *pin_window);
 
 Window *security_pin_entry_window_get_window(SecurityPinEntryWindow *pin_window);
 
+//! Read back what the pad is showing, for the console's `security ui` command.
+//!
+//! The pad draws its text inline rather than through a TextLayer, so there is
+//! no child layer for a generic walker to find and an automated test has no way
+//! to see the screen without these.
+//!
+//! `digits` is deliberately absent and must stay that way: it is the PIN as it
+//! is being typed, and the console is reachable from a seized watch.
+uint8_t security_pin_entry_window_get_entered(const SecurityPinEntryWindow *pin_window);
+uint8_t security_pin_entry_window_get_pin_len(const SecurityPinEntryWindow *pin_window);
+//! Never NULL; empty when nothing is set.
+const char *security_pin_entry_window_get_message(const SecurityPinEntryWindow *pin_window);
+const char *security_pin_entry_window_get_title(const SecurityPinEntryWindow *pin_window);
+//! The key under the finger, or -1 for none.
+int8_t security_pin_entry_window_get_pressed_key(const SecurityPinEntryWindow *pin_window);
+
 //! Which key a point lands on, in the window's own coordinates.
 //!
 //! The one place the pad geometry is interpreted, so drawing and hit testing

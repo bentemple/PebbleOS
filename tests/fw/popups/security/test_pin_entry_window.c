@@ -475,3 +475,55 @@ void test_pin_entry_window__message_is_copied_and_truncated(void) {
   security_pin_entry_window_set_message(&s_pin_window, NULL);
   cl_assert_equal_s("", s_pin_window.message);
 }
+
+// Introspection
+////////////////////////////////////
+//
+// These back the `security ui` console command, which an end-to-end test reads
+// instead of the framebuffer. Asserted against the same behaviour the tests
+// above drive, so a getter that stops tracking the window is caught here.
+
+void test_pin_entry_window__getters_track_entry_progress(void) {
+  cl_assert_equal_i(4, security_pin_entry_window_get_pin_len(&s_pin_window));
+  cl_assert_equal_i(0, security_pin_entry_window_get_entered(&s_pin_window));
+
+  prv_tap_pin("12");
+  cl_assert_equal_i(2, security_pin_entry_window_get_entered(&s_pin_window));
+
+  security_pin_entry_window_reset(&s_pin_window);
+  cl_assert_equal_i(0, security_pin_entry_window_get_entered(&s_pin_window));
+
+  security_pin_entry_window_set_pin_len(&s_pin_window, 6);
+  cl_assert_equal_i(6, security_pin_entry_window_get_pin_len(&s_pin_window));
+}
+
+// Never NULL, so the console can print them without a null check of its own.
+void test_pin_entry_window__getters_report_title_and_message(void) {
+  cl_assert_equal_s("", security_pin_entry_window_get_title(&s_pin_window));
+  cl_assert_equal_s("", security_pin_entry_window_get_message(&s_pin_window));
+
+  security_pin_entry_window_set_title(&s_pin_window, "Locked");
+  security_pin_entry_window_set_message(&s_pin_window, "Wrong PIN, 2 tries left");
+  cl_assert_equal_s("Locked", security_pin_entry_window_get_title(&s_pin_window));
+  cl_assert_equal_s("Wrong PIN, 2 tries left",
+                    security_pin_entry_window_get_message(&s_pin_window));
+}
+
+void test_pin_entry_window__getters_report_the_pressed_key(void) {
+  cl_assert_equal_i(-1, security_pin_entry_window_get_pressed_key(&s_pin_window));
+
+  prv_touch(TouchEvent_Touchdown, prv_point_for('5'));
+  cl_assert_equal_i(4, security_pin_entry_window_get_pressed_key(&s_pin_window));
+
+  prv_touch(TouchEvent_Liftoff, prv_point_for('5'));
+  cl_assert_equal_i(-1, security_pin_entry_window_get_pressed_key(&s_pin_window));
+}
+
+// The console is reachable from a seized watch, so nothing reachable through
+// these may carry the digits themselves.
+void test_pin_entry_window__getters_never_expose_the_digits(void) {
+  prv_tap_pin("123");
+  cl_assert_equal_i(3, security_pin_entry_window_get_entered(&s_pin_window));
+  cl_assert_equal_s("", security_pin_entry_window_get_message(&s_pin_window));
+  cl_assert_equal_s("", security_pin_entry_window_get_title(&s_pin_window));
+}
