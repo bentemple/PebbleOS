@@ -130,26 +130,27 @@ open_questions:
 worked:
   - Instrumenting before patching. Every fix that missed was a guess; the ones
     that landed came from a recovered FreeRTOS backtrace and from stage markers.
-  - `log dump current` - replays the whole boot from on-flash log, including
-    everything before PULSE attaches. Without it the early-boot window is
-    invisible and a hang looks identical to a healthy quiet boot.
+  - "`log dump current` - replays the whole boot from the on-flash log,
+    including everything before PULSE attaches. Without it the early-boot
+    window is invisible and a hang looks identical to a healthy quiet boot."
   - Driving state from the console instead of the touch UI.
 
 failed:
   - Running two QEMU instances. They collide on the fixed monitor/QMP/console
     sockets and produce "reproducible" failures that are pure artefact. This was
     listed as a known trap in the previous handoff and still caught me.
-  - `pkill -f qemu-pebble` matches the calling shell's own command line and
-    kills it. Kill by PID.
+  - "`pkill -f qemu-pebble` matches the calling shell's own command line and
+    kills it. Kill by PID."
   - Editing files an agent still had open, which produced a half-applied change.
 
 next:
-  - Airplane mode on lock (in flight): engage on lock, restore prior state on
-    unlock, must NOT fire for duress (unlocked, so restore never runs, and it is
-    visible)
-  - Gate the SECTEST console commands behind CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS
-    and move them out of prompt_commands.c
-  - Guard blob_db_insert() for the six shredded stores still accepted while
-    locked - pins, reminders, contacts, weather, iOS prefs, app glances
-  - Live PIN-unlock pass. Never verified. Now testable since auto-unlock is gone
-  - Hardware validation - nothing here has run on a real watch
+  - "Guard blob_db_insert() for the six shredded stores still accepted while
+    locked - pins, reminders, contacts, weather, iOS prefs and app glances.
+    Still needed despite the radio blackout, because a watch with Erase After
+    set to Never locks without shredding and stays on the air."
+  - "Decide the Never-erase gap above - blackout on lock rather than on shred,
+    or rely on the blob_db guard, or both."
+  - "Hardware validation. Nothing here has run on a real watch, and the bug
+    that started all of this was one an emulator-only constant created."
+  - "Gadgetbridge side: the watch->phone lockdown request, which the user has
+    said is a separate work stream and probably needs an accessibility service."
