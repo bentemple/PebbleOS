@@ -13,6 +13,12 @@
 #include "pbl/services/analytics/analytics.h"
 #include "pbl/services/vibes/vibe_intensity.h"
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+#include "pbl/services/security_lock.h"
+#endif
+
+PBL_LOG_MODULE_DECLARE(service_notifications, CONFIG_SERVICE_NOTIFICATIONS_LOG_LEVEL);
+
 static void prv_notification_migration_iterator_callback(TimelineItem *notification,
     SerializedTimelineItemHeader *header, void *data) {
   header->common.timestamp -= *((int*)data);
@@ -80,6 +86,17 @@ void notifications_init(void) {
 }
 
 void notifications_add_notification(TimelineItem *notification) {
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  // A locked watch has shredded its content; storing this would put cleartext
+  // back on flash. The in-progress check is not redundant with the lock state:
+  // the duress and clock-rollback wipes both run unlocked. Never log the item
+  // itself.
+  if (security_lock_is_locked() || security_lock_is_shredding()) {
+    PBL_LOG_INFO("Locked or shredding, notification dropped");
+    return;
+  }
+#endif
+
   notification_storage_store(notification);
 
   Uuid *uuid = kernel_malloc_check(sizeof(Uuid));

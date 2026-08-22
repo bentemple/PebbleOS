@@ -16,6 +16,7 @@
 #include "fake_spi_flash.h"
 #include "fake_system_task.h"
 #include "fake_kernel_services_notifications.h"
+#include "fake_security_lock.h"
 
 // Stubs
 ////////////////////////////////////////////////////////////////
@@ -35,6 +36,8 @@ void test_notif_db__initialize(void) {
   fake_spi_flash_init(0, 0x1000000);
   pfs_init(false);
   notification_storage_reset();
+  fake_security_lock_reset();
+  fake_kernel_services_notifications_reset();
 }
 
 void test_notif_db__cleanup(void) {
@@ -106,5 +109,88 @@ void test_notif_db__flush(void) {
   cl_assert_equal_i(notif_db_get_len((uint8_t *)&hdr1, UUID_SIZE), 0);
   cl_assert_equal_i(notif_db_get_len((uint8_t *)&hdr2, UUID_SIZE), 0);
   cl_assert_equal_i(notif_db_get_len((uint8_t *)&hdr3, UUID_SIZE), 0);
+}
+
+static SerializedTimelineItemHeader prv_make_header(void) {
+  SerializedTimelineItemHeader hdr = {
+    .common = {
+      .ancs_uid = 1,
+      .layout = 0,
+      .flags = 0,
+      .timestamp = 0,
+    },
+  };
+  uuid_generate(&hdr.common.id);
+  return hdr;
+}
+
+void test_notif_db__unlocked_stores(void) {
+  SerializedTimelineItemHeader hdr = prv_make_header();
+
+  fake_security_lock_set_locked(false);
+  cl_assert_equal_i(notif_db_insert((uint8_t *)&hdr, UUID_SIZE, (uint8_t *)&hdr, sizeof(hdr)), 0);
+  cl_assert_equal_i(notif_db_get_len((uint8_t *)&hdr, UUID_SIZE), sizeof(hdr));
+  cl_assert_equal_i(fake_kernel_services_notifications_ancs_notifications_count(), 1);
+}
+
+void test_notif_db__locked_drops(void) {
+  SerializedTimelineItemHeader hdr = prv_make_header();
+
+  fake_security_lock_set_locked(true);
+  // Silent success: the phone gets a normal ack and learns nothing.
+  cl_assert_equal_i(notif_db_insert((uint8_t *)&hdr, UUID_SIZE, (uint8_t *)&hdr, sizeof(hdr)), 0);
+  cl_assert_equal_i(notif_db_get_len((uint8_t *)&hdr, UUID_SIZE), 0);
+  cl_assert_equal_i(fake_kernel_services_notifications_ancs_notifications_count(), 0);
+}
+
+void test_notif_db__shredding_drops_while_unlocked(void) {
+  SerializedTimelineItemHeader hdr = prv_make_header();
+
+  // The duress and clock-rollback wipes never lock, so the lock state on its
+  // own would let this land in the file being zeroed.
+  fake_security_lock_set_locked(false);
+  fake_security_lock_set_shredding(true);
+  cl_assert_equal_i(notif_db_insert((uint8_t *)&hdr, UUID_SIZE, (uint8_t *)&hdr, sizeof(hdr)), 0);
+  cl_assert_equal_i(notif_db_get_len((uint8_t *)&hdr, UUID_SIZE), 0);
+  cl_assert_equal_i(fake_kernel_services_notifications_ancs_notifications_count(), 0);
+}
+
+void test_notif_db__stores_again_once_the_shred_finishes(void) {
+  SerializedTimelineItemHeader dropped_hdr = prv_make_header();
+  SerializedTimelineItemHeader stored_hdr = prv_make_header();
+
+  fake_security_lock_set_shredding(true);
+  cl_assert_equal_i(
+      notif_db_insert((uint8_t *)&dropped_hdr, UUID_SIZE, (uint8_t *)&dropped_hdr,
+                      sizeof(dropped_hdr)), 0);
+
+  // The gate lasts for the wipe, not for the sector sweep that outlives it.
+  fake_security_lock_set_shredding(false);
+  cl_assert_equal_i(
+      notif_db_insert((uint8_t *)&stored_hdr, UUID_SIZE, (uint8_t *)&stored_hdr,
+                      sizeof(stored_hdr)), 0);
+
+  cl_assert_equal_i(notif_db_get_len((uint8_t *)&dropped_hdr, UUID_SIZE), 0);
+  cl_assert_equal_i(notif_db_get_len((uint8_t *)&stored_hdr, UUID_SIZE), sizeof(stored_hdr));
+}
+
+void test_notif_db__locked_drops_then_unlocked_stores(void) {
+  SerializedTimelineItemHeader locked_hdr = prv_make_header();
+  SerializedTimelineItemHeader unlocked_hdr = prv_make_header();
+
+  fake_security_lock_set_locked(true);
+  cl_assert_equal_i(
+      notif_db_insert((uint8_t *)&locked_hdr, UUID_SIZE, (uint8_t *)&locked_hdr,
+                      sizeof(locked_hdr)), 0);
+
+  fake_security_lock_set_locked(false);
+  cl_assert_equal_i(
+      notif_db_insert((uint8_t *)&unlocked_hdr, UUID_SIZE, (uint8_t *)&unlocked_hdr,
+                      sizeof(unlocked_hdr)), 0);
+
+  // The one dropped while locked stays dropped; unlocking does not replay it.
+  cl_assert_equal_i(notif_db_get_len((uint8_t *)&locked_hdr, UUID_SIZE), 0);
+  cl_assert_equal_i(notif_db_get_len((uint8_t *)&unlocked_hdr, UUID_SIZE), sizeof(unlocked_hdr));
+  cl_assert_equal_i(fake_kernel_services_notifications_ancs_notifications_count(), 1);
 }
 

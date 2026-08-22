@@ -169,6 +169,7 @@ pbl_clar_test(test_notif_db
     src/fw/services/timeline/attributes_actions.c
     src/fw/services/timeline/attribute_group.c
     src/fw/services/blob_db/notif_db.c
+  DEFINES CONFIG_SERVICE_SECURITY_LOCK=1
   OVERRIDES dummy_board
 )
 
