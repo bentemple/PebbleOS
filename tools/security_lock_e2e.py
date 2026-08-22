@@ -24,6 +24,7 @@ touching if screen ordering or layout changes.
 """
 
 import argparse
+import hashlib
 import os
 import re
 import socket
@@ -47,6 +48,16 @@ SECURITY_ROWS_WITH_PIN = ["Change PIN", "PIN Length", "Duress PIN", "Clear PIN",
 
 #: Downs needed from the top of the Settings menu to reach Security.
 SETTINGS_TO_SECURITY = 10
+
+#: Nothing the wipe does may take longer than this. The blocking work is seven
+#: small file zeroes plus about ten sector erases for the coredump and debug
+#: regions -- roughly two seconds. Anything approaching this ceiling is a
+#: deadlock, not slow flash, and every hang so far has been one.
+SHRED_BUDGET_S = 15.0
+
+#: A watch that has not drawn anything new in this long, and is not answering,
+#: is hung rather than busy.
+FREEZE_AFTER_S = 20.0
 
 
 class PadGeometry:
@@ -327,16 +338,71 @@ def ensure_no_pin(console, pad, current="1234"):
 RESULTS = []
 
 
-def wait_until_responsive(console, timeout=90.0):
-    """Block until the watch answers again, e.g. after a wipe."""
-    deadline = time.time() + timeout
+def wait_until_responsive(console, timeout=SHRED_BUDGET_S):
+    """Block until the watch answers again, e.g. after a wipe.
+
+    Bounded by SHRED_BUDGET_S rather than something generous: a wipe that has
+    not finished by then is wedged, and waiting longer only turns a clear
+    failure into a slow one.
+    """
+    started = time.time()
+    deadline = started + timeout
     while time.time() < deadline:
         try:
             console.status()
             time.sleep(1.0)   # let the UI catch up with the task
             return True
         except Exception:
-            time.sleep(2.0)
+            time.sleep(1.0)
+    check("watch recovers within the wipe budget", False,
+          f"still not answering after {timeout:.0f}s -- treat as a hang")
+    return False
+
+
+def _screen_fingerprint():
+    """Hash of the current display, or None if the screenshot failed."""
+    path = "/tmp/seclock-e2e-freeze-probe.png"
+    if os.path.exists(path):
+        os.unlink(path)
+    subprocess.run([sys.executable, "./pbl", "screenshot", "--screenshot-output", path],
+                   cwd=REPO, capture_output=True)
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+
+def diagnose_hang():
+    """Say plainly what a hung watch looks like, rather than dying on a
+    PULSE error twenty lines later."""
+    first = _screen_fingerprint()
+    time.sleep(6.0)
+    second = _screen_fingerprint()
+    if first is None or second is None:
+        return "the emulator is not answering screenshot requests at all"
+    if first == second:
+        return (f"the display has not changed in 6s (fingerprint {first[:8]}) and the "
+                "console is silent -- the watch is hung, most likely mid-wipe. "
+                "Relaunching ./pbl qemu rebuilds the flash image and clears it.")
+    return "the display is still updating, so the UI task is alive but the console is not"
+
+
+def assert_booted(console):
+    """Fail fast and clearly if the watch never finished booting.
+
+    A frozen boot used to surface as an obscure PULSE 'NoneType has no
+    open_socket' several tests later; a wipe that hangs during boot blocks the
+    task that brings the UI up, so this is the failure to expect.
+    """
+    deadline = time.time() + FREEZE_AFTER_S
+    while time.time() < deadline:
+        try:
+            console.status()
+            return True
+        except Exception:
+            time.sleep(1.5)
+    print(f"\n!! watch did not finish booting within {FREEZE_AFTER_S:.0f}s")
+    print(f"!! {diagnose_hang()}")
     return False
 
 
@@ -404,10 +470,18 @@ def test_lock_and_unlock(console, pad):
           " | ".join(console.since(marker))[:160])
     check("the shred runs", console.saw(marker, "Shredding:"))
 
-    # The wipe runs on KernelMain and freezes the UI while it does, exactly as
-    # a factory reset does. Input sent during that window is simply lost, so
-    # wait for the watch to start answering again before touching it.
-    wait_until_responsive(console)
+    # The wipe runs on the launcher task and freezes the UI while it does,
+    # exactly as a factory reset does. Input sent during that window is lost,
+    # so wait for the watch to answer again -- and hold it to a budget, because
+    # every hang in this feature so far has looked like "just slow".
+    started = time.time()
+    recovered = wait_until_responsive(console)
+    elapsed = time.time() - started
+    check(f"the wipe finishes inside {SHRED_BUDGET_S:.0f}s", recovered,
+          f"took {elapsed:.1f}s")
+    if not recovered:
+        print(f"    !! {diagnose_hang()}")
+        return
     screenshot("06-locked-clock")
 
     st = console.status()
@@ -542,6 +616,10 @@ def main():
 
     pad = PadGeometry(args.width, args.height, args.round)
     console = Console()
+
+    if not assert_booted(console):
+        print("\nAborting: the watch is not up, so every result below would be noise.")
+        return 2
 
     for name, fn in TESTS:
         if args.only and name not in args.only:
