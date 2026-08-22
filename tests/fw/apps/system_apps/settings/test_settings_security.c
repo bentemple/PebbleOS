@@ -13,6 +13,7 @@
 #include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/util/size.h"
+#include "shell/prefs.h"
 
 // Stubs
 ////////////////////////////////////
@@ -138,6 +139,21 @@ status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s)
   s_lock_delay_s = lock_delay_s;
   s_shred_delay_s = shred_delay_s;
   return S_SUCCESS;
+}
+
+// Fake launcher visibility pref
+////////////////////////////////////
+// Deliberately a shell pref rather than part of the lock record: what the
+// launcher lists is a display preference, and hiding the app protects nothing.
+
+static bool s_lockdown_in_launcher;
+
+bool shell_prefs_get_lockdown_app_in_launcher(void) {
+  return s_lockdown_in_launcher;
+}
+
+void shell_prefs_set_lockdown_app_in_launcher(bool enable) {
+  s_lockdown_in_launcher = enable;
 }
 
 // Fake UI surface
@@ -290,7 +306,8 @@ void i18n_free_all(const void *owner) {}
 //! Row order when no PIN is configured.
 #define ROW_SET_PIN 0
 #define ROW_PIN_LENGTH_UNSET 1
-#define ROWS_WITHOUT_PIN 2
+#define ROW_SHOW_IN_LAUNCHER_UNSET 2
+#define ROWS_WITHOUT_PIN 3
 //! Row order once one is.
 #define ROW_CHANGE_PIN 0
 #define ROW_PIN_LENGTH_SET 1
@@ -299,7 +316,8 @@ void i18n_free_all(const void *owner) {}
 #define ROW_DURESS_PIN 4
 #define ROW_CLEAR_PIN 5
 #define ROW_LOCK_NOW 6
-#define ROWS_WITH_PIN 7
+#define ROW_SHOW_IN_LAUNCHER_SET 7
+#define ROWS_WITH_PIN 8
 
 static void prv_open_settings(void) {
   settings_security_get_info()->init();
@@ -355,6 +373,9 @@ void test_settings_security__initialize(void) {
   s_dialog_confirm = NULL;
   s_dialog_pops = 0;
   s_deferred_callback = NULL;
+  // The shipped default: the panic action is in the launcher unless asked
+  // otherwise.
+  s_lockdown_in_launcher = true;
 }
 
 void test_settings_security__cleanup(void) {
@@ -748,8 +769,10 @@ void test_settings_security__length_menu_opens_on_the_current_choice(void) {
 
 void test_settings_security__lock_now_is_hidden_without_a_pin(void) {
   prv_open_settings();
-  // Only Set PIN and PIN Length; nothing here can erase anything.
+  // Only Set PIN, PIN Length and Show in Launcher; nothing here erases anything.
   cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
+  prv_draw(ROWS_WITHOUT_PIN - 1);
+  cl_assert(strcmp("Lock Now", s_drawn_title) != 0);
 }
 
 void test_settings_security__lock_now_confirms_before_engaging(void) {
@@ -777,6 +800,64 @@ void test_settings_security__lock_now_defers_engage_to_the_kernel(void) {
 
   s_deferred_callback(NULL);
   cl_assert_equal_i(1, s_engage_calls);
+}
+
+// Show in Launcher
+////////////////////////////////////
+
+// Unlike Lock Now, this row is not gated on a PIN existing. It controls what
+// the launcher lists, and the Lockdown app is listed whether or not a PIN is
+// set -- a control that disappeared while the thing it controls stayed would
+// be worse than no control.
+void test_settings_security__show_in_launcher_is_offered_without_a_pin(void) {
+  prv_open_settings();
+  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
+  prv_draw(ROW_SHOW_IN_LAUNCHER_UNSET);
+  cl_assert_equal_s("Show in Launcher", s_drawn_title);
+}
+
+void test_settings_security__show_in_launcher_is_the_last_row_with_a_pin(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
+  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
+  cl_assert_equal_s("Show in Launcher", s_drawn_title);
+}
+
+void test_settings_security__show_in_launcher_toggles(void) {
+  prv_open_settings();
+
+  prv_select(ROW_SHOW_IN_LAUNCHER_UNSET);
+  cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
+
+  prv_select(ROW_SHOW_IN_LAUNCHER_UNSET);
+  cl_assert(shell_prefs_get_lockdown_app_in_launcher());
+}
+
+// Turning it off is decluttering, not hiding: the app is still there and still
+// bindable to a button. The row has to say so, and must not claim anything
+// about security -- someone holding the watch has no reason to trigger a wipe
+// of the data they came for.
+void test_settings_security__show_in_launcher_says_quick_launch_still_works(void) {
+  prv_open_settings();
+
+  prv_draw(ROW_SHOW_IN_LAUNCHER_UNSET);
+  cl_assert_equal_s("On", s_drawn_subtitle);
+
+  prv_select(ROW_SHOW_IN_LAUNCHER_UNSET);
+  prv_draw(ROW_SHOW_IN_LAUNCHER_UNSET);
+  cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
+  cl_assert(strstr(s_drawn_subtitle, "Quick Launch") != NULL);
+}
+
+// The row reads the pref rather than a copy taken when the menu opened, so a
+// change made elsewhere is not shown as its old value.
+void test_settings_security__show_in_launcher_reflects_the_stored_value(void) {
+  shell_prefs_set_lockdown_app_in_launcher(false);
+  prv_open_settings();
+
+  prv_draw(ROW_SHOW_IN_LAUNCHER_UNSET);
+  cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
 }
 
 // Lock After / Erase After

@@ -673,6 +673,15 @@
       "id": -100,
       "enum": "NOTIFICATIONS_CLEAR_HISTORY",
       "md_fn": "notifications_clear_history_app_get_info"
+    },
+    {
+      "id": -101,
+      "enum": "LOCKDOWN",
+      "md_fn": "lockdown_app_get_app_info",
+      "color_argb8": "GColorRedARGB8",
+      "ifdefs": [
+        "CONFIG_SERVICE_SECURITY_LOCK"
+      ]
     }
   ],
   "resource_apps": [

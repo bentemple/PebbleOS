@@ -22,6 +22,7 @@
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/security_lock_ui.h"
 #include <pbl/logging/logging.h>
+#include "shell/prefs.h"
 #include "system/passert.h"
 #include "pbl/util/size.h"
 
@@ -626,6 +627,7 @@ enum SettingsSecurityItem {
   SettingsSecurityDuressPin,
   SettingsSecurityClearPin,
   SettingsSecurityLockNow,
+  SettingsSecurityLockdownInLauncher,
   NumSettingsSecurityItems
 };
 
@@ -655,6 +657,10 @@ static bool prv_item_is_visible(SettingsSecurityData *data, uint16_t item) {
       // Without a PIN there is nothing to unlock with, so this would erase
       // without locking. Offering it under this name would be a lie.
       return prv_pin_is_set(data);
+    case SettingsSecurityLockdownInLauncher:
+      // Deliberately not gated on the PIN, unlike the row above. This one says
+      // what the launcher lists, and the Lockdown app is listed either way.
+      return true;
     default:
       return true;
   }
@@ -727,6 +733,19 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       /// and not only in the confirmation.
       subtitle = i18n_get(i18n_noop("Lock and erase"), data);
       break;
+    case SettingsSecurityLockdownInLauncher:
+      /// Whether the Lockdown app is listed in the launcher. Off is decluttering
+      /// only -- the app stays installed and stays bindable to a button.
+      title = i18n_noop("Show in Launcher");
+      if (shell_prefs_get_lockdown_app_in_launcher()) {
+        subtitle = i18n_get(i18n_noop("On"), data);
+      } else {
+        /// Subtitle once Lockdown is off the launcher list. Says where it has
+        /// gone rather than suggesting it is hidden from anyone: whoever takes
+        /// the watch has no reason to erase the data they came for.
+        subtitle = i18n_get(i18n_noop("Off, Quick Launch only"), data);
+      }
+      break;
     default:
       WTF;
   }
@@ -765,6 +784,10 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
       break;
     case SettingsSecurityLockNow:
       prv_lock_now_push(data);
+      break;
+    case SettingsSecurityLockdownInLauncher:
+      shell_prefs_set_lockdown_app_in_launcher(!shell_prefs_get_lockdown_app_in_launcher());
+      prv_refresh(data);
       break;
     default:
       WTF;

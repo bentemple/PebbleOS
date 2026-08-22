@@ -324,6 +324,13 @@ static bool s_music_show_volume_controls = true;
 static bool s_music_show_progress_bar = true;
 static bool s_music_show_album_art = false;
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+#define PREF_KEY_LOCKDOWN_APP_IN_LAUNCHER "lockdownAppInLauncher"
+
+//! A panic action nobody can find is not a panic action.
+static bool s_lockdown_app_in_launcher = true;
+#endif
+
 // ============================================================================================
 // Handlers for each pref that validate the new setting and store the new value in our globals.
 // This handler will be called when the setting is changed from inside the firmware using one of
@@ -887,6 +894,13 @@ static bool prv_set_s_music_show_album_art(bool *enabled) {
   s_music_show_album_art = *enabled;
   return true;
 }
+
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+static bool prv_set_s_lockdown_app_in_launcher(bool *enabled) {
+  s_lockdown_app_in_launcher = *enabled;
+  return true;
+}
+#endif
   
 // ------------------------------------------------------------------------------------
 // Table of all prefs
@@ -2193,3 +2207,13 @@ bool shell_prefs_get_music_show_album_art(void) {
 void shell_prefs_set_music_show_album_art(bool enable) {
   prv_pref_set(PREF_KEY_MUSIC_SHOW_ALBUM_ART, &enable, sizeof(enable));
 }
+
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+bool shell_prefs_get_lockdown_app_in_launcher(void) {
+  return s_lockdown_app_in_launcher;
+}
+
+void shell_prefs_set_lockdown_app_in_launcher(bool enable) {
+  prv_pref_set(PREF_KEY_LOCKDOWN_APP_IN_LAUNCHER, &enable, sizeof(enable));
+}
+#endif
