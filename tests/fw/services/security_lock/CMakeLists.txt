@@ -38,3 +38,11 @@ pbl_clar_test(test_security_lock_shred
     src/fw/services/security_lock/shred.c
   OVERRIDES dummy_board
 )
+
+# Same again for the disconnect countdown: the subject is which deadlines get
+# armed and which do not, so the service, the timer and the session are faked.
+pbl_clar_test(test_security_lock_endpoint
+  SOURCES
+    src/fw/services/security_lock/endpoint.c
+  OVERRIDES dummy_board
+)

@@ -44,6 +44,7 @@ typedef struct {
   int region_erases;
   int sweeps_started;
   int unfaithful_marks;
+  int blackouts;
   uint32_t last_complete_bitmap;
 } ShredTrace;
 
@@ -100,6 +101,10 @@ status_t security_lock_set_state(SecurityLockState state) {
 
 uint8_t security_lock_get_pin_len(void) {
   return s_pin_len;
+}
+
+void security_lock_radio_blackout_engage(void) {
+  s_trace.blackouts++;
 }
 
 time_t security_lock_get_lock_deadline(void) {
@@ -375,6 +380,76 @@ void test_security_lock_shred__a_wipe_after_one_finishes_is_not_refused(void) {
   cl_assert_equal_i(2 * SHRED_TARGET_COUNT, s_trace.files_shredded);
 }
 
+// Radio blackout
+////////////////////////////////////
+
+//! A locked watch that has just been wiped has nothing left to receive, and
+//! every message it drops instead is an ack the phone reads as a successful
+//! sync. Taking the radio down makes it an ordinary disconnect.
+void test_security_lock_shred__a_wipe_while_locked_takes_the_radio_down(void) {
+  s_locked = true;
+  s_state = SecurityLockStateLocked;
+
+  security_lock_shred(SecurityShredReasonPinAttemptsExhausted);
+
+  cl_assert_equal_i(1, s_trace.blackouts);
+}
+
+//! The rule is keyed on the locked state, not on the wipe. The duress PIN
+//! unlocks first and wipes in the background, so it arrives here unlocked --
+//! and a visible airplane-mode icon straight after an unlock is exactly the
+//! tell the duress PIN exists to avoid. It is also unlocked, so nothing would
+//! ever release the blackout again.
+void test_security_lock_shred__a_duress_wipe_leaves_the_radio_alone(void) {
+  s_locked = false;
+  s_state = SecurityLockStateArmed;
+
+  security_lock_shred(SecurityShredReasonDuressPin);
+
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+  cl_assert_equal_i(0, s_trace.blackouts);
+}
+
+//! The clock-rollback wipe runs whenever the tamper is spotted, which may be
+//! before or after the lock delay elapsed. The same rule covers both with no
+//! special case: dark if it was already locked, untouched if it was not.
+void test_security_lock_shred__a_rollback_wipe_follows_the_locked_state(void) {
+  s_locked = false;
+  s_state = SecurityLockStateArmed;
+  security_lock_shred(SecurityShredReasonClockRollback);
+  cl_assert_equal_i(0, s_trace.blackouts);
+
+  s_locked = true;
+  s_state = SecurityLockStateLocked;
+  security_lock_mark_dirty_since_shred();
+  security_lock_shred(SecurityShredReasonClockRollback);
+  cl_assert_equal_i(1, s_trace.blackouts);
+}
+
+//! Nothing to receive is nothing to receive whether or not the wipe found
+//! anything to destroy.
+void test_security_lock_shred__a_clean_wipe_while_locked_still_goes_dark(void) {
+  s_dirty = false;
+  s_locked = true;
+  s_state = SecurityLockStateLocked;
+
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(0, s_trace.files_shredded);
+  cl_assert_equal_i(1, s_trace.blackouts);
+}
+
+//! A wipe with no PIN configured cannot lock, and a watch with no PIN has no
+//! way to release the blackout again.
+void test_security_lock_shred__a_wipe_without_a_lock_leaves_the_radio_alone(void) {
+  s_pin_len = 0;
+  s_locked = false;
+
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(0, s_trace.blackouts);
+}
+
 // Boot
 ////////////////////////////////////
 
@@ -386,6 +461,9 @@ void test_security_lock_shred__boot_wipe_with_something_to_destroy_owes_a_tail(v
   s_state = SecurityLockStateLocked;
 
   security_lock_handle_boot();
+  // bt_ctl does not exist this early. The blackout the boot wipe owes is taken
+  // by security_lock_endpoint_init() once it does.
+  cl_assert_equal_i(0, s_trace.blackouts);
   cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
   // Deferred out of the boot path, so nothing yet.
   cl_assert_equal_i(0, s_trace.sweeps_started);

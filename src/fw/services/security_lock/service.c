@@ -12,6 +12,7 @@
 #include <pbl/logging/logging.h>
 #include "kernel/event_loop.h"
 #include "pbl/os/mutex.h"
+#include "pbl/services/bluetooth/bluetooth_ctl.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/settings/settings_file.h"
 #include "pbl/services/system_task.h"
@@ -24,7 +25,11 @@ PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LE
 #define SETTINGS_FILE_NAME "seclock"
 #define SETTINGS_FILE_SIZE KiBYTES(2)
 
-#define RECORD_VERSION 4
+//! Versioned independently, because an unrecognised record is discarded and
+//! discarding the config record throws the PIN away. Sharing one number meant a
+//! runtime-only field could disarm the lock on upgrade; these cannot.
+#define CFG_RECORD_VERSION 4
+#define RT_RECORD_VERSION 5
 
 //! Config: written rarely (only when the PIN changes).
 static const char *CFG_KEY = "cfg";
@@ -59,6 +64,12 @@ typedef struct PACKED {
   time_t time_high_water;
   uint32_t lock_delay_s;
   uint32_t shred_delay_s;
+  //! Airplane mode is being held on because the watch is locked and has
+  //! shredded, and what the user had it set to before we took it. Persisted
+  //! because a reboot while locked is a designed-for case: a RAM-only copy
+  //! would be lost and unlocking would restore the wrong state.
+  bool radio_blackout;
+  bool airplane_was_on;
 } SecurityLockRuntime;
 
 //! Keeps two salts derived in the same tick from coming out identical.
@@ -73,7 +84,7 @@ static SecurityLockRuntime s_runtime_cache;
 
 static void prv_runtime_defaults(SecurityLockRuntime *rt) {
   *rt = (SecurityLockRuntime){
-      .version = RECORD_VERSION,
+      .version = RT_RECORD_VERSION,
       .state = SecurityLockStateDisabled,
       // Defaults are what a missing or unreadable record falls back to, so this
       // is the answer given whenever the real state is unknown. It must be
@@ -108,7 +119,7 @@ static status_t prv_write(const char *key, const void *val, size_t len) {
 
 static status_t prv_read_config(SecurityLockConfig *cfg) {
   status_t rv = prv_read(CFG_KEY, cfg, sizeof(*cfg));
-  if (rv == S_SUCCESS && cfg->version != RECORD_VERSION) {
+  if (rv == S_SUCCESS && cfg->version != CFG_RECORD_VERSION) {
     PBL_LOG_WRN("Ignoring config record with unknown version %" PRIu16, cfg->version);
     return E_INVALID_ARGUMENT;
   }
@@ -135,7 +146,7 @@ void security_lock_init(void) {
   PBL_LOG_INFO("SECBOOT init read enter");
   status_t rv = prv_read(RT_KEY, &rt, sizeof(rt));
   PBL_LOG_INFO("SECBOOT init read leave rv=%" PRId32, (int32_t)rv);
-  if (rv == S_SUCCESS && rt.version == RECORD_VERSION) {
+  if (rv == S_SUCCESS && rt.version == RT_RECORD_VERSION) {
     s_runtime_cache = rt;
   } else {
     // Absent or from a future/unknown version: fall back to a safe default
@@ -144,6 +155,23 @@ void security_lock_init(void) {
       PBL_LOG_WRN("Discarding runtime record with unknown version %" PRIu16, rt.version);
     }
     prv_runtime_defaults(&s_runtime_cache);
+
+    // The config record versions separately and survives a runtime-only change,
+    // so a discarded runtime record must not be read as "no PIN". Defaulting to
+    // Disabled with a PIN still stored would leave the watch configured but not
+    // watching -- every trigger is gated on the state -- which is an upgrade
+    // that silently disarms the lock.
+    //
+    // Armed rather than Locked: a firmware upgrade is a deliberate act by
+    // someone who already had the watch open, and locking them out of it is the
+    // worse failure. Only reached on the fallback path, so the extra read costs
+    // an ordinary boot nothing.
+    SecurityLockConfig cfg;
+    if ((prv_read_config(&cfg) == S_SUCCESS) && (cfg.pin_len != 0)) {
+      PBL_LOG_INFO("Runtime record gone but a PIN remains; coming back armed");
+      s_runtime_cache.state = SecurityLockStateArmed;
+    }
+    memset(&cfg, 0, sizeof(cfg));
   }
   s_initialized = true;
   mutex_unlock(s_mutex);
@@ -191,7 +219,65 @@ status_t security_lock_set_state(SecurityLockState state) {
   }
   status_t rv = prv_flush_runtime();
   mutex_unlock(s_mutex);
+
+  if (state != SecurityLockStateLocked) {
+    // The radio was taken down because the watch was locked, so leaving that
+    // state is what gives it back -- whatever the reason for leaving it. Called
+    // outside the mutex: it drops into bt_ctl, which takes a lock of its own.
+    security_lock_radio_blackout_release();
+  }
   return rv;
+}
+
+void security_lock_radio_blackout_engage(void) {
+  if (!s_initialized) {
+    return;
+  }
+
+  mutex_lock(s_mutex);
+  if (!s_runtime_cache.radio_blackout) {
+    // Saved once, on the way in.
+    s_runtime_cache.airplane_was_on = bt_ctl_is_airplane_mode_on();
+    s_runtime_cache.radio_blackout = true;
+    // Recorded before the radio goes down, so a power cut in between leaves a
+    // watch that knows to restore rather than one stuck in airplane mode.
+    prv_flush_runtime();
+    PBL_LOG_INFO("Locked and shredded; taking the radio down (airplane was %d)",
+                 (int)s_runtime_cache.airplane_was_on);
+  }
+  mutex_unlock(s_mutex);
+
+  // Unconditional, so this doubles as "make the radio match the record" for the
+  // re-assert at boot. bt_ctl ignores a write of the value it already holds.
+  bt_ctl_set_airplane_mode_async(true);
+}
+
+void security_lock_radio_blackout_release(void) {
+  if (!s_initialized) {
+    return;
+  }
+
+  mutex_lock(s_mutex);
+  const bool held = s_runtime_cache.radio_blackout;
+  const bool restore = s_runtime_cache.airplane_was_on;
+  if (held) {
+    s_runtime_cache.radio_blackout = false;
+    s_runtime_cache.airplane_was_on = false;
+    prv_flush_runtime();
+  }
+  mutex_unlock(s_mutex);
+
+  if (held) {
+    PBL_LOG_INFO("Unlocked; restoring airplane mode to %d", (int)restore);
+    bt_ctl_set_airplane_mode_async(restore);
+  }
+}
+
+bool security_lock_is_radio_blackout(void) {
+  if (!s_initialized) {
+    return false;
+  }
+  return s_runtime_cache.radio_blackout;
 }
 
 //! Fill a salt.
@@ -269,7 +355,7 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   if (prv_read_config(&cfg) != S_SUCCESS) {
     memset(&cfg, 0, sizeof(cfg));
   }
-  cfg.version = RECORD_VERSION;
+  cfg.version = CFG_RECORD_VERSION;
   cfg.pin_len = len;
 
   status_t rv;
@@ -383,6 +469,10 @@ status_t security_lock_clear_pin(void) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
+  // Before the runtime record goes: that record is the only thing that knows
+  // the radio was taken down and what to put back.
+  security_lock_radio_blackout_release();
+
   // Deleting the config record takes the duress PIN with it, which is what we
   // want: a watch with no real PIN has nothing to be under duress about.
   mutex_lock(s_mutex);

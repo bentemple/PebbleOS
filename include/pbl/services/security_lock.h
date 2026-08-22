@@ -148,6 +148,35 @@ void security_lock_mark_dirty_since_shred(void);
 //! anything written from that point on re-marks and the next shred runs whole.
 status_t security_lock_clear_dirty_since_shred(void);
 
+//! Hold the radio down because the watch is locked and has been shredded.
+//!
+//! A locked, shredded watch has nothing left to receive, and every message it
+//! drops instead is an ack the phone reads as a successful sync. With the radio
+//! down the phone sees an ordinary disconnect, so the usual reconnect-and-resync
+//! semantics apply once the watch is unlocked.
+//!
+//! Real airplane mode rather than the bt_ctl override: it is persisted, so a
+//! locked watch stays dark across a reboot with nothing to re-apply, and it is
+//! visible, so the user can see why the watch is not talking to their phone
+//! rather than it merely appearing broken.
+//!
+//! Idempotent. The airplane-mode setting is saved on the way in and only on the
+//! first call, so a repeat shred -- or the re-assert at boot -- cannot record
+//! the blackout as its own "previous state" and strand airplane mode on.
+void security_lock_radio_blackout_engage(void);
+
+//! Put airplane mode back the way the user had it.
+//!
+//! No-op unless we took it, so a watch that was already in airplane mode before
+//! the shred stays in it.
+void security_lock_radio_blackout_release(void);
+
+//! True while the radio is being held down.
+//!
+//! Also means the watch has reached a terminal state: nothing can arrive, so
+//! nothing is left to run a countdown for and only the PIN gets out.
+bool security_lock_is_radio_blackout(void);
+
 //! Absolute wall-clock deadlines armed when the phone disconnects. 0 means
 //! not armed.
 //!

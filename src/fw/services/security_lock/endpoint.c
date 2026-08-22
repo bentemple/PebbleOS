@@ -232,6 +232,15 @@ static void prv_deadline_check(void *unused) {
     return;
   }
 
+  // Locked with the radio down is terminal: nothing can arrive, so a countdown
+  // armed before the wipe has nothing left to count down and only the PIN gets
+  // out. Retire it rather than tick uselessly for the duration of the lock.
+  if (security_lock_is_radio_blackout()) {
+    security_lock_clear_deadlines();
+    prv_stop_deadline_timer();
+    return;
+  }
+
   const time_t now = rtc_get_time();
   // Only a shred deadline can be outrun by winding the clock back. With the
   // timed erase turned off there is nothing to outrun, and shredding anyway
@@ -300,6 +309,14 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
     return;
   }
 
+  // We took the radio down ourselves, so this close is our own doing and there
+  // is no phone out there to come back. Arming off it would make the blackout
+  // schedule a fresh countdown as a side effect of its own cleanup.
+  if (security_lock_is_radio_blackout()) {
+    PBL_LOG_DBG("Session closed by our own blackout; nothing to count down");
+    return;
+  }
+
   // Both are measured from the disconnect, so a watch that is already locked
   // still gets the full shred delay rather than an immediate wipe.
   const time_t now = rtc_get_time();
@@ -324,6 +341,16 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
 }
 
 void security_lock_endpoint_init(void) {
+  // The boot wipe runs from services_normal_early_init(), before bt_ctl exists,
+  // so the blackout it owes is taken here instead -- this is the first point
+  // after the radio is up. security_lock_handle_boot() wipes on every path that
+  // leaves the watch locked, so the locked state is the whole condition.
+  // Idempotent, so a blackout held across the reboot is merely re-asserted;
+  // airplane mode is persisted, so it is normally already in force.
+  if (security_lock_is_locked()) {
+    security_lock_radio_blackout_engage();
+  }
+
   // A watch that was locked and offline across a reboot needs the timer running
   // again without waiting for another disconnect event.
   if ((security_lock_get_lock_deadline() != 0) || (security_lock_get_shred_deadline() != 0)) {

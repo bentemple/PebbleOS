@@ -27,6 +27,7 @@
 #include "stubs_sleep.h"
 #include "stubs_system_reset.h"
 #include "stubs_task_watchdog.h"
+#include "fake_bluetooth_ctl.h"
 #include "fake_rng.h"
 #include "fake_rtc.h"
 #include "fake_spi_flash.h"
@@ -103,10 +104,34 @@ static void prv_simulate_reboot(void) {
   security_lock_init();
 }
 
-//! Rewrite the stored runtime record with a version the service does not know,
-//! which is what a downgrade or a record from a future build looks like.
-//! Length is preserved so only the version field is in question.
+//! Rewrite a stored record with a version the service does not know, which is
+//! what a downgrade or a record from a future build looks like. Length is
+//! preserved so only the version field is in question.
+static void prv_corrupt_record_version(const char *key) {
+  SettingsFile file;
+  cl_assert_equal_i(S_SUCCESS, settings_file_open(&file, "seclock", KiBYTES(2)));
+  const int len = settings_file_get_len(&file, key, strlen(key));
+  cl_assert(len > (int)sizeof(uint16_t));
+
+  uint8_t *record = malloc(len);
+  cl_assert_equal_i(S_SUCCESS, settings_file_get(&file, key, strlen(key), record, len));
+  // The version is the first field of both records.
+  record[0] = 0xff;
+  record[1] = 0xff;
+  cl_assert_equal_i(S_SUCCESS, settings_file_set(&file, key, strlen(key), record, len));
+
+  settings_file_close(&file);
+  free(record);
+}
+
 static void prv_corrupt_runtime_version(void) {
+  prv_corrupt_record_version("rt");
+}
+
+//! Replace the runtime record with a shorter one, which is what a record
+//! written by a build with fewer fields actually looks like -- the real upgrade
+//! path, where the length rather than the version is what rejects it.
+static void prv_shorten_runtime_record(void) {
   SettingsFile file;
   cl_assert_equal_i(S_SUCCESS, settings_file_open(&file, "seclock", KiBYTES(2)));
   const int len = settings_file_get_len(&file, "rt", 2);
@@ -114,10 +139,7 @@ static void prv_corrupt_runtime_version(void) {
 
   uint8_t *record = malloc(len);
   cl_assert_equal_i(S_SUCCESS, settings_file_get(&file, "rt", 2, record, len));
-  // The version is the first field of the record.
-  record[0] = 0xff;
-  record[1] = 0xff;
-  cl_assert_equal_i(S_SUCCESS, settings_file_set(&file, "rt", 2, record, len));
+  cl_assert_equal_i(S_SUCCESS, settings_file_set(&file, "rt", 2, record, len - 2));
 
   settings_file_close(&file);
   free(record);
@@ -133,6 +155,7 @@ void test_security_lock__initialize(void) {
   s_phone_connected = true;
   s_duress_shreds = 0;
   s_pending_cb = NULL;
+  fake_bt_ctl_reset();
   fake_spi_flash_init(0, 0x1000000);
   pfs_init(false);
   security_lock_init();
@@ -682,4 +705,195 @@ void test_security_lock__duress_pin_can_be_six_digits(void) {
   cl_assert(security_lock_verify_pin("654321", 6, NULL));
   prv_run_pending_callback();
   cl_assert_equal_i(1, s_duress_shreds);
+}
+
+// Radio blackout
+////////////////////////////////////
+
+void test_security_lock__blackout_turns_airplane_mode_on(void) {
+  cl_assert(!security_lock_is_radio_blackout());
+
+  security_lock_radio_blackout_engage();
+
+  cl_assert(security_lock_is_radio_blackout());
+  cl_assert(bt_ctl_is_airplane_mode_on());
+}
+
+void test_security_lock__release_puts_airplane_mode_back(void) {
+  security_lock_radio_blackout_engage();
+  security_lock_radio_blackout_release();
+
+  cl_assert(!security_lock_is_radio_blackout());
+  cl_assert(!bt_ctl_is_airplane_mode_on());
+}
+
+//! The user's own setting is what gets restored, not "off". Someone who was
+//! already in airplane mode before the wipe must not be dropped out of it.
+void test_security_lock__release_keeps_airplane_mode_the_user_already_had(void) {
+  fake_bt_ctl_set_airplane_mode(true);
+
+  security_lock_radio_blackout_engage();
+  cl_assert(bt_ctl_is_airplane_mode_on());
+
+  security_lock_radio_blackout_release();
+  cl_assert(bt_ctl_is_airplane_mode_on());
+}
+
+//! The saved value is taken once, on the way in. A second engage -- a repeat
+//! wipe, or the re-assert after a reboot -- would otherwise record the blackout
+//! as its own "previous state" and strand airplane mode on forever.
+void test_security_lock__engaging_twice_does_not_save_its_own_state(void) {
+  security_lock_radio_blackout_engage();
+  security_lock_radio_blackout_engage();
+
+  security_lock_radio_blackout_release();
+  cl_assert(!bt_ctl_is_airplane_mode_on());
+}
+
+//! A watch that has never been blacked out must not have its airplane mode
+//! touched by a stray release.
+void test_security_lock__release_without_a_blackout_changes_nothing(void) {
+  fake_bt_ctl_set_airplane_mode(true);
+  const int writes_before = fake_bt_ctl_get_airplane_writes();
+
+  security_lock_radio_blackout_release();
+
+  cl_assert(bt_ctl_is_airplane_mode_on());
+  cl_assert_equal_i(writes_before, fake_bt_ctl_get_airplane_writes());
+}
+
+//! A reboot while locked is a designed-for case, so the saved value cannot live
+//! in RAM: unlocking after one would otherwise restore the wrong state.
+void test_security_lock__blackout_and_saved_state_survive_reboot(void) {
+  fake_bt_ctl_set_airplane_mode(true);
+  security_lock_radio_blackout_engage();
+
+  prv_simulate_reboot();
+  cl_assert(security_lock_is_radio_blackout());
+
+  security_lock_radio_blackout_release();
+  cl_assert(bt_ctl_is_airplane_mode_on());
+}
+
+void test_security_lock__blackout_off_survives_reboot(void) {
+  security_lock_radio_blackout_engage();
+  prv_simulate_reboot();
+
+  security_lock_radio_blackout_release();
+  prv_simulate_reboot();
+
+  cl_assert(!security_lock_is_radio_blackout());
+  cl_assert(!bt_ctl_is_airplane_mode_on());
+}
+
+//! The blackout belongs to the locked state, so leaving that state is what
+//! gives the radio back -- whatever the reason for leaving it.
+void test_security_lock__leaving_the_locked_state_releases_the_radio(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  security_lock_radio_blackout_engage();
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert(!security_lock_is_radio_blackout());
+  cl_assert(!bt_ctl_is_airplane_mode_on());
+}
+
+//! Re-entering the locked state must not release it.
+void test_security_lock__locking_again_keeps_the_radio_down(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  security_lock_radio_blackout_engage();
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+
+  cl_assert(security_lock_is_radio_blackout());
+  cl_assert(bt_ctl_is_airplane_mode_on());
+}
+
+//! Turning the feature off wipes the runtime record, which is where the blackout
+//! is recorded. The radio has to come back before that record goes, or nothing
+//! is left that knows to restore it.
+void test_security_lock__clearing_the_pin_releases_the_radio(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  security_lock_radio_blackout_engage();
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_pin());
+
+  cl_assert(!security_lock_is_radio_blackout());
+  cl_assert(!bt_ctl_is_airplane_mode_on());
+}
+
+// Record versioning
+////////////////////////////////////
+
+//! The config record holds the PIN and the runtime record holds everything
+//! else, and they version independently. A runtime-only change must not be able
+//! to discard the PIN and disarm the lock, which is what a single shared
+//! version number did on every bump.
+void test_security_lock__an_unreadable_runtime_record_keeps_the_pin(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin("123456", 6));
+
+  prv_corrupt_runtime_version();
+  prv_simulate_reboot();
+
+  cl_assert_equal_i(6, security_lock_get_pin_len());
+  cl_assert(security_lock_verify_pin("123456", 6, NULL));
+}
+
+//! ...and the surviving PIN has to be reflected in the state, or the watch comes
+//! back configured but not watching: every trigger is gated on the state, so
+//! Disabled would be a silently disarmed lock.
+void test_security_lock__an_unreadable_runtime_record_stays_armed(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+
+  prv_corrupt_runtime_version();
+  prv_simulate_reboot();
+
+  cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
+}
+
+//! With no PIN to fall back on there is nothing to be armed about.
+void test_security_lock__an_unreadable_runtime_record_without_a_pin_is_disabled(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_shred_pending(true));
+
+  prv_corrupt_runtime_version();
+  prv_simulate_reboot();
+
+  cl_assert_equal_i(SecurityLockStateDisabled, security_lock_get_state());
+  cl_assert_equal_i(0, security_lock_get_pin_len());
+}
+
+//! The shape an actual upgrade takes: the old runtime record is too short for
+//! the new one, so it is rejected on length before the version is even looked
+//! at. The config record is unchanged in both length and version, so the PIN is
+//! read back exactly as it was written.
+void test_security_lock__a_shorter_runtime_record_keeps_the_pin_and_arms(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(90, 900));
+
+  prv_shorten_runtime_record();
+  prv_simulate_reboot();
+
+  cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
+  cl_assert_equal_i(4, security_lock_get_pin_len());
+  cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
+
+  // The runtime half is genuinely gone: the delays are back to their defaults
+  // and the dirty flag reads the safe answer.
+  cl_assert_equal_i(SECURITY_LOCK_DEFAULT_LOCK_DELAY_S, security_lock_get_lock_delay_s());
+  cl_assert(security_lock_is_dirty_since_shred());
+}
+
+//! The reverse direction: an unreadable config record leaves no PIN, and a
+//! watch with no PIN must not claim to be locked -- there would be no way past
+//! the lock screen.
+void test_security_lock__an_unreadable_config_record_leaves_no_pin(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+
+  prv_corrupt_record_version("cfg");
+  prv_simulate_reboot();
+
+  cl_assert_equal_i(0, security_lock_get_pin_len());
+  cl_assert(!security_lock_verify_pin(PIN, strlen(PIN), NULL));
 }

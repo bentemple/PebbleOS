@@ -395,7 +395,19 @@ uint32_t security_lock_shred(SecurityShredReason reason) {
     PBL_LOG_WRN("Shred already running; ignoring %s", security_lock_shred_reason_str(reason));
     return 0;
   }
-  return prv_shred(reason, true /* dbs_running */, true /* finish */);
+  const uint32_t wiped = prv_shred(reason, true /* dbs_running */, true /* finish */);
+
+  // Keyed on the locked state rather than on the wipe, so no trigger needs a
+  // special case here. The duress PIN unlocks first and wipes in the
+  // background, so it arrives unlocked -- which is what has to happen, because
+  // an airplane-mode icon appearing right after an unlock is exactly the tell
+  // it exists to avoid, and because a watch that is already unlocked would
+  // never reach the release. The clock-rollback wipe follows the same rule:
+  // dark only if the lock delay had already elapsed.
+  if (security_lock_is_locked()) {
+    security_lock_radio_blackout_engage();
+  }
+  return wiped;
 }
 
 //! Set when a wipe ran at early boot, so the half that needs a running system
