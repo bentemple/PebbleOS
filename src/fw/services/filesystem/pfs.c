@@ -2142,16 +2142,15 @@ status_t pfs_shred(const char *name) {
   return (rv);
 }
 
-status_t pfs_gc_deleted_sectors(void) {
+int pfs_gc_deleted_sectors(int max_sectors) {
   mutex_lock_recursive(s_pfs_mutex);
 
   if (!pfs_active()) {
     mutex_unlock_recursive(s_pfs_mutex);
-    return (E_INVALID_OPERATION);
+    return (0);
   }
 
   const int num_erase_regions = s_pfs_page_count / PFS_PAGES_PER_ERASE_SECTOR;
-  status_t rv = S_SUCCESS;
   int regions_collected = 0;
 
   for (uint16_t region = 0; region < (uint16_t)num_erase_regions; region++) {
@@ -2175,6 +2174,13 @@ status_t pfs_gc_deleted_sectors(void) {
       continue;
     }
 
+    if ((max_sectors > 0) && (regions_collected >= max_sectors)) {
+      // Budget spent. The caller comes back for the rest, so whatever runs
+      // this is not blocked for the whole filesystem at once.
+      mutex_unlock_recursive(s_pfs_mutex);
+      return regions_collected;
+    }
+
     uint16_t free_page = INVALID_PAGE;
     const uint32_t sectors_active = prv_get_sector_page_status(region, &free_page);
 
@@ -2182,7 +2188,6 @@ status_t pfs_gc_deleted_sectors(void) {
     // assert inside prv_copy_sector_to_gc_file().
     if ((sectors_active != 0) && !prv_update_gc_reserved_region()) {
       PBL_LOG_WRN("No GC region available, leaving region %" PRIu16 " unshredded", region);
-      rv = E_OUT_OF_STORAGE;
       continue;
     }
 
@@ -2192,7 +2197,6 @@ status_t pfs_gc_deleted_sectors(void) {
       // Record the failure but keep sweeping: one bad region must not leave the
       // rest of the filesystem un-erased.
       PBL_LOG_ERR("GC of region %" PRIu16 " failed: %" PRId32, region, (int32_t)gc_rv);
-      rv = gc_rv;
       continue;
     }
     regions_collected++;
@@ -2204,7 +2208,7 @@ status_t pfs_gc_deleted_sectors(void) {
   PBL_LOG_DBG("Shred GC swept %d region(s)", regions_collected);
 
   mutex_unlock_recursive(s_pfs_mutex);
-  return (rv);
+  return (regions_collected);
 }
 
 status_t pfs_init(bool run_filesystem_check) {

@@ -39,13 +39,12 @@ CommSession *comm_session_get_system_session(void) {
   return s_phone_connected ? (CommSession *)1 : NULL;
 }
 
-//! A duress unlock schedules the wipe on KernelBG rather than running it
+//! A duress unlock defers the wipe to the launcher task rather than running it
 //! inline, so the test captures the callback instead of shredding.
 static int s_duress_shreds;
 static void (*s_pending_cb)(void *);
-bool system_task_add_callback(void (*cb)(void *), void *data) {
+void launcher_task_add_callback(void (*cb)(void *), void *data) {
   s_pending_cb = cb;
-  return true;
 }
 static void prv_run_pending_callback(void) {
   if (s_pending_cb) {

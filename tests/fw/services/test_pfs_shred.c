@@ -185,7 +185,7 @@ void test_pfs_shred__gc_erases_stale_payload_from_plain_remove(void) {
   pfs_remove(SECRET_FILE);
   cl_assert(prv_flash_contains(SECRET, SECRET_LEN));
 
-  cl_assert_equal_i(S_SUCCESS, pfs_gc_deleted_sectors());
+  pfs_gc_deleted_sectors(0 /* no budget */);
 
   cl_assert(!prv_flash_contains(SECRET, SECRET_LEN));
 }
@@ -197,7 +197,7 @@ void test_pfs_shred__gc_preserves_live_files(void) {
   prv_write_file(KEEPER_FILE, KEEPER, KEEPER_LEN);
   pfs_remove(SECRET_FILE);
 
-  cl_assert_equal_i(S_SUCCESS, pfs_gc_deleted_sectors());
+  pfs_gc_deleted_sectors(0 /* no budget */);
 
   cl_assert(!prv_flash_contains(SECRET, SECRET_LEN));
 
@@ -209,7 +209,7 @@ void test_pfs_shred__gc_preserves_live_files(void) {
 void test_pfs_shred__gc_with_nothing_deleted_is_harmless(void) {
   prv_write_file(KEEPER_FILE, KEEPER, KEEPER_LEN);
 
-  cl_assert_equal_i(S_SUCCESS, pfs_gc_deleted_sectors());
+  pfs_gc_deleted_sectors(0 /* no budget */);
 
   char readback[KEEPER_LEN];
   cl_assert(prv_read_file(KEEPER_FILE, readback, KEEPER_LEN));
@@ -222,7 +222,7 @@ void test_pfs_shred__shred_then_gc_leaves_nothing(void) {
   prv_write_file(KEEPER_FILE, KEEPER, KEEPER_LEN);
 
   cl_assert_equal_i(S_SUCCESS, pfs_shred(SECRET_FILE));
-  cl_assert_equal_i(S_SUCCESS, pfs_gc_deleted_sectors());
+  pfs_gc_deleted_sectors(0 /* no budget */);
 
   cl_assert(!prv_flash_contains(SECRET, SECRET_LEN));
 
@@ -245,7 +245,43 @@ void test_pfs_shred__gc_erases_superseded_copies(void) {
   cl_assert(prv_flash_contains(SECRET, SECRET_LEN));
 
   cl_assert_equal_i(S_SUCCESS, pfs_shred(SECRET_FILE));
-  cl_assert_equal_i(S_SUCCESS, pfs_gc_deleted_sectors());
+  pfs_gc_deleted_sectors(0 /* no budget */);
+
+  cl_assert(!prv_flash_contains(SECRET, SECRET_LEN));
+}
+
+//! A budgeted sweep stops early and resumes where it left off, which is what
+//! lets the shred run it in slices instead of blocking a task for minutes.
+void test_pfs_shred__gc_budget_is_respected_and_resumable(void) {
+  // Enough separate files that deleting them dirties several sectors.
+  for (int i = 0; i < 12; ++i) {
+    char name[8];
+    snprintf(name, sizeof(name), "f%d", i);
+    char body[600];
+    memset(body, 'a' + i, sizeof(body));
+    memcpy(body, SECRET, SECRET_LEN);
+    prv_write_file(name, body, sizeof(body));
+    pfs_remove(name);
+  }
+  cl_assert(prv_flash_contains(SECRET, SECRET_LEN));
+
+  const int first = pfs_gc_deleted_sectors(1);
+  cl_assert(first <= 1);
+
+  // Must actually reach "nothing left to do". Collecting a sector relocates
+  // the live pages in it, which leaves fresh deleted pages behind, so if that
+  // feeds back the sweep never terminates -- and the shred driving it in
+  // rescheduled passes would spin forever and starve its task. That is not
+  // hypothetical: it wedged the watch until it was bounded.
+  int passes = 0;
+  const int limit = 2048;
+  while (passes < limit) {
+    if (pfs_gc_deleted_sectors(1) == 0) {
+      break;
+    }
+    passes++;
+  }
+  cl_assert(passes < limit);
 
   cl_assert(!prv_flash_contains(SECRET, SECRET_LEN));
 }

@@ -30,6 +30,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -100,7 +101,7 @@ def monitor(cmd):
             return ""
 
 
-def press(*buttons, settle=0.55):
+def press(*buttons, settle=0.12):
     """back|select|up|down, using the QEMU key names."""
     names = {"back": "left", "select": "right", "up": "up", "down": "down"}
     for b in buttons:
@@ -108,13 +109,13 @@ def press(*buttons, settle=0.55):
         time.sleep(settle)
 
 
-def tap(x, y, settle=0.5):
+def tap(x, y, settle=0.2):
     subprocess.run([sys.executable, "./pbl", "touch", str(x), str(y)],
                    cwd=REPO, capture_output=True)
     time.sleep(settle)
 
 
-def type_pin(pad, digits, settle=0.5):
+def type_pin(pad, digits, settle=0.2):
     for ch in digits:
         x, y = pad.centre(int(ch))
         log(f"tap {ch} at ({x},{y})")
@@ -129,34 +130,97 @@ def screenshot(name):
 
 
 class Console:
-    """The firmware prompt, over PULSE on the QEMU serial port.
+    """The firmware prompt and log stream, over PULSE on the QEMU serial port.
 
-    The console speaks PULSE framing rather than plain text
-    (CONFIG_PULSE_EVERYWHERE), so this reuses the same commander the
-    interactive `./pbl console` uses instead of writing to the socket.
+    One interface for both: PULSE allows a single connection, so a separate
+    log-capture process would fight this one for it. Tests assert on the
+    watch's own log lines as well as on `security status`, which is the only
+    way to see inside things that leave no state behind -- a shred that ran,
+    a message that was rejected.
+
+    Raises the log level on connect, because the security lock logs its
+    lifecycle at DEBUG and the default level swallows all of it.
     """
 
     def __init__(self):
         sys.path.insert(0, os.path.join(REPO, "tools"))
         sys.path.insert(0, os.path.join(REPO, "tools", "libs"))
         from pebble import pulse2, commander  # noqa: E402
+        from log_hashing.logdehash import LogDehash  # noqa: E402
+
         self._commander = commander
         self.iface = pulse2.Interface.open_dbgserial(f"socket://localhost:{CONSOLE_PORT}")
+        self._dehasher = LogDehash(os.path.join(REPO, "build", "src", "fw", "loghash_dict.json"))
+        self.lines = []
+        self._lock = threading.Lock()
+        self._pump = threading.Thread(target=self._pump_logs, daemon=True)
+        self._pump.start()
+        self._await_link()
+        self.command("log level set 200")   # DEBUG
+
+    def _await_link(self, timeout=60.0):
+        """PULSE takes a moment to negotiate, and longer if the watch is busy
+        wiping. Without this the first command dies on a None link."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.iface.get_link() is not None:
+                return True
+            time.sleep(1.0)
+        return False
+
+    def _pump_logs(self):
+        logs = self._commander.apps.StreamingLogs(self.iface)
+        while True:
+            try:
+                msg = logs.receive(block=True)
+            except Exception:
+                return
+            try:
+                text = self._dehasher.commander_format_line(self._dehasher.dehash(msg))
+            except Exception:
+                text = repr(msg)
+            with self._lock:
+                self.lines.append(text)
 
     def command(self, cmd):
-        prompt = self._commander.apps.Prompt(self.iface.get_link())
+        link = self.iface.get_link()
+        if link is None:
+            self._await_link(timeout=10.0)
+            link = self.iface.get_link()
+            if link is None:
+                return []
+        prompt = self._commander.apps.Prompt(link)
         try:
             return list(prompt.command_and_response(cmd))
+        except Exception:
+            return []
         finally:
-            prompt.close()
+            try:
+                prompt.close()
+            except Exception:
+                pass
 
     def status(self):
-        """Parse `security status` into a dict."""
-        for line in self.command("security status"):
-            fields = dict(re.findall(r"(\w+)=(-?\d+)", line))
-            if "state" in fields:
-                return {k: int(v) for k, v in fields.items()}
-        raise RuntimeError("no security status line in console output")
+        """Parse `security status` into a dict, retrying while the watch is busy."""
+        for _ in range(6):
+            for line in self.command("security status"):
+                fields = dict(re.findall(r"(\w+)=(-?\d+)", line))
+                if "state" in fields:
+                    return {k: int(v) for k, v in fields.items()}
+            time.sleep(2.0)
+        raise RuntimeError("watch did not answer `security status`")
+
+    def mark(self):
+        """Remember where the log is now, so a test can look only at what follows."""
+        with self._lock:
+            return len(self.lines)
+
+    def since(self, marker):
+        with self._lock:
+            return list(self.lines[marker:])
+
+    def saw(self, marker, needle):
+        return any(needle in line for line in self.since(marker))
 
     def close(self):
         try:
@@ -202,17 +266,17 @@ class Phone:
 
 def to_watchface(console):
     """Get back to a known place regardless of where we are."""
-    press(*(["back"] * 6), settle=0.4)
+    press(*(["back"] * 6), settle=0.12)
 
 
 def open_security(console):
     """watchface -> launcher -> Settings -> Security."""
     to_watchface(console)
     press("select")                       # launcher
-    press(*(["up"] * 14), settle=0.25)    # top of launcher == Settings
+    press(*(["up"] * 14), settle=0.08)    # top of launcher == Settings
     press("select")                       # Settings
-    press(*(["up"] * 14), settle=0.25)    # top of Settings
-    press(*(["down"] * SETTINGS_TO_SECURITY), settle=0.3)
+    press(*(["up"] * 14), settle=0.08)    # top of Settings
+    press(*(["down"] * SETTINGS_TO_SECURITY), settle=0.1)
     press("select")
 
 
@@ -222,14 +286,58 @@ def security_row(name, pin_set):
 
 
 def select_security_row(name, pin_set):
-    press(*(["up"] * 8), settle=0.25)
-    press(*(["down"] * security_row(name, pin_set)), settle=0.3)
+    press(*(["up"] * 8), settle=0.08)
+    press(*(["down"] * security_row(name, pin_set)), settle=0.1)
     press("select")
+
+
+def set_or_change_pin(console, pad, new_pin, old_pin=None):
+    """Set the PIN, taking whichever flow applies.
+
+    The menu differs depending on whether a PIN already exists -- row 0 is
+    "Set PIN" on a fresh watch and "Change PIN" once one is stored, and the
+    latter asks for the current PIN first. Getting this wrong leaves the pad
+    sitting on a stage the test never satisfies, so the state is queried
+    rather than assumed. That matters because the emulator keeps its
+    filesystem across a run, so the second test to touch the PIN is never
+    looking at a fresh watch.
+    """
+    pin_set = console.status()["pin_len"] > 0
+    open_security(console)
+    select_security_row("Change PIN" if pin_set else "Set PIN", pin_set)
+    if pin_set:
+        type_pin(pad, old_pin or new_pin)   # authorise
+    type_pin(pad, new_pin)                  # new
+    type_pin(pad, new_pin)                  # repeat
+    time.sleep(1.5)
+
+
+def ensure_no_pin(console, pad, current="1234"):
+    """Leave the watch with no PIN, whatever state it is in now."""
+    if console.status()["pin_len"] == 0:
+        return
+    open_security(console)
+    select_security_row("Clear PIN", pin_set=True)
+    type_pin(pad, current)
+    time.sleep(1.5)
 
 
 # --- Tests ------------------------------------------------------------------
 
 RESULTS = []
+
+
+def wait_until_responsive(console, timeout=90.0):
+    """Block until the watch answers again, e.g. after a wipe."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            console.status()
+            time.sleep(1.0)   # let the UI catch up with the task
+            return True
+        except Exception:
+            time.sleep(2.0)
+    return False
 
 
 def check(name, ok, detail=""):
@@ -239,6 +347,10 @@ def check(name, ok, detail=""):
 
 
 def test_starts_clean(console, pad):
+    # The emulator keeps its filesystem for the whole run, so a re-run starts
+    # wherever the last one stopped. Get to a known footing rather than
+    # asserting a fresh watch and failing on the second run.
+    ensure_no_pin(console, pad)
     st = console.status()
     check("starts disabled", st["state"] == 0, f"state={st['state']}")
     check("no PIN configured", st["pin_len"] == 0, f"pin_len={st['pin_len']}")
@@ -249,14 +361,8 @@ def test_starts_clean(console, pad):
 
 
 def test_set_pin(console, pad):
-    open_security(console)
     screenshot("01-security-menu")
-    select_security_row("Set PIN", pin_set=False)
-    screenshot("02-new-pin")
-    type_pin(pad, "1234")
-    screenshot("03-repeat-pin")
-    type_pin(pad, "1234")
-    time.sleep(1.5)
+    set_or_change_pin(console, pad, "1234")
     screenshot("04-after-set")
 
     st = console.status()
@@ -265,9 +371,11 @@ def test_set_pin(console, pad):
 
 
 def test_mismatched_pin_is_rejected(console, pad):
+    pin_set = console.status()["pin_len"] > 0
     open_security(console)
-    select_security_row("Change PIN", pin_set=True)
-    type_pin(pad, "1234")        # authorise
+    select_security_row("Change PIN" if pin_set else "Set PIN", pin_set)
+    if pin_set:
+        type_pin(pad, "1234")    # authorise
     type_pin(pad, "5678")        # new
     type_pin(pad, "8765")        # mismatched repeat
     time.sleep(1.0)
@@ -281,11 +389,25 @@ def test_mismatched_pin_is_rejected(console, pad):
 
 
 def test_lock_and_unlock(console, pad):
+    if console.status()["pin_len"] == 0:
+        set_or_change_pin(console, pad, "1234")
     phone = Phone()
     phone.set_connected(True)
     phone.configure(lock_delay=300, shred_delay=1800)
+    marker = console.mark()
     phone.lock()
-    time.sleep(6.0)
+    time.sleep(8.0)
+
+    # These two survive the default log level on purpose; the rest of the
+    # lock's chatter is DEBUG and compiled out, so tests must not depend on it.
+    check("LOCK reaches the endpoint", console.saw(marker, "LOCK from phone"),
+          " | ".join(console.since(marker))[:160])
+    check("the shred runs", console.saw(marker, "Shredding:"))
+
+    # The wipe runs on KernelMain and freezes the UI while it does, exactly as
+    # a factory reset does. Input sent during that window is simply lost, so
+    # wait for the watch to start answering again before touching it.
+    wait_until_responsive(console)
     screenshot("06-locked-clock")
 
     st = console.status()
@@ -310,10 +432,13 @@ def test_lock_and_unlock(console, pad):
 
 
 def test_wrong_pin_counts_up(console, pad):
+    if console.status()["pin_len"] == 0:
+        set_or_change_pin(console, pad, "1234")
     phone = Phone()
     phone.set_connected(True)
     phone.lock()
-    time.sleep(6.0)
+    time.sleep(8.0)
+    wait_until_responsive(console)
     press("select")
     time.sleep(1.0)
 
@@ -358,8 +483,13 @@ def test_disconnect_arms_countdown(console, pad):
 def test_configure_changes_delays(console, pad):
     phone = Phone()
     phone.set_connected(True)
+    marker = console.mark()
     phone.configure(lock_delay=60, shred_delay=600)
-    time.sleep(1.0)
+    time.sleep(1.5)
+
+    # The log says whether the message arrived at all, which state alone
+    # cannot: an ignored message and a rejected one look identical from
+    # outside.
     st = console.status()
     check("phone can set the lock delay", st["lock_delay"] == 60, f"={st['lock_delay']}")
     check("phone can set the shred delay", st["shred_delay"] == 600, f"={st['shred_delay']}")
@@ -370,6 +500,9 @@ def test_configure_changes_delays(console, pad):
 
 
 def test_clear_pin(console, pad):
+    if console.status()["pin_len"] == 0:
+        check("nothing to clear", False, "no PIN was set")
+        return
     open_security(console)
     select_security_row("Clear PIN", pin_set=True)
     type_pin(pad, "1234")
@@ -415,6 +548,9 @@ def main():
             continue
         print(f"\n=== {name} ===")
         try:
+            # Back to a known screen; a test that left a half-finished PIN
+            # entry up would otherwise poison every test after it.
+            press(*(["back"] * 8), settle=0.1)
             fn(console, pad)
         except Exception as exc:  # keep going; one broken test should not hide the rest
             check(name + " (crashed)", False, repr(exc))

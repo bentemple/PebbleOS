@@ -10,6 +10,7 @@
 #include <pbl/drivers/rtc.h>
 #include <pbl/drivers/task_watchdog.h>
 #include <pbl/logging/logging.h>
+#include "debug/flash_logging.h"
 #include "flash_region/flash_region.h"
 #include "kernel/events.h"
 #include "kernel/pebble_tasks.h"
@@ -17,6 +18,7 @@
 #include "pbl/services/blob_db/reminder_db.h"
 #include "pbl/services/filesystem/pfs.h"
 #include "pbl/services/notifications/notification_storage.h"
+#include "pbl/services/new_timer/new_timer.h"
 #include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_endpoint.h"
 #include "pbl/services/system_task.h"
@@ -118,6 +120,75 @@ static void prv_erase_flash_region(uint32_t begin, uint32_t end, const char *wha
 //! once the Bluetooth stack exists. See security_lock_finish_boot_shred().
 static bool s_boot_shred_pending_notify;
 
+//! Sectors collected per pass, and the gap between passes.
+//!
+//! The gap is the important half. Rescheduling immediately hands the task back
+//! but instantly takes it again, so KernelBG stays saturated for the whole
+//! sweep and anything else queued on it -- the console among them -- waits
+//! minutes. The urgent part of the wipe is already done by the time this runs;
+//! this is cleanup and can afford to be slow.
+#define SWEEP_SECTORS_PER_PASS 4
+#define SWEEP_PASS_GAP_MS 250
+
+//! Hard ceiling on a whole sweep.
+//!
+//! Collecting a sector relocates the live pages in it, which leaves fresh
+//! deleted pages behind, so "collected nothing this pass" is not a state the
+//! sweep reliably reaches -- without a ceiling it reschedules itself forever
+//! and starves the task it runs on. One pass over the filesystem is what the
+//! shred needs; anything beyond that is chasing its own tail.
+#define SWEEP_SECTORS_MAX 384
+
+static int s_sweep_budget;
+static TimerID s_sweep_timer = TIMER_INVALID_ID;
+
+static void prv_schedule_next_pass(void);
+
+//! Erase stale sectors a few at a time, rescheduling until there are none left.
+//!
+//! Doing the whole filesystem in one call blocks whichever task runs it for
+//! minutes -- long enough that the console stops answering and the watch looks
+//! hung. The work is idempotent and resumable, because a collected sector no
+//! longer contains deleted pages, so it can be chopped up freely.
+static void prv_sweep_pass(void *unused) {
+  const PebbleTask task = pebble_task_get_current();
+  task_watchdog_mask_clear(task);
+  const int collected = pfs_gc_deleted_sectors(SWEEP_SECTORS_PER_PASS);
+  task_watchdog_mask_set(task);
+
+  s_sweep_budget -= collected;
+  // Logged every pass: this is the slow part of the wipe, and without it a
+  // sweep that is merely grinding is indistinguishable from one that is stuck.
+  PBL_LOG_DBG("Shred sweep pass: %d sector(s), %d of budget left", collected, s_sweep_budget);
+  if ((collected > 0) && (s_sweep_budget > 0)) {
+    prv_schedule_next_pass();
+    return;
+  }
+  PBL_LOG_DBG("Shred sweep finished, %d of budget left", s_sweep_budget);
+}
+
+static void prv_sweep_timer_cb(void *unused) {
+  system_task_add_callback(prv_sweep_pass, NULL);
+}
+
+static void prv_schedule_next_pass(void) {
+  if (s_sweep_timer == TIMER_INVALID_ID) {
+    s_sweep_timer = new_timer_create();
+  }
+  if (s_sweep_timer == TIMER_INVALID_ID) {
+    // No timer to be had; fall back to running straight on, which is worse for
+    // responsiveness but still finishes.
+    system_task_add_callback(prv_sweep_pass, NULL);
+    return;
+  }
+  new_timer_start(s_sweep_timer, SWEEP_PASS_GAP_MS, prv_sweep_timer_cb, NULL, 0 /* flags */);
+}
+
+static void prv_start_sweep(void) {
+  s_sweep_budget = SWEEP_SECTORS_MAX;
+  prv_schedule_next_pass();
+}
+
 static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool sweep) {
   PBL_LOG_INFO("Shredding: %s", security_lock_shred_reason_str(reason));
 
@@ -176,7 +247,14 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
   prv_erase_flash_region(FLASH_REGION_CD_BEGIN, FLASH_REGION_CD_END, "coredump");
 #endif
 #ifdef FLASH_REGION_DEBUG_DB_BEGIN
+  // flash_logging caches an address inside this region, so erasing it without
+  // telling the logger leaves that pointing at erased flash. Everything logs,
+  // so a confused logger takes the task with it -- which presented as the
+  // console going silent for good while the display carried on fine.
+  flash_logging_set_enabled(false);
   prv_erase_flash_region(FLASH_REGION_DEBUG_DB_BEGIN, FLASH_REGION_DEBUG_DB_END, "debug log");
+  flash_logging_init();
+  flash_logging_set_enabled(true);
 #endif
   wiped |= SECURITY_SHRED_NON_BLOBDB_BIT;
 
@@ -189,10 +267,7 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
   // because blocking services_normal_early_init() for that long leaves the
   // watch sitting on the boot splash looking dead.
   if (sweep) {
-    status_t gc_rv = pfs_gc_deleted_sectors();
-    if (gc_rv != S_SUCCESS) {
-      PBL_LOG_ERR("Shred sweep incomplete: %" PRId32, (int32_t)gc_rv);
-    }
+    prv_start_sweep();
   }
 
   if (dbs_running) {
@@ -239,15 +314,6 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
 
 uint32_t security_lock_shred(SecurityShredReason reason) {
   return prv_shred(reason, true /* dbs_running */, true /* sweep */);
-}
-
-//! Runs the sweep that security_lock_shred_early() skipped.
-static void prv_deferred_sweep(void *unused) {
-  PBL_LOG_DBG("Running deferred shred sweep");
-  const PebbleTask task = pebble_task_get_current();
-  task_watchdog_mask_clear(task);
-  pfs_gc_deleted_sectors();
-  task_watchdog_mask_set(task);
 }
 
 uint32_t security_lock_shred_early(SecurityShredReason reason) {
@@ -302,9 +368,8 @@ void security_lock_finish_boot_shred(void) {
   }
   s_boot_shred_pending_notify = false;
   // The boot shred zeroed the files but skipped the sector sweep to keep boot
-  // quick; catch up now that the system is running and can do it in the
-  // background.
-  system_task_add_callback(prv_deferred_sweep, NULL);
+  // quick; catch up now that the system is running.
+  prv_start_sweep();
   bt_persistent_storage_set_unfaithful(true);
   PBL_LOG_DBG("Marked unfaithful after boot shred");
 #endif

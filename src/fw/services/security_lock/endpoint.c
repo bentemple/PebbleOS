@@ -149,7 +149,7 @@ static void prv_handle_lock(const uint8_t *msg, size_t len) {
     return;
   }
   const SecurityLockReasonMsg *lock_msg = (const SecurityLockReasonMsg *)msg;
-  PBL_LOG_DBG("LOCK from phone, reason %" PRIu8, lock_msg->reason);
+  PBL_LOG_INFO("LOCK from phone, reason %" PRIu8, lock_msg->reason);
   launcher_task_add_callback(prv_lock_callback, (void *)(uintptr_t)lock_msg->reason);
 }
 
@@ -204,6 +204,14 @@ void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *ms
 // Disconnect deadline
 ////////////////////////////////////
 
+static void prv_deadline_shred_callback(void *unused) {
+  security_lock_shred(SecurityShredReasonDisconnectTimeout);
+}
+
+static void prv_rollback_shred_callback(void *unused) {
+  security_lock_shred(SecurityShredReasonClockRollback);
+}
+
 //! Runs on KernelMain because locking touches the app and modal stacks.
 static void prv_deadline_lock_callback(void *unused) {
   if (security_lock_is_locked()) {
@@ -225,7 +233,7 @@ static void prv_deadline_check(void *unused) {
   const time_t now = rtc_get_time();
   if (security_lock_note_time(now)) {
     // Clock wound back, most likely to outrun a deadline.
-    security_lock_shred(SecurityShredReasonClockRollback);
+    launcher_task_add_callback(prv_rollback_shred_callback, NULL);
     return;
   }
 
@@ -233,9 +241,11 @@ static void prv_deadline_check(void *unused) {
   // mattering more than the lock screen is the whole point.
   if (security_lock_shred_deadline_expired(now)) {
     PBL_LOG_DBG("Shred delay elapsed while disconnected");
-    security_lock_shred(SecurityShredReasonDisconnectTimeout);
     security_lock_clear_deadlines();
     prv_stop_deadline_timer();
+    // KernelMain: the wipe closes and reopens databases, which deadlocks if
+    // driven from here. See security_lock_engage().
+    launcher_task_add_callback(prv_deadline_shred_callback, NULL);
     return;
   }
 

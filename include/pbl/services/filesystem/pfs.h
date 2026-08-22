@@ -159,12 +159,16 @@ extern status_t pfs_shred(const char *name);
 //! still in use is preserved, so the filesystem can be scrubbed without the
 //! collateral damage of pfs_format().
 //!
-//! Slow: each 64K sector erase takes roughly 150ms and there can be hundreds of
-//! them. Callers should expect this to block for a long time.
+//! Each 64K sector erase takes roughly 150ms and the filesystem is hundreds of
+//! sectors, so a full sweep blocks its task for minutes. Pass a budget and call
+//! repeatedly to spread that out; the sweep resumes where it left off because
+//! collected sectors no longer contain deleted pages.
 //!
-//! @return - S_SUCCESS, or the last error encountered. The sweep continues past
+//! @param max_sectors - stop after collecting this many, or 0 for no limit
+//! @return - number of sectors collected. Zero means there was nothing left to
+//!           do, which is how a caller knows to stop. The sweep continues past
 //!           a failing region rather than aborting.
-extern status_t pfs_gc_deleted_sectors(void);
+extern int pfs_gc_deleted_sectors(int max_sectors);
 
 //! Returns the size of the file. (The amount of bytes that can be read out)
 extern size_t pfs_get_file_size(int fd);

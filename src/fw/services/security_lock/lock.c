@@ -50,21 +50,17 @@ static void prv_release_ui_lockout(void) {
   modal_manager_set_min_priority(ModalPriorityMin);
 }
 
-static void prv_shred_callback(void *data) {
-  security_lock_shred((SecurityShredReason)(uintptr_t)data);
-}
-
 void security_lock_engage(SecurityShredReason reason) {
   PBL_ASSERT_TASK(PebbleTask_KernelMain);
 
   const uint8_t pin_len = security_lock_get_pin_len();
   if (pin_len < SECURITY_LOCK_PIN_MIN_LEN || pin_len > SECURITY_LOCK_PIN_MAX_LEN) {
     PBL_LOG_WRN("No PIN configured; shredding without locking");
-    system_task_add_callback(prv_shred_callback, (void *)(uintptr_t)reason);
+    security_lock_shred(reason);
     return;
   }
 
-  PBL_LOG_DBG("Engaging lock: %s", security_lock_shred_reason_str(reason));
+  PBL_LOG_INFO("Engaging lock: %s", security_lock_shred_reason_str(reason));
 
   security_lock_set_state(SecurityLockStateLocked);
   security_lock_ui_lockout();
@@ -90,10 +86,13 @@ void security_lock_engage(SecurityShredReason reason) {
     compositor_display_update(NULL);
   }
 
-  // Handed to KernelBG rather than run here. The wipe takes seconds of flash
-  // erases, and doing that on KernelMain freezes the watch solid for the
-  // duration -- the lock screen would not even draw.
-  system_task_add_callback(prv_shred_callback, (void *)(uintptr_t)reason);
+  // Deliberately on this task rather than KernelBG. The wipe closes and
+  // reopens pin_db, reminder_db and timeline_event, and factory_reset_fast
+  // does the same from the launcher task for a reason: driven from KernelBG
+  // they deadlock, which the watchdog used to hide by resetting the watch and
+  // now simply hangs it. The freeze while it runs is the same one a factory
+  // reset causes, and the slow sector sweep is deferred anyway.
+  security_lock_shred(reason);
 }
 
 void security_lock_disengage(void) {

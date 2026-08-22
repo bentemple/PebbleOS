@@ -10,6 +10,7 @@
 #include <pbl/drivers/rng.h>
 #include <pbl/drivers/rtc.h>
 #include <pbl/logging/logging.h>
+#include "kernel/event_loop.h"
 #include "pbl/os/mutex.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/settings/settings_file.h"
@@ -459,9 +460,10 @@ bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts
   mutex_unlock(s_mutex);
 
   if (duress) {
-    // Deferred to KernelBG so the unlock completes and the watch looks
-    // completely ordinary while the wipe runs behind it.
-    system_task_add_callback(prv_duress_shred_callback, NULL);
+    // Deferred so the unlock completes first and the watch looks ordinary,
+    // but onto KernelMain: the wipe closes and reopens databases and
+    // deadlocks if driven from KernelBG.
+    launcher_task_add_callback(prv_duress_shred_callback, NULL);
   }
 
   return matched;
