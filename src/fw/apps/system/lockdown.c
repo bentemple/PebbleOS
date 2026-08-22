@@ -7,16 +7,61 @@
 
 #include "applib/app.h"
 #include "applib/ui/app_window_stack.h"
+#include "applib/ui/dialogs/simple_dialog.h"
 #include "applib/ui/window.h"
 #include "applib/ui/window_private.h"
 #include "kernel/event_loop.h"
 #include "kernel/pbl_malloc.h"
 #include "pbl/services/i18n/i18n.h"
+#include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/security_lock_ui.h"
+#include <pbl/logging/logging.h>
 #include "process_state/app_state/app_state.h"
 #include "resource/resource_ids.auto.h"
 #include "shell/prefs.h"
+
+//! Long enough to read a sentence. The app has nothing else to show and closes
+//! when this pops.
+#define NO_PIN_MESSAGE_TIMEOUT_MS 3000
+
+#define NO_PIN_MESSAGE_BUF_SIZE 96
+
+//! Whether engaging would actually lock anything.
+//!
+//! The same bounds security_lock_engage() applies before taking its
+//! shred-without-locking branch: a stored length outside them is one the lock
+//! screen could never prompt for.
+static bool prv_pin_is_set(void) {
+  const uint8_t pin_len = security_lock_get_pin_len();
+  return (pin_len >= SECURITY_LOCK_PIN_MIN_LEN) && (pin_len <= SECURITY_LOCK_PIN_MAX_LEN);
+}
+
+//! Say why, and erase nothing.
+//!
+//! Reachable despite the app being hidden: a Quick Launch binding is an install
+//! id in prefs, and clearing the PIN does not touch it. Silence would leave the
+//! user with a chord that stopped working and no reason given.
+static void prv_show_pin_required(void) {
+  SimpleDialog *simple_dialog = simple_dialog_create(WINDOW_NAME("Lockdown"));
+  if (!simple_dialog) {
+    // The app exits on an empty window stack, which is still the right outcome.
+    PBL_LOG_ERR("Could not create the Lockdown no-PIN message");
+    return;
+  }
+
+  char text[NO_PIN_MESSAGE_BUF_SIZE];
+  /// Shown when Lockdown is opened with no PIN configured. It erases the
+  /// watch's copy of the phone's content and locks behind the PIN, so without
+  /// one there is nothing to lock and it refuses to run.
+  i18n_get_with_buffer(i18n_noop("Set a PIN in Settings to use Lockdown"), text, sizeof(text));
+
+  Dialog *dialog = simple_dialog_get_dialog(simple_dialog);
+  dialog_set_text(dialog, text);
+  dialog_set_icon(dialog, RESOURCE_ID_GENERIC_WARNING_LARGE);
+  dialog_set_timeout(dialog, NO_PIN_MESSAGE_TIMEOUT_MS);
+  app_simple_dialog_push(simple_dialog);
+}
 
 //! Runs on KernelMain, which security_lock_engage() asserts on: it drives the
 //! app and modal stacks and holds the task for the length of the erase.
@@ -29,6 +74,12 @@ static void prv_engage_callback(void *unused) {
 }
 
 static void prv_main(void) {
+  if (!prv_pin_is_set()) {
+    prv_show_pin_required();
+    app_event_loop();
+    return;
+  }
+
   // A window with nothing in it, purely to keep the app alive for the handful
   // of milliseconds before the kernel closes it. app_event_loop()'s first act
   // is to kill any app whose window stack is empty, and that kill event would
@@ -54,9 +105,9 @@ static void prv_main(void) {
   app_free(window);
 }
 
-//! Two records rather than one mutable one. The registry calls this on every
-//! enumeration and from more than one task, so reading the preference here
-//! leaves nothing to invalidate and nothing to write.
+//! Static records rather than one mutable one. The registry calls this on every
+//! enumeration and from more than one task, so reading the PIN and the
+//! preference here leaves nothing to invalidate and nothing to write.
 //!
 //! They differ only in visibility, and must keep differing only in that: Quick
 //! Launch stores an install id resolved from the UUID, so a binding made while
@@ -82,6 +133,26 @@ const PebbleProcessMd *lockdown_app_get_app_info(void) {
     .name = i18n_noop("Lockdown"),
     .icon_resource_id = RESOURCE_ID_GENERIC_WARNING_TINY,
   };
+
+  // Nowhere at all without a PIN. Hidden rather than the record above because
+  // Quick Launch's picker only filters out entries that are hidden and not
+  // Quick-Launch-visible -- and an app that cannot lock does not belong on that
+  // list either.
+  static const PebbleProcessMdSystem s_no_pin = {
+    .common = {
+      .main_func = prv_main,
+      .uuid = LOCKDOWN_UUID,
+      .visibility = ProcessVisibilityHidden,
+    },
+    .name = i18n_noop("Lockdown"),
+    .icon_resource_id = RESOURCE_ID_GENERIC_WARNING_TINY,
+  };
+
+  // Outranks the preference: engaging without a PIN erases the watch and leaves
+  // it unlocked, which is not what anything named Lockdown may offer.
+  if (!prv_pin_is_set()) {
+    return &s_no_pin.common;
+  }
 
   return shell_prefs_get_lockdown_app_in_launcher() ? &s_listed.common : &s_unlisted.common;
 }

@@ -303,11 +303,12 @@ void i18n_free_all(const void *owner) {}
 // Helpers
 ////////////////////////////////////
 
-//! Row order when no PIN is configured.
+//! Row order when no PIN is configured. Everything that needs one to mean
+//! anything is gone, Show in Launcher included: the Lockdown app is itself
+//! hidden without a PIN, so the row would toggle nothing that exists.
 #define ROW_SET_PIN 0
 #define ROW_PIN_LENGTH_UNSET 1
-#define ROW_SHOW_IN_LAUNCHER_UNSET 2
-#define ROWS_WITHOUT_PIN 3
+#define ROWS_WITHOUT_PIN 2
 //! Row order once one is.
 #define ROW_CHANGE_PIN 0
 #define ROW_PIN_LENGTH_SET 1
@@ -769,7 +770,7 @@ void test_settings_security__length_menu_opens_on_the_current_choice(void) {
 
 void test_settings_security__lock_now_is_hidden_without_a_pin(void) {
   prv_open_settings();
-  // Only Set PIN, PIN Length and Show in Launcher; nothing here erases anything.
+  // Only Set PIN and PIN Length; nothing here erases anything.
   cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
   prv_draw(ROWS_WITHOUT_PIN - 1);
   cl_assert(strcmp("Lock Now", s_drawn_title) != 0);
@@ -805,15 +806,40 @@ void test_settings_security__lock_now_defers_engage_to_the_kernel(void) {
 // Show in Launcher
 ////////////////////////////////////
 
-// Unlike Lock Now, this row is not gated on a PIN existing. It controls what
-// the launcher lists, and the Lockdown app is listed whether or not a PIN is
-// set -- a control that disappeared while the thing it controls stayed would
-// be worse than no control.
-void test_settings_security__show_in_launcher_is_offered_without_a_pin(void) {
+// Gated on the PIN like the rows above it. Without one the Lockdown app is
+// hidden from the launcher and from Quick Launch, so a row offering to show it
+// in the launcher would control something that is not there.
+void test_settings_security__show_in_launcher_is_hidden_without_a_pin(void) {
   prv_open_settings();
   cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
-  prv_draw(ROW_SHOW_IN_LAUNCHER_UNSET);
+  for (uint16_t row = 0; row < ROWS_WITHOUT_PIN; row++) {
+    prv_draw(row);
+    cl_assert(strcmp("Show in Launcher", s_drawn_title) != 0);
+  }
+}
+
+// And the pref is left exactly as the user last set it, so it still means what
+// it meant once a PIN comes back.
+void test_settings_security__hiding_the_row_does_not_rewrite_the_pref(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_select(ROW_SHOW_IN_LAUNCHER_SET);
+  cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
+
+  prv_select(ROW_CLEAR_PIN);
+  prv_submit("1234");
+  s_module->appear(s_module);
+  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
+  cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
+
+  prv_select(ROW_SET_PIN);
+  prv_submit("4321");
+  prv_submit("4321");
+  s_module->appear(s_module);
+  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
+  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
   cl_assert_equal_s("Show in Launcher", s_drawn_title);
+  cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
 }
 
 void test_settings_security__show_in_launcher_is_the_last_row_with_a_pin(void) {
@@ -825,12 +851,13 @@ void test_settings_security__show_in_launcher_is_the_last_row_with_a_pin(void) {
 }
 
 void test_settings_security__show_in_launcher_toggles(void) {
+  prv_install_pin("1234");
   prv_open_settings();
 
-  prv_select(ROW_SHOW_IN_LAUNCHER_UNSET);
+  prv_select(ROW_SHOW_IN_LAUNCHER_SET);
   cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
 
-  prv_select(ROW_SHOW_IN_LAUNCHER_UNSET);
+  prv_select(ROW_SHOW_IN_LAUNCHER_SET);
   cl_assert(shell_prefs_get_lockdown_app_in_launcher());
 }
 
@@ -839,13 +866,14 @@ void test_settings_security__show_in_launcher_toggles(void) {
 // about security -- someone holding the watch has no reason to trigger a wipe
 // of the data they came for.
 void test_settings_security__show_in_launcher_says_quick_launch_still_works(void) {
+  prv_install_pin("1234");
   prv_open_settings();
 
-  prv_draw(ROW_SHOW_IN_LAUNCHER_UNSET);
+  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
   cl_assert_equal_s("On", s_drawn_subtitle);
 
-  prv_select(ROW_SHOW_IN_LAUNCHER_UNSET);
-  prv_draw(ROW_SHOW_IN_LAUNCHER_UNSET);
+  prv_select(ROW_SHOW_IN_LAUNCHER_SET);
+  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
   cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
   cl_assert(strstr(s_drawn_subtitle, "Quick Launch") != NULL);
 }
@@ -853,10 +881,11 @@ void test_settings_security__show_in_launcher_says_quick_launch_still_works(void
 // The row reads the pref rather than a copy taken when the menu opened, so a
 // change made elsewhere is not shown as its old value.
 void test_settings_security__show_in_launcher_reflects_the_stored_value(void) {
+  prv_install_pin("1234");
   shell_prefs_set_lockdown_app_in_launcher(false);
   prv_open_settings();
 
-  prv_draw(ROW_SHOW_IN_LAUNCHER_UNSET);
+  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
   cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
 }
 

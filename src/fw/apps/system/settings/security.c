@@ -658,9 +658,11 @@ static bool prv_item_is_visible(SettingsSecurityData *data, uint16_t item) {
       // without locking. Offering it under this name would be a lie.
       return prv_pin_is_set(data);
     case SettingsSecurityLockdownInLauncher:
-      // Deliberately not gated on the PIN, unlike the row above. This one says
-      // what the launcher lists, and the Lockdown app is listed either way.
-      return true;
+      // The app itself is hidden from the launcher and from Quick Launch
+      // without a PIN, so this would offer to show something that is not there.
+      // The stored preference is left alone and means what it meant again as
+      // soon as a PIN is set.
+      return prv_pin_is_set(data);
     default:
       return true;
   }
