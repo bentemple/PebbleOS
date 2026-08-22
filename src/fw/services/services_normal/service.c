@@ -7,6 +7,7 @@
 
 #include "applib/event_service_client.h"
 #include <pbl/drivers/rtc.h>
+#include <pbl/logging/logging.h>
 #include "kernel/events.h"
 #include "process_management/app_install_manager.h" // FIXME: This should really be in services/
 #include "pbl/services/activity/activity.h"
@@ -85,8 +86,14 @@ void services_normal_early_init(void) {
   // Deliberately here, right after the filesystem is mounted and before
   // display_init(), bt_driver_init() or services_init(): if a shred is owed it
   // must happen before a pixel is drawn or the radio comes up.
+  //
+  // Bracketed by markers because a hang in here looks exactly like a healthy
+  // quiet boot: the splash is up, nothing else logs yet, and there is no other
+  // way to tell the two apart.
+  PBL_LOG_INFO("SECBOOT early_init enter");
   security_lock_init();
   security_lock_handle_boot();
+  PBL_LOG_INFO("SECBOOT early_init leave");
 #endif
 }
 
@@ -98,8 +105,8 @@ void services_normal_init(void) {
   blob_db_init_dbs();
 
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
-  // Bonding storage did not exist yet when a boot shred ran, so the
-  // "resend everything" flag is applied here instead.
+  // The slow half of a boot shred: the sector sweep and the "resend
+  // everything" flag, neither of which could run before the system was up.
   security_lock_finish_boot_shred();
   security_lock_endpoint_init();
 #endif

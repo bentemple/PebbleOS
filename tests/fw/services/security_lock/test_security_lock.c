@@ -419,6 +419,28 @@ void test_security_lock__equal_delays_are_allowed(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(300, 300));
 }
 
+//! Never is not an erase scheduled before the lock, it is no timed erase at
+//! all, so the ordering rule must not reject it.
+void test_security_lock__shred_delay_can_be_never(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(600, SECURITY_LOCK_SHRED_DELAY_NEVER));
+  cl_assert_equal_i(600, security_lock_get_lock_delay_s());
+  cl_assert_equal_i(SECURITY_LOCK_SHRED_DELAY_NEVER, security_lock_get_shred_delay_s());
+}
+
+void test_security_lock__never_survives_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(600, SECURITY_LOCK_SHRED_DELAY_NEVER));
+  prv_simulate_reboot();
+  cl_assert_equal_i(SECURITY_LOCK_SHRED_DELAY_NEVER, security_lock_get_shred_delay_s());
+}
+
+//! Never disarms the countdown, not the deadline machinery: an unarmed shred
+//! deadline is already how "nothing pending" is represented.
+void test_security_lock__a_never_shred_deadline_never_expires(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1000, 0));
+  cl_assert(security_lock_lock_deadline_expired(1000));
+  cl_assert(!security_lock_shred_deadline_expired(999999));
+}
+
 // Deadline arming and re-arming
 ////////////////////////////////////
 

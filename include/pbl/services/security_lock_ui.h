@@ -23,6 +23,13 @@
 //! protects anything.
 void security_lock_engage(SecurityShredReason reason);
 
+//! Enter the locked state without shredding. KernelMain only.
+//!
+//! For the disconnect lock deadline, where the separate shred deadline decides
+//! when -- or whether -- the content goes. Does nothing if no PIN is configured;
+//! there is nothing to lock and the caller did not ask for an erase.
+void security_lock_engage_lock_only(SecurityShredReason reason);
+
 //! Leave the locked state after a correct PIN. KernelMain only.
 void security_lock_disengage(void);
 
@@ -33,3 +40,15 @@ void security_lock_disengage(void);
 //! security_lock_engage() and the lock screen want this applied -- a watch that
 //! rebooted straight into the locked state never ran engage().
 void security_lock_ui_lockout(void);
+
+//! Get everything that could be showing, holding or re-reading the content off
+//! the screen, and repaint. KernelMain only.
+//!
+//! Called by the shred itself before the first file is zeroed, so no trigger
+//! can forget. A consumer left up over a wipe does not merely show stale text:
+//! the notification window re-reads its backing record on every reload and
+//! dereferences the NULL layout it gets back when the read fails.
+//!
+//! Leaves the lock screen alone -- it displays nothing that gets shredded, and
+//! the duress and attempts-exhausted wipes are triggered from it.
+void security_lock_ui_quiesce(void);

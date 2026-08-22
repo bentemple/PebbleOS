@@ -114,12 +114,20 @@ static status_t prv_flush_runtime(void) {
 }
 
 void security_lock_init(void) {
+  PBL_LOG_INFO("SECBOOT init enter");
   PBL_ASSERTN(!s_initialized);
   s_mutex = mutex_create();
 
   mutex_lock(s_mutex);
   SecurityLockRuntime rt;
+  // Bracketed by markers because this is not the read-only operation it looks
+  // like: settings_file_open() opens with OP_FLAG_WRITE and creates the file
+  // when it is missing, which allocates a page and can take a synchronous
+  // garbage collect with it. This runs before anything else is up, so a boot
+  // that dies in here dies with nothing at all on the wire.
+  PBL_LOG_INFO("SECBOOT init read enter");
   status_t rv = prv_read(RT_KEY, &rt, sizeof(rt));
+  PBL_LOG_INFO("SECBOOT init read leave rv=%" PRId32, (int32_t)rv);
   if (rv == S_SUCCESS && rt.version == RECORD_VERSION) {
     s_runtime_cache = rt;
   } else {
@@ -133,9 +141,9 @@ void security_lock_init(void) {
   s_initialized = true;
   mutex_unlock(s_mutex);
 
-  PBL_LOG_DBG("Security lock init: state=%" PRIu8 " attempts=%" PRIu8 " shred_pending=%d",
-              s_runtime_cache.state, s_runtime_cache.failed_attempts,
-              (int)s_runtime_cache.shred_pending);
+  PBL_LOG_INFO("SECBOOT init leave state=%" PRIu8 " attempts=%" PRIu8 " shred_pending=%d",
+               s_runtime_cache.state, s_runtime_cache.failed_attempts,
+               (int)s_runtime_cache.shred_pending);
 }
 
 void security_lock_deinit(void) {
@@ -529,7 +537,8 @@ status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s)
   }
   // Shredding before locking would destroy the data without ever showing the
   // user a chance to stop it, so the order is enforced rather than trusted.
-  if (shred_delay_s < lock_delay_s) {
+  // Never is exempt: it schedules nothing, so there is no order to get wrong.
+  if ((shred_delay_s != SECURITY_LOCK_SHRED_DELAY_NEVER) && (shred_delay_s < lock_delay_s)) {
     return E_INVALID_ARGUMENT;
   }
   mutex_lock(s_mutex);

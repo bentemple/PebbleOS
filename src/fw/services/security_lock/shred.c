@@ -4,7 +4,6 @@
 #include "pbl/services/security_lock_shred.h"
 
 #include <inttypes.h>
-#include <string.h>
 
 #include <pbl/drivers/flash.h>
 #include <pbl/drivers/rtc.h>
@@ -12,7 +11,6 @@
 #include <pbl/logging/logging.h>
 #include "debug/flash_logging.h"
 #include "flash_region/flash_region.h"
-#include "kernel/event_loop.h"
 #include "kernel/events.h"
 #include "kernel/pebble_tasks.h"
 #include "pbl/services/blob_db/pin_db.h"
@@ -22,9 +20,12 @@
 #include "pbl/services/new_timer/new_timer.h"
 #include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_endpoint.h"
+#include "pbl/services/security_lock_ui.h"
 #include "pbl/services/system_task.h"
 #include "pbl/services/timeline/event.h"
 #include "pbl/util/size.h"
+#include "system/bootbits.h"
+#include "system/passert.h"
 
 #if !defined(CONFIG_RECOVERY_FW)
 #include "pbl/services/bluetooth/bluetooth_persistent_storage.h"
@@ -35,10 +36,15 @@ PBL_LOG_MODULE_DECLARE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_L
 //! Files whose entire contents are destroyed, and the BlobDB each one backs.
 //!
 //! Health/activity ("activity", "healthdb"), app persist storage ("ps<uuid>"),
-//! the app database ("appdb") and the BT bonding store are deliberately absent:
-//! the phone cannot restore them, so wiping them would make the feature
-//! destructive enough that nobody would turn it on. That is a conscious trade
-//! and it means a seized watch still yields step and sleep history.
+//! the app database ("appdb"), the BT bonding store and the datalogging queue
+//! ("dls<session>") are deliberately absent: the phone cannot restore them, so
+//! wiping them would make the feature destructive enough that nobody would turn
+//! it on. That is a conscious trade and it means a seized watch still yields
+//! step and sleep history.
+//!
+//! Datalogging is the sharpest case. It is the outbound watch-to-phone queue,
+//! so by definition it holds the one thing the phone does not have yet, and
+//! most of what it holds is the activity data this list already spares.
 static const struct {
   const char *filename;
   BlobDBId db_id;
@@ -57,9 +63,12 @@ static const struct {
     {"appglancedb", BlobDBIdAppGlance},
 };
 
-//! Datalogging session files are named "<prefix><session id>", so they have to
-//! be matched by prefix rather than listed.
-static const char *DLS_PREFIX = "dls";
+//! True for the duration of prv_shred(). See security_lock_is_shredding().
+static bool s_shredding;
+
+bool security_lock_is_shredding(void) {
+  return s_shredding;
+}
 
 const char *security_lock_shred_reason_str(SecurityShredReason reason) {
   switch (reason) {
@@ -83,30 +92,6 @@ const char *security_lock_shred_reason_str(SecurityShredReason reason) {
   }
 }
 
-static bool prv_is_dls_file(const char *name) {
-  return strncmp(name, DLS_PREFIX, strlen(DLS_PREFIX)) == 0;
-}
-
-//! Shred every datalogging buffer still waiting to be uploaded.
-static bool prv_shred_dls_files(void) {
-  PFSFileListEntry *list = pfs_create_file_list(prv_is_dls_file);
-  if (list == NULL) {
-    return false;
-  }
-
-  bool any = false;
-  PFSFileListEntry *entry = list;
-  while (entry != NULL) {
-    if (pfs_shred(entry->name) == S_SUCCESS) {
-      any = true;
-    }
-    entry = (PFSFileListEntry *)list_get_next(&entry->list_node);
-  }
-
-  pfs_delete_file_list(list);
-  return any;
-}
-
 //! Erase a raw flash region that sits outside the filesystem.
 static void prv_erase_flash_region(uint32_t begin, uint32_t end, const char *what) {
   if (begin >= end) {
@@ -114,7 +99,7 @@ static void prv_erase_flash_region(uint32_t begin, uint32_t end, const char *wha
   }
   PBL_LOG_DBG("Erasing %s region", what);
   flash_region_erase_optimal_range_no_watchdog(begin, begin, end, end);
-  task_watchdog_bit_set_all();
+  task_watchdog_bit_set(pebble_task_get_current());
 }
 
 //! Sectors collected per pass, and the gap between passes.
@@ -127,15 +112,14 @@ static void prv_erase_flash_region(uint32_t begin, uint32_t end, const char *wha
 #define SWEEP_SECTORS_PER_PASS 4
 #define SWEEP_PASS_GAP_MS 250
 
-//! Hard ceiling on a whole sweep.
+//! Hard ceiling on a whole sweep: one pass over the filesystem, sized from the
+//! filesystem itself rather than guessed.
 //!
 //! Collecting a sector relocates the live pages in it, which leaves fresh
 //! deleted pages behind, so "collected nothing this pass" is not a state the
 //! sweep reliably reaches -- without a ceiling it reschedules itself forever
-//! and starves the task it runs on. One pass over the filesystem is what the
-//! shred needs; anything beyond that is chasing its own tail.
-#define SWEEP_SECTORS_MAX 384
-
+//! and starves the task it runs on. Every sector holding stale payload is
+//! reachable within one pass; anything beyond that is chasing its own tail.
 static int s_sweep_budget;
 static TimerID s_sweep_timer = TIMER_INVALID_ID;
 
@@ -157,11 +141,17 @@ static void prv_sweep_pass(void *unused) {
   // Logged every pass: this is the slow part of the wipe, and without it a
   // sweep that is merely grinding is indistinguishable from one that is stuck.
   PBL_LOG_DBG("Shred sweep pass: %d sector(s), %d of budget left", collected, s_sweep_budget);
-  if ((collected > 0) && (s_sweep_budget > 0)) {
-    prv_schedule_next_pass();
+  if (collected == 0) {
+    PBL_LOG_DBG("Shred sweep finished, %d of budget left", s_sweep_budget);
     return;
   }
-  PBL_LOG_DBG("Shred sweep finished, %d of budget left", s_sweep_budget);
+  if (s_sweep_budget <= 0) {
+    // A whole pass over the filesystem was not enough. Loud, because stopping
+    // here leaves stale copies on flash and nothing else will notice.
+    PBL_LOG_WRN("Shred sweep hit its ceiling with sectors still to collect");
+    return;
+  }
+  prv_schedule_next_pass();
 }
 
 static void prv_sweep_timer_cb(void *unused) {
@@ -182,12 +172,40 @@ static void prv_schedule_next_pass(void) {
 }
 
 static void prv_start_sweep(void) {
-  s_sweep_budget = SWEEP_SECTORS_MAX;
+  s_sweep_budget = pfs_get_erase_region_count();
   prv_schedule_next_pass();
 }
 
-static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool sweep) {
+//! @param dbs_running the blob dbs are up, so they have to be closed and
+//!                    reopened around the wipe and events can be published
+//! @param finish      run the tail here -- sector sweep, unfaithful flag,
+//!                    clearing shred_pending. False at early boot, where
+//!                    security_lock_finish_boot_shred() does it instead.
+static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool finish) {
   PBL_LOG_INFO("Shredding: %s", security_lock_shred_reason_str(reason));
+
+  // Refuse fresh content for the duration. security_lock_is_locked() does not
+  // cover this: the duress PIN and the clock-rollback trigger both wipe while
+  // the watch is unlocked. Set before anything else so nothing slips in during
+  // the teardown below.
+  s_shredding = true;
+
+  if (dbs_running) {
+    // Not merely where every trigger already happens to run -- the teardown
+    // below drives the app and modal stacks, which only this task may touch.
+    PBL_ASSERT_TASK(PebbleTask_KernelMain);
+
+    // Close anything that is showing, holding or about to re-read what is
+    // being destroyed, before a single byte goes. Consumers do not survive the
+    // wipe gracefully: the notification window re-reads its backing record on
+    // every reload and dereferences the NULL layout it gets back when that
+    // read fails, which is a wild jump on KernelMain, not a blank screen.
+    //
+    // Synchronous and inline on purpose. security_lock_engage() used to do
+    // this for itself, which is exactly why the lock trigger was safe and the
+    // bare shred triggers were not; doing it here means no caller can forget.
+    security_lock_ui_quiesce();
+  }
 
   // Erasing takes seconds and there is no way to yield through it, so the
   // watchdog has to stop supervising this task or it resets us mid-wipe --
@@ -203,6 +221,13 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
   // Announce before wiping, so anything holding data of its own gets the
   // chance to destroy it rather than being told afterwards. Not emitted at
   // early boot: nothing is subscribed yet and the event system is not up.
+  //
+  // For apps, which run on their own task -- this is destined for the SDK so a
+  // watchapp can erase its own persist storage. It is NOT a general "everyone
+  // cleans up first" hook: event_put() is asynchronous and the launcher task
+  // drains the queue, which is the task this function is holding, so a
+  // KernelMain-resident subscriber could not be reached until the wipe was
+  // over. Anything of ours goes in security_lock_ui_quiesce() above instead.
   if (dbs_running) {
     PebbleEvent event = {
         .type = PEBBLE_SECURITY_SHRED_EVENT,
@@ -229,11 +254,7 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
     } else {
       PBL_LOG_ERR("Failed to shred %s: %" PRId32, s_shred_targets[i].filename, (int32_t)rv);
     }
-    task_watchdog_bit_set_all();
-  }
-
-  if (prv_shred_dls_files()) {
-    wiped |= SECURITY_SHRED_NON_BLOBDB_BIT;
+    task_watchdog_bit_set(pebble_task_get_current());
   }
 
   // A coredump is a snapshot of RAM and can contain notification text or
@@ -252,27 +273,34 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
   prv_erase_flash_region(FLASH_REGION_DEBUG_DB_BEGIN, FLASH_REGION_DEBUG_DB_END, "debug log");
   flash_logging_init();
   flash_logging_set_enabled(true);
+  PBL_LOG_INFO("SECSTAGE debug log erased");
 #endif
+  // The raw-flash erases above. Every layout defines at least the debug-log
+  // region, so this reports the same as it always has.
   wiped |= SECURITY_SHRED_NON_BLOBDB_BIT;
 
   // Zeroing each file kills the live copy, but earlier garbage collection,
   // settings_file compaction and OP_FLAG_OVERWRITE writes scatter superseded
   // copies with no record of where. This is the only thing that reaches those.
   //
-  // It is also the slow half: a sector erase is ~150ms and the filesystem is
-  // hundreds of sectors. At early boot it is deferred rather than run inline,
-  // because blocking services_normal_early_init() for that long leaves the
-  // watch sitting on the boot splash looking dead.
-  if (sweep) {
+  // It is also the slow half, and the least urgent: the live data is already
+  // gone by this point, so this is cleanup. It runs in scheduled slices, and
+  // at early boot it is left to security_lock_finish_boot_shred() entirely.
+  if (finish) {
     prv_start_sweep();
   }
+  PBL_LOG_INFO("SECSTAGE sweep started=%d", (int)finish);
 
   if (dbs_running) {
     // Bring the databases back up against the now-empty files.
     pin_db_init();
+    PBL_LOG_INFO("SECSTAGE pin_db_init done");
     reminder_db_init();
+    PBL_LOG_INFO("SECSTAGE reminder_db_init done");
     timeline_event_init();
+    PBL_LOG_INFO("SECSTAGE timeline_event_init done");
     notification_storage_reset_and_init();
+    PBL_LOG_INFO("SECSTAGE notification_storage done");
   }
 
 #if !defined(CONFIG_RECOVERY_FW)
@@ -284,14 +312,23 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
   // Tell the phone its copy is authoritative. Gadgetbridge does not currently
   // read this flag (an explicit SHRED_COMPLETE message covers that), but the
   // official app does, and it costs nothing to be correct for both.
-  if (notify_phone) {
+  if (finish && notify_phone) {
     bt_persistent_storage_set_unfaithful(true);
   }
 #endif
 
-  security_lock_set_shred_pending(false);
+  if (finish) {
+    security_lock_set_shred_pending(false);
+  }
 
   task_watchdog_mask_set(task);
+
+  // The files are gone and the databases are back up, so new content is safe
+  // to accept again. Deliberately not held for the sector sweep: that runs in
+  // scheduled slices for minutes and only touches already-deleted sectors, and
+  // dropping notifications for that long would be a far worse bug.
+  s_shredding = false;
+
   PBL_LOG_INFO("Shred complete, wiped bitmap 0x%" PRIx32, wiped);
 
 #if !defined(CONFIG_RECOVERY_FW)
@@ -307,59 +344,97 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool swe
 }
 
 uint32_t security_lock_shred(SecurityShredReason reason) {
-  return prv_shred(reason, true /* dbs_running */, true /* sweep */);
+  return prv_shred(reason, true /* dbs_running */, true /* finish */);
 }
 
+//! Set when a wipe ran at early boot, so the half that needs a running system
+//! can follow. RAM only: the persisted shred_pending flag is what survives a
+//! power cut, and it stays set until the tail has run.
+static bool s_boot_shred_tail_owed;
+
 void security_lock_handle_boot(void) {
+  PBL_LOG_INFO("SECBOOT handle_boot enter");
+
+#if !defined(CONFIG_RELEASE)
+  // Test/debug affordance. A watch that wipes on every boot cannot be
+  // instrumented, because each run starts from a different filesystem and the
+  // wipe is the thing under suspicion. Deliberately not honoured in a release
+  // build, where nothing should be able to talk the watch out of the wipe.
+  if (boot_bit_test(BOOT_BIT_SECURITY_SKIP_BOOT_WIPE)) {
+    s_boot_shred_tail_owed = false;
+    PBL_LOG_INFO("SECBOOT handle_boot leave owed=0 skipped=1");
+    return;
+  }
+#endif
+
   const time_t now = rtc_get_time();
 
-  // A backwards jump is the only rollback signal available: there is no
-  // reboot-persistent monotonic clock on this hardware, so an attacker could
-  // otherwise wind the clock back to dodge the disconnect deadline.
+  // There is no reboot-persistent monotonic clock, so the high-water mark is
+  // the only rollback signal there is. Noting it here is also what advances
+  // it, so it has to happen on every boot and not only when a wipe is owed.
   const bool rolled_back = security_lock_note_time(now);
 
   // Rebooting is the one reliable way past the lock screen: SELECT+BACK held
   // for five seconds hard resets from the button ISR, below anything software
-  // can intercept. So any reboot while a response was armed -- locked, or
-  // counting down towards it -- owes a wipe. Restarting must never be cheaper
-  // than waiting, and everything destroyed comes back from the phone.
-  const bool was_armed = security_lock_is_locked() ||
-                         (security_lock_get_lock_deadline() != 0) ||
+  // can intercept. So any reboot while a response was armed shreds. Restarting
+  // must never be cheaper than waiting, and everything destroyed comes back
+  // from the phone.
+  const bool was_armed = security_lock_is_locked() || (security_lock_get_lock_deadline() != 0) ||
                          (security_lock_get_shred_deadline() != 0);
 
-  if (!security_lock_is_shred_pending() && !was_armed &&
-      !security_lock_shred_deadline_expired(now) && !rolled_back) {
+  SecurityShredReason reason;
+  if (security_lock_is_shred_pending()) {
+    // A previous shred did not finish. Whatever it was, redo it.
+    reason = SecurityShredReasonUnknown;
+  } else if (security_lock_shred_deadline_expired(now)) {
+    reason = SecurityShredReasonDisconnectTimeout;
+  } else if (rolled_back && (security_lock_get_state() != SecurityLockStateDisabled)) {
+    // Winding the clock back is how a deadline gets outrun. Gated on the
+    // feature being in use, exactly as the running deadline check is.
+    reason = SecurityShredReasonClockRollback;
+  } else if (was_armed) {
+    reason = SecurityShredReasonRebootWhileLocked;
+  } else {
+    PBL_LOG_INFO("SECBOOT handle_boot leave owed=0 skipped=0");
     return;
   }
 
-  // Deliberately does not wipe anything here. This runs inside
-  // services_normal_early_init(), before the display, the radio or the task
-  // that owns the databases exist, and erasing flash from it blocks the boot
-  // for as long as it takes -- which presented as a watch sitting on the boot
-  // splash, apparently dead. Record what is owed and let
-  // security_lock_finish_boot_shred() run it once the system is up.
-  //
-  // The delay is safe: the flag persists, so the wipe survives power being
-  // pulled and simply happens on a later boot, and the watch comes back locked
-  // in the meantime.
-  security_lock_set_shred_pending(true);
+  // A watch that was still counting down never reached the lock screen, and the
+  // reboot has just destroyed its content anyway. Lock it, so a shred is not
+  // followed by a watch that opens straight up.
   if (!security_lock_is_locked() && (security_lock_get_pin_len() != 0)) {
     security_lock_set_state(SecurityLockStateLocked);
   }
-  PBL_LOG_INFO("Wipe owed at boot; deferred until the system is up");
-}
 
-//! Runs the wipe that security_lock_handle_boot() deferred.
-static void prv_boot_shred_callback(void *unused) {
-  security_lock_shred(SecurityShredReasonRebootWhileLocked);
+  // Zeroing the files happens here, inline, before the display or the radio
+  // exist -- that is the whole point of hooking early boot, and it is the fast
+  // part. The sector sweep only erases superseded copies, so it waits for
+  // security_lock_finish_boot_shred() rather than holding up the boot.
+  prv_shred(reason, false /* dbs_running */, false /* finish */);
+  s_boot_shred_tail_owed = true;
+
+  PBL_LOG_INFO("SECBOOT handle_boot leave owed=1 skipped=0 locked=%d reason=%s",
+               (int)security_lock_is_locked(), security_lock_shred_reason_str(reason));
 }
 
 void security_lock_finish_boot_shred(void) {
-  if (!security_lock_is_shred_pending()) {
+  if (!s_boot_shred_tail_owed) {
     return;
   }
-  // On the launcher task, like every other path: the wipe closes and reopens
-  // databases and deadlocks if driven from KernelBG.
-  PBL_LOG_INFO("Running the wipe deferred from boot");
-  launcher_task_add_callback(prv_boot_shred_callback, NULL);
+  s_boot_shred_tail_owed = false;
+
+  PBL_LOG_INFO("Finishing the boot shred");
+
+  // Slices scheduled on KernelBG, so nothing blocks here.
+  prv_start_sweep();
+
+#if !defined(CONFIG_RECOVERY_FW)
+  // Bonding storage did not exist when the wipe ran. A boot shred is never a
+  // duress shred, so the phone is always told to resend.
+  bt_persistent_storage_set_unfaithful(true);
+#endif
+
+  // The data is gone; what is left is cleanup, which does not need resuming on
+  // a later boot.
+  security_lock_set_shred_pending(false);
 }

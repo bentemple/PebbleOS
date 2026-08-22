@@ -26,37 +26,43 @@ typedef enum {
 //! Bit position in the wiped-database bitmap for a given BlobDBId.
 #define SECURITY_SHRED_DB_BIT(id) (1u << (id))
 
-//! Set when content outside any BlobDB was wiped too (notification storage
-//! backing file, datalogging buffers, coredumps). Informational.
+//! Set when content outside any BlobDB was wiped too: the coredump and
+//! debug-log flash regions. Informational.
 #define SECURITY_SHRED_NON_BLOBDB_BIT (1u << 31)
 
 //! Destroy the sensitive content the watch holds.
 //!
 //! Wipes notifications, calendar pins, reminders, contacts, weather, iOS
-//! notification prefs, app glances and pending datalogging buffers, then
-//! sweeps the filesystem so stale copies left by earlier deletes and
-//! compactions are physically erased. Also erases the coredump and debug-log
-//! flash regions, which sit outside the filesystem and can contain a RAM
-//! snapshot including notification text.
+//! notification prefs and app glances, then sweeps the filesystem so stale
+//! copies left by earlier deletes and compactions are physically erased. Also
+//! erases the coredump and debug-log flash regions, which sit outside the
+//! filesystem and can contain a RAM snapshot including notification text.
 //!
 //! Deliberately does NOT touch health/activity storage, third-party app
-//! persist storage, the app database, or Bluetooth pairing keys. Everything
-//! wiped here can be restored by the phone on reconnect, which is what makes
-//! the shred safe to trigger aggressively. See the proposal for the reasoning.
+//! persist storage, the app database, Bluetooth pairing keys, or the pending
+//! datalogging queue. Everything wiped here can be restored by the phone on
+//! reconnect, which is what makes the shred safe to trigger aggressively. See
+//! the proposal for the reasoning.
 //!
 //! Marks the watch unfaithful so the phone knows to resend, and leaves a
 //! shred-pending flag set for the duration so an interrupted run resumes at
 //! next boot.
 //!
-//! Blocking and slow (seconds to tens of seconds, dominated by sector erases).
-//! Must not be called from a task that cannot tolerate that.
+//! Blocking (seconds, dominated by the raw-flash region erases). The
+//! filesystem sweep is scheduled rather than run inline, so it outlives the
+//! call. Must not be called from a task that cannot tolerate the blocking.
 //!
 //! @param reason why the shred was triggered, for logging and the phone
 //! @return bitmap of what was wiped, for SHRED_COMPLETE
 uint32_t security_lock_shred(SecurityShredReason reason);
 
-//! Run the wipe that security_lock_handle_boot() deferred, now that the
-//! system is up. No-op if none is owed.
+//! Finish a shred that ran at early boot: sweep the filesystem, tell the phone
+//! its copy is authoritative, and clear the shred-pending flag. No-op if no
+//! boot shred happened.
+//!
+//! Split out because none of it can run from early boot -- Bluetooth
+//! persistent storage does not exist yet, and the sweep is slow cleanup that
+//! has no business holding up the boot. Call from services_normal_init().
 void security_lock_finish_boot_shred(void);
 
 //! Decide whether a shred is owed at boot and run it if so.
@@ -65,6 +71,11 @@ void security_lock_finish_boot_shred(void);
 //! (a reboot is the one way past the lock screen, so it has to cost the data),
 //! when a disconnect deadline lapsed while powered off, or when the clock has
 //! been wound back.
+//!
+//! Zeroes the files inline, which is what puts the data out of reach before a
+//! pixel is drawn or the radio comes up. Skips the blob-db close/reopen
+//! (nothing has opened them yet) and leaves the sector sweep to
+//! security_lock_finish_boot_shred().
 //!
 //! Call from services_normal_early_init() immediately after pfs_init().
 void security_lock_handle_boot(void);

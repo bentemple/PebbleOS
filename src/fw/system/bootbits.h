@@ -27,6 +27,11 @@ typedef enum BootBitValue {
   BOOT_BIT_FORCE_PRF = 0x1 << 17,
   BOOT_BIT_NEW_PRF_AVAILABLE = 0x1 << 18,
   BOOT_BIT_SHUTDOWN_REQUESTED = 0x1 << 19, //!< Bootloader hard power-off instead of jumping to fw.
+  //! Test/debug only: suppress the security-lock boot wipe. A boot bit rather
+  //! than a setting because it has to be readable from
+  //! security_lock_handle_boot(), where an RTC backup register is the only
+  //! store that costs no flash access. Does not survive a battery pull.
+  BOOT_BIT_SECURITY_SKIP_BOOT_WIPE = 0x1 << 20,
 } BootBitValue;
 
 void boot_bit_init();

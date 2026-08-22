@@ -34,6 +34,17 @@
 #define SECURITY_LOCK_DEFAULT_LOCK_DELAY_S (5 * 60)
 #define SECURITY_LOCK_DEFAULT_SHRED_DELAY_S (30 * 60)
 
+//! Shred delay meaning "no timed erase". The watch still locks when the phone
+//! goes away, and every explicit trigger -- the phone's LOCK command, Lock Now,
+//! a duress PIN, exhausted attempts -- still erases. Only the disconnect
+//! countdown is disarmed.
+//!
+//! Zero rather than a large sentinel because an unarmed deadline is already 0
+//! everywhere, so this needs no special case beyond the ordering check in
+//! security_lock_set_delays(). Note the phone cannot select it: CONFIGURE reads
+//! a zero delay field as "leave this one alone".
+#define SECURITY_LOCK_SHRED_DELAY_NEVER 0
+
 //! Slack allowed when comparing against the persisted time high-water mark.
 //! The RTC can legitimately drift or be nudged by a resync; anything beyond
 //! this reads as a deliberate rollback.
@@ -101,6 +112,17 @@ bool security_lock_attempts_exhausted(void);
 bool security_lock_is_shred_pending(void);
 status_t security_lock_set_shred_pending(bool pending);
 
+//! True only while security_lock_shred() is actually running.
+//!
+//! RAM only, and deliberately not the persisted flag above: that one stays set
+//! across a reboot until the wipe finishes, so gating incoming content on it
+//! would drop everything for as long as an interrupted shred went unresumed.
+//!
+//! Needed on top of security_lock_is_locked() because two triggers shred while
+//! the watch is unlocked -- the duress PIN, where unlocking normally is the
+//! entire point, and a detected clock rollback.
+bool security_lock_is_shredding(void);
+
 //! Absolute wall-clock deadlines armed when the phone disconnects. 0 means
 //! not armed.
 //!
@@ -111,6 +133,9 @@ status_t security_lock_set_shred_pending(bool pending);
 //! disconnect it shreds. Persisted, so a reboot keeps the user's choice.
 uint32_t security_lock_get_lock_delay_s(void);
 uint32_t security_lock_get_shred_delay_s(void);
+
+//! @return E_INVALID_ARGUMENT if the erase would land before the lock.
+//!         SECURITY_LOCK_SHRED_DELAY_NEVER is exempt: it schedules no erase.
 status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s);
 
 time_t security_lock_get_lock_deadline(void);

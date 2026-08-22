@@ -218,7 +218,9 @@ static void prv_deadline_lock_callback(void *unused) {
     return;
   }
   PBL_LOG_DBG("Lock delay elapsed while disconnected");
-  security_lock_engage(SecurityShredReasonDisconnectTimeout);
+  // Lock only. The shred deadline is what erases, and it may be disarmed
+  // outright; shredding here would collapse the two delays into one.
+  security_lock_engage_lock_only(SecurityShredReasonDisconnectTimeout);
 }
 
 //! Re-checked on a timer rather than armed as one long timeout, because a
@@ -231,8 +233,10 @@ static void prv_deadline_check(void *unused) {
   }
 
   const time_t now = rtc_get_time();
-  if (security_lock_note_time(now)) {
-    // Clock wound back, most likely to outrun a deadline.
+  // Only a shred deadline can be outrun by winding the clock back. With the
+  // timed erase turned off there is nothing to outrun, and shredding anyway
+  // would be the one outcome the user asked not to have.
+  if (security_lock_note_time(now) && (security_lock_get_shred_deadline() != 0)) {
     launcher_task_add_callback(prv_rollback_shred_callback, NULL);
     return;
   }
@@ -281,9 +285,12 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
   }
 
   if (event->is_open) {
-    // Reconnecting stops the countdown but does not unlock: if the watch
-    // already locked, only the PIN clears that. The deadlines stay cleared
-    // until the next unexpected disconnect arms them again.
+    // Reconnecting stops the countdown but never unlocks. A reconnect proves
+    // nothing an attacker cannot arrange: Android keeps Bluetooth up while the
+    // screen is locked and Gadgetbridge reconnects on its own, so a phone
+    // carried out of range and back -- or shielded and unshielded -- would
+    // otherwise clear the lock without anyone knowing the PIN. Only the PIN
+    // clears a lock, whatever caused it.
     security_lock_clear_deadlines();
     prv_stop_deadline_timer();
     return;
@@ -296,13 +303,24 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
   // Both are measured from the disconnect, so a watch that is already locked
   // still gets the full shred delay rather than an immediate wipe.
   const time_t now = rtc_get_time();
-  const time_t lock_deadline = now + (time_t)security_lock_get_lock_delay_s();
-  const time_t shred_deadline = now + (time_t)security_lock_get_shred_delay_s();
-  security_lock_set_deadlines(security_lock_is_locked() ? 0 : lock_deadline, shred_deadline);
+  const uint32_t shred_delay_s = security_lock_get_shred_delay_s();
+  const time_t lock_deadline =
+      security_lock_is_locked() ? 0 : now + (time_t)security_lock_get_lock_delay_s();
+  // Never leaves the shred deadline unarmed, which is already how "nothing
+  // pending" is spelled everywhere else.
+  const time_t shred_deadline =
+      (shred_delay_s == SECURITY_LOCK_SHRED_DELAY_NEVER) ? 0 : now + (time_t)shred_delay_s;
+  security_lock_set_deadlines(lock_deadline, shred_deadline);
+
+  if ((lock_deadline == 0) && (shred_deadline == 0)) {
+    // Already locked with no timed erase: nothing left to count down.
+    PBL_LOG_DBG("Phone gone: already locked, no timed erase");
+    return;
+  }
   prv_start_deadline_timer();
 
   PBL_LOG_DBG("Phone gone: lock in %" PRIu32 "s, shred in %" PRIu32 "s",
-              security_lock_get_lock_delay_s(), security_lock_get_shred_delay_s());
+              security_lock_get_lock_delay_s(), shred_delay_s);
 }
 
 void security_lock_endpoint_init(void) {
