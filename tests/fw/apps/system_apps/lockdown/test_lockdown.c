@@ -29,6 +29,7 @@ static bool s_in_launcher;
 static uint8_t s_pin_len;
 static SecurityLockState s_state;
 static int s_engage_calls;
+static int s_erase_now_calls;
 static SecurityShredReason s_engage_reason;
 static void (*s_deferred_callback)(void *);
 static Window *s_pushed_window;
@@ -64,7 +65,15 @@ SecurityLockState security_lock_get_state(void) {
   return s_state;
 }
 
+//! Both funnels, counted separately. Which one the app reaches is the whole
+//! subject of this file now: the chord is the trigger you can hit by accident,
+//! so it has to be the recoverable one.
 void security_lock_engage(SecurityShredReason reason) {
+  s_erase_now_calls++;
+  s_engage_reason = reason;
+}
+
+void security_lock_engage_with_countdown(SecurityShredReason reason) {
   s_engage_calls++;
   s_engage_reason = reason;
 }
@@ -156,6 +165,7 @@ void test_lockdown__initialize(void) {
   s_pin_len = 4;
   s_state = SecurityLockStateArmed;
   s_engage_calls = 0;
+  s_erase_now_calls = 0;
   s_engage_reason = SecurityShredReasonManualPanic;
   s_deferred_callback = NULL;
   s_pushed_window = NULL;
@@ -272,10 +282,22 @@ void test_lockdown__defers_engage_to_the_kernel(void) {
 }
 
 // No prompt, no dialog, no second window: a panic button that asks is a worse
-// panic button, and everything the erase destroys comes back from the phone.
+// panic button, and the erase it starts is one the PIN can still call off.
 void test_lockdown__asks_nothing_before_engaging(void) {
   prv_run_app();
   cl_assert_equal_i(1, s_pushes);
+}
+
+// The chord and the app are the triggers you can hit by accident -- a pocket, a
+// misremembered binding, the wrong launcher row -- so they take the recoverable
+// one. Erasing on the spot is a separate action, and it lives in Settings where
+// it cannot be reached without meaning to.
+void test_lockdown__starts_a_countdown_rather_than_erasing_on_the_spot(void) {
+  prv_run_app();
+  s_deferred_callback(NULL);
+
+  cl_assert_equal_i(1, s_engage_calls);
+  cl_assert_equal_i(0, s_erase_now_calls);
 }
 
 // app_event_loop()'s first act is to kill any app whose window stack is empty.

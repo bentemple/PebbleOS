@@ -26,11 +26,33 @@
 //! Callers must not assume it took: check security_lock_is_locked().
 void security_lock_engage(SecurityShredReason reason);
 
-//! Enter the locked state without shredding. KernelMain only.
+//! Enter the locked state without shredding and without arming anything.
+//! KernelMain only.
 //!
-//! For the disconnect lock deadline, where the separate shred deadline decides
-//! when -- or whether -- the content goes. Same refusals as above.
+//! For the disconnect lock deadline, where the shred deadline was armed by the
+//! same disconnect and already decides when -- or whether -- the content goes.
+//! Same refusals as above.
 void security_lock_engage_lock_only(SecurityShredReason reason);
+
+//! Enter the locked state and start the erase countdown. KernelMain only.
+//!
+//! What every manual trigger does: the Lockdown app, the Quick Launch chord,
+//! the Settings row and the phone's LOCK. The watch locks at once and erases
+//! at the configured Erase After unless the PIN is entered first, exactly as a
+//! disconnect countdown behaves -- so a lockdown hit by accident costs a PIN
+//! entry rather than the watch's content.
+//!
+//! With Erase After set to Never this locks and arms nothing. That is how a
+//! user gets lock-without-erase, and it is why there is no separate lock-only
+//! action on any menu.
+//!
+//! The countdown is recorded as manual, so a reconnect cannot cancel it and a
+//! later disconnect cannot reschedule it. It never postpones an erase that was
+//! already scheduled: a disconnect countdown already closer than the configured
+//! delay is kept, and merely promoted to manual.
+//!
+//! Same refusals as above.
+void security_lock_engage_with_countdown(SecurityShredReason reason);
 
 //! Leave the locked state after a correct PIN. KernelMain only.
 void security_lock_disengage(void);

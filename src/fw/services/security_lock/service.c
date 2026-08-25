@@ -33,7 +33,7 @@ PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LE
 //! discarding the config record throws the PIN away. Sharing one number meant a
 //! runtime-only field could disarm the lock on upgrade; these cannot.
 #define CFG_RECORD_VERSION 4
-#define RT_RECORD_VERSION 5
+#define RT_RECORD_VERSION 6
 
 //! Config: written rarely (only when the PIN changes).
 static const char *CFG_KEY = "cfg";
@@ -62,9 +62,14 @@ typedef struct PACKED {
   //! Something has been written to the storage a shred destroys since the last
   //! one ran. False means a shred has nothing new to destroy.
   bool dirty_since_shred;
-  //! Both measured from the disconnect, not from each other.
+  //! The lock deadline is measured from the disconnect; the erase deadline from
+  //! whatever started the lockdown. Neither is measured from the other.
   time_t lock_deadline;
   time_t shred_deadline;
+  //! SecurityCountdownSource. What may retire the countdown above depends
+  //! entirely on this, and a reboot while locked is a designed-for case, so it
+  //! is persisted alongside the deadlines rather than kept in RAM.
+  uint8_t countdown_source;
   time_t time_high_water;
   uint32_t lock_delay_s;
   uint32_t shred_delay_s;
@@ -102,7 +107,15 @@ static void prv_runtime_defaults(SecurityLockRuntime *rt) {
       // "dirty": a redundant shred is waste, a skipped one is a data leak.
       .dirty_since_shred = true,
       .lock_delay_s = SECURITY_LOCK_DEFAULT_LOCK_DELAY_S,
+      // Never. The one default the fallback path is worth thinking twice about:
+      // a discarded runtime record belonged to someone who had the feature on
+      // and may have chosen an erase delay. Reinstating a real one would arm a
+      // destructive countdown they never asked for as a side effect of a
+      // firmware upgrade, and the erase is opt-in precisely so that cannot
+      // happen. Everything that protects them is untouched -- the watch still
+      // locks, and the triggers that erase outright still erase.
       .shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S,
+      .countdown_source = SecurityCountdownNone,
   };
 }
 
@@ -278,13 +291,17 @@ status_t security_lock_set_state(SecurityLockState state) {
   mutex_lock(s_mutex);
   s_runtime_cache.state = (uint8_t)state;
   if (state != SecurityLockStateLocked) {
-    // Leaving the locked state retires any pending disconnect deadline and
-    // the attempt counter along with it.
-    // Unlocking retires any countdown. It does not re-arm on reconnect --
-    // only the next unexpected disconnect arms it again.
+    // Leaving the locked state retires any countdown and the attempt counter
+    // along with it, whatever armed the countdown. This is the only thing that
+    // retires a manual one -- the PIN is what gets here -- so the reason goes
+    // with the deadlines rather than being left to describe nothing.
+    //
+    // A disconnect countdown does not re-arm on reconnect either; only the next
+    // unexpected disconnect arms one again.
     s_runtime_cache.failed_attempts = 0;
     s_runtime_cache.lock_deadline = 0;
     s_runtime_cache.shred_deadline = 0;
+    s_runtime_cache.countdown_source = SecurityCountdownNone;
   }
   status_t rv = prv_flush_runtime();
   mutex_unlock(s_mutex);
@@ -844,20 +861,33 @@ time_t security_lock_get_shred_deadline(void) {
   return s_runtime_cache.shred_deadline;
 }
 
-status_t security_lock_set_deadlines(time_t lock_deadline, time_t shred_deadline) {
+SecurityCountdownSource security_lock_get_countdown_source(void) {
+  if (!s_initialized) {
+    return SecurityCountdownNone;
+  }
+  return (SecurityCountdownSource)s_runtime_cache.countdown_source;
+}
+
+status_t security_lock_set_deadlines(time_t lock_deadline, time_t shred_deadline,
+                                     SecurityCountdownSource source) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
   mutex_lock(s_mutex);
   s_runtime_cache.lock_deadline = lock_deadline;
   s_runtime_cache.shred_deadline = shred_deadline;
+  // "Armed" has one spelling. A source that outlived its deadlines would
+  // describe a countdown that is not there, and every reader asking "is this
+  // manual" before asking "is anything armed" would believe it.
+  s_runtime_cache.countdown_source =
+      ((lock_deadline == 0) && (shred_deadline == 0)) ? SecurityCountdownNone : (uint8_t)source;
   status_t rv = prv_flush_runtime();
   mutex_unlock(s_mutex);
   return rv;
 }
 
 status_t security_lock_clear_deadlines(void) {
-  return security_lock_set_deadlines(0, 0);
+  return security_lock_set_deadlines(0, 0, SecurityCountdownNone);
 }
 
 bool security_lock_lock_deadline_expired(time_t now) {

@@ -35,6 +35,7 @@ static SecurityLockState s_state;
 static bool s_blackout;
 static time_t s_lock_deadline;
 static time_t s_shred_deadline;
+static SecurityCountdownSource s_countdown_source;
 static uint8_t s_pin_len = 4;
 static uint32_t s_lock_delay_s = 60;
 static uint32_t s_shred_delay_s = 600;
@@ -44,6 +45,7 @@ static bool s_rolled_back;
 static int s_blackouts;
 static int s_locks_engaged;
 static int s_shreds;
+static SecurityShredReason s_last_shred_reason;
 
 //! The registered regular timer, or NULL when none is running.
 static RegularTimerInfo *s_timer;
@@ -85,14 +87,24 @@ time_t security_lock_get_shred_deadline(void) {
   return s_shred_deadline;
 }
 
-status_t security_lock_set_deadlines(time_t lock_deadline, time_t shred_deadline) {
+//! Mirrors the store's one invariant: a source cannot outlive the countdown it
+//! describes. A fake that kept a stale Manual around would hide exactly the bug
+//! the guards below are written against.
+status_t security_lock_set_deadlines(time_t lock_deadline, time_t shred_deadline,
+                                     SecurityCountdownSource source) {
   s_lock_deadline = lock_deadline;
   s_shred_deadline = shred_deadline;
+  s_countdown_source =
+      ((lock_deadline == 0) && (shred_deadline == 0)) ? SecurityCountdownNone : source;
   return S_SUCCESS;
 }
 
 status_t security_lock_clear_deadlines(void) {
-  return security_lock_set_deadlines(0, 0);
+  return security_lock_set_deadlines(0, 0, SecurityCountdownNone);
+}
+
+SecurityCountdownSource security_lock_get_countdown_source(void) {
+  return s_countdown_source;
 }
 
 bool security_lock_lock_deadline_expired(time_t now) {
@@ -109,14 +121,19 @@ bool security_lock_note_time(time_t now) {
 
 uint32_t security_lock_shred(SecurityShredReason reason) {
   s_shreds++;
+  s_last_shred_reason = reason;
   return 0;
 }
 
 //! Stands in for lock.c, including its refusals -- the endpoint decides what to
 //! tell the phone from whether the watch actually ended up locked, so a fake
 //! that always locked would hide the case this exists for.
+static bool prv_engage_refused(void) {
+  return (s_state == SecurityLockStateDisabled) || (s_pin_len < SECURITY_LOCK_PIN_MIN_LEN);
+}
+
 void security_lock_engage(SecurityShredReason reason) {
-  if ((s_state == SecurityLockStateDisabled) || (s_pin_len < SECURITY_LOCK_PIN_MIN_LEN)) {
+  if (prv_engage_refused()) {
     return;
   }
   s_locks_engaged++;
@@ -126,6 +143,18 @@ void security_lock_engage(SecurityShredReason reason) {
 void security_lock_engage_lock_only(SecurityShredReason reason) {
   s_locks_engaged++;
   s_state = SecurityLockStateLocked;
+}
+
+//! Same refusals, then the arming half -- which is not faked, because it is the
+//! thing under test. lock.c arms only once the lock has taken, so a refusal
+//! here must leave no countdown behind either.
+void security_lock_engage_with_countdown(SecurityShredReason reason) {
+  if (prv_engage_refused()) {
+    return;
+  }
+  s_locks_engaged++;
+  s_state = SecurityLockStateLocked;
+  security_lock_endpoint_arm_manual_countdown();
 }
 
 time_t rtc_get_time(void) {
@@ -264,6 +293,7 @@ void test_security_lock_endpoint__initialize(void) {
   s_blackout = false;
   s_lock_deadline = 0;
   s_shred_deadline = 0;
+  s_countdown_source = SecurityCountdownNone;
   s_pin_len = 4;
   s_lock_delay_s = 60;
   s_shred_delay_s = 600;
@@ -272,6 +302,7 @@ void test_security_lock_endpoint__initialize(void) {
   s_blackouts = 0;
   s_locks_engaged = 0;
   s_shreds = 0;
+  s_last_shred_reason = SecurityShredReasonUnknown;
   s_timer = NULL;
 
   // endpoint.c tracks its timer and any queued resync request in statics, and
@@ -283,6 +314,7 @@ void test_security_lock_endpoint__initialize(void) {
   s_timer = NULL;
   s_lock_deadline = 0;
   s_shred_deadline = 0;
+  s_countdown_source = SecurityCountdownNone;
   s_msgs_sent = 0;
   s_last_msg_len = 0;
   s_sent_count = 0;
@@ -299,6 +331,68 @@ void test_security_lock_endpoint__a_phone_lock_locks_and_is_acked(void) {
   cl_assert_equal_i(1, s_locks_engaged);
   cl_assert_equal_i(1, prv_count_sent(CMD_LOCK_ACK));
   cl_assert_equal_i(SecurityShredReasonPhoneLockdown, s_last_msg[1]);
+}
+
+//! LOCK arrives over the air, from a phone that may be the thing that was
+//! taken. Erasing on it outright is an unconditional remote wipe available to
+//! anything that can speak the protocol, so it gets the countdown the chord
+//! gets: the watch is still on the user's wrist and the PIN can stop it.
+void test_security_lock_endpoint__a_phone_lock_arms_the_countdown_rather_than_erasing(void) {
+  prv_phone_lock(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(SecurityLockStateLocked, s_state);
+  cl_assert_equal_i(0, s_shreds);
+  cl_assert_equal_i(s_now + 600, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+}
+
+//! And the countdown it arms is the user's, not the phone's: the same phone
+//! reconnecting cannot call it off. Otherwise LOCK would be undone by the very
+//! next reconnect, which is a thing the phone does by itself.
+void test_security_lock_endpoint__the_phone_cannot_undo_its_own_lock_by_reconnecting(void) {
+  prv_phone_lock(SecurityShredReasonPhoneLockdown);
+  const time_t armed_at = s_shred_deadline;
+
+  prv_session_event(false);
+  prv_session_event(true);
+
+  cl_assert_equal_i(armed_at, s_shred_deadline);
+  cl_assert_equal_i(SecurityLockStateLocked, s_state);
+}
+
+//! The ack still means the lock took. What it no longer means is that the
+//! content is gone -- SHRED_COMPLETE says that, when and if the erase runs.
+void test_security_lock_endpoint__a_phone_lock_is_acked_before_anything_is_erased(void) {
+  prv_phone_lock(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(1, prv_count_sent(CMD_LOCK_ACK));
+  cl_assert_equal_i(0, s_shreds);
+}
+
+//! A phone LOCK on a watch with the timed erase off locks and erases nothing,
+//! the same as every other manual trigger. Never means never, whoever asks.
+void test_security_lock_endpoint__a_phone_lock_with_never_only_locks(void) {
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+
+  prv_phone_lock(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(SecurityLockStateLocked, s_state);
+  cl_assert_equal_i(0, s_shreds);
+  cl_assert_equal_i(0, s_shred_deadline);
+  cl_assert_equal_i(1, prv_count_sent(CMD_LOCK_ACK));
+}
+
+//! A refused lock leaves no countdown behind. Arming one for a lock that never
+//! took would erase a watch that was never locked.
+void test_security_lock_endpoint__a_refused_lock_arms_no_countdown(void) {
+  s_state = SecurityLockStateArmed;
+  s_pin_len = 0;
+
+  prv_phone_lock(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(0, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownNone, s_countdown_source);
+  cl_assert(!prv_timer_running());
 }
 
 //! The defect this whole switch exists to dissolve. A watch with the feature
@@ -501,6 +595,267 @@ void test_security_lock_endpoint__init_retires_a_stale_deadline_when_off(void) {
 
   cl_assert_equal_i(0, s_shred_deadline);
   cl_assert(!prv_timer_running());
+}
+
+// The manual countdown
+////////////////////////////////////
+//
+// A lockdown the user asked for locks at once and erases at the configured
+// Erase After, and only the PIN gets in between. Everything below is about what
+// must not be allowed to interfere with that.
+
+//! Locks now, erases later. The erase is the Erase After setting measured from
+//! the press, not from a disconnect that never happened.
+void test_security_lock_endpoint__a_manual_lockdown_locks_now_and_arms_the_erase(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(SecurityLockStateLocked, s_state);
+  cl_assert_equal_i(0, s_shreds);
+  cl_assert_equal_i(s_now + 600, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+  cl_assert(prv_timer_running());
+}
+
+//! There is nothing left to lock, so no lock deadline is armed. One left over
+//! from a disconnect goes with it: the lock it was counting towards has
+//! happened.
+void test_security_lock_endpoint__a_manual_lockdown_arms_no_lock_deadline(void) {
+  prv_session_event(false);
+  cl_assert(s_lock_deadline != 0);
+
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(0, s_lock_deadline);
+}
+
+//! Erase After set to Never is how a user gets lock-without-erase, which is why
+//! there is no separate lock-only action anywhere in the UI. It has to actually
+//! arm nothing rather than arm a countdown nothing acts on.
+void test_security_lock_endpoint__a_manual_lockdown_with_never_only_locks(void) {
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(SecurityLockStateLocked, s_state);
+  cl_assert_equal_i(0, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownNone, s_countdown_source);
+  cl_assert_equal_i(0, s_shreds);
+}
+
+//! And it stays only a lock: nothing later turns the erase back on by itself.
+void test_security_lock_endpoint__a_never_lockdown_does_not_erase_on_a_tick(void) {
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  s_now += 100000;
+  if (prv_timer_running()) {
+    prv_tick();
+  }
+
+  cl_assert_equal_i(0, s_shreds);
+  cl_assert_equal_i(SecurityLockStateLocked, s_state);
+}
+
+void test_security_lock_endpoint__a_manual_countdown_erases_when_it_expires(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  s_now += 600;
+  prv_tick();
+
+  cl_assert_equal_i(1, s_shreds);
+  // Reported as what it was. A manual lockdown told the phone "disconnect
+  // timeout" would be a lie about a watch that never lost its phone.
+  cl_assert_equal_i(SecurityShredReasonManualPanic, s_last_shred_reason);
+  cl_assert_equal_i(SecurityCountdownNone, s_countdown_source);
+}
+
+//! THE hazard. A session opening is right to retire a countdown the phone's
+//! absence armed -- the phone is back, so the countdown is moot -- and says
+//! nothing whatever about one the user asked for. A Bluetooth blip cancelling a
+//! deliberate lockdown is the bug that only surfaces the day someone needs it.
+void test_security_lock_endpoint__a_reconnect_does_not_cancel_a_manual_lockdown(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+  const time_t armed_at = s_shred_deadline;
+
+  prv_session_event(false);
+  prv_session_event(true);
+
+  cl_assert_equal_i(armed_at, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+  cl_assert(prv_timer_running());
+}
+
+//! Not once, either. Gadgetbridge reconnects on its own, so this is the shape
+//! an attacker with the phone actually produces.
+void test_security_lock_endpoint__repeated_reconnects_do_not_cancel_it(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+  const time_t armed_at = s_shred_deadline;
+
+  for (int i = 0; i < 5; ++i) {
+    prv_session_event(false);
+    prv_session_event(true);
+  }
+
+  cl_assert_equal_i(armed_at, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+}
+
+//! And the countdown still fires afterwards, rather than merely surviving as a
+//! record nothing is watching.
+void test_security_lock_endpoint__a_manual_countdown_still_fires_after_a_reconnect(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  prv_session_event(false);
+  prv_session_event(true);
+  s_now += 600;
+  prv_tick();
+
+  cl_assert_equal_i(1, s_shreds);
+}
+
+//! The reverse direction, and just as easy to get wrong: the phone going away
+//! while a manual countdown runs must not reschedule it. Arming afresh would
+//! restart the erase clock, and with a longer Erase After it would postpone the
+//! erase the user asked for by walking out of Bluetooth range.
+void test_security_lock_endpoint__losing_the_phone_does_not_restart_a_manual_countdown(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+  const time_t armed_at = s_shred_deadline;
+
+  s_now += 300;
+  prv_session_event(false);
+
+  cl_assert_equal_i(armed_at, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+  cl_assert(prv_timer_running());
+}
+
+//! Nor shorten it. The disconnect delays describe a countdown that has not
+//! started; the one that is running belongs to the user.
+void test_security_lock_endpoint__losing_the_phone_does_not_shorten_a_manual_countdown(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+  const time_t armed_at = s_shred_deadline;
+
+  s_shred_delay_s = 10;
+  prv_session_event(false);
+
+  cl_assert_equal_i(armed_at, s_shred_deadline);
+}
+
+//! Nor turn it off, which is what an Erase After of Never would otherwise do to
+//! a countdown that was already running.
+void test_security_lock_endpoint__losing_the_phone_with_never_does_not_disarm_it(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+  const time_t armed_at = s_shred_deadline;
+
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+  prv_session_event(false);
+
+  cl_assert_equal_i(armed_at, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+}
+
+//! Pressing Lockdown must never buy time. A disconnect countdown already closer
+//! than the configured delay is kept rather than replaced -- and promoted to
+//! manual, so the reconnect that would have cancelled it no longer can.
+void test_security_lock_endpoint__a_manual_lockdown_never_postpones_an_erase(void) {
+  prv_session_event(false);
+  const time_t disconnect_deadline = s_shred_deadline;
+
+  // Long enough after the disconnect that a fresh countdown would land later.
+  s_now += 300;
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(disconnect_deadline, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+}
+
+//! But it does bring one forward. A user who reaches for Lockdown wants it
+//! sooner, not to wait out whatever the disconnect had scheduled.
+void test_security_lock_endpoint__a_manual_lockdown_can_bring_an_erase_forward(void) {
+  prv_session_event(false);
+
+  s_shred_delay_s = 60;
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(s_now + 60, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+}
+
+//! Setting Erase After to Never after a disconnect countdown has already armed
+//! one does not retroactively disarm it, so a Lockdown on top of that keeps the
+//! erase that was already scheduled -- and takes it out of the reach of a
+//! reconnect.
+void test_security_lock_endpoint__a_never_lockdown_keeps_an_erase_already_scheduled(void) {
+  prv_session_event(false);
+  const time_t disconnect_deadline = s_shred_deadline;
+
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(disconnect_deadline, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+}
+
+//! A reconnect still retires an ordinary disconnect countdown. The guard above
+//! must be about why the countdown was armed, not a blanket refusal to clear
+//! anything -- otherwise an unlocked, reconnected watch sits on a countdown the
+//! user cannot see.
+void test_security_lock_endpoint__a_reconnect_still_retires_a_disconnect_countdown(void) {
+  prv_session_event(false);
+  cl_assert_equal_i(SecurityCountdownDisconnect, s_countdown_source);
+
+  prv_session_event(true);
+
+  cl_assert_equal_i(0, s_lock_deadline);
+  cl_assert_equal_i(0, s_shred_deadline);
+  cl_assert_equal_i(SecurityCountdownNone, s_countdown_source);
+  cl_assert(!prv_timer_running());
+}
+
+//! A watch that rebooted mid-lockdown comes back still counting down, and still
+//! knowing the countdown is the user's -- which is the whole reason the record
+//! carries it rather than a RAM flag.
+void test_security_lock_endpoint__init_resumes_a_manual_countdown(void) {
+  s_state = SecurityLockStateLocked;
+  s_shred_deadline = 5000;
+  s_countdown_source = SecurityCountdownManual;
+
+  security_lock_endpoint_init();
+
+  cl_assert(prv_timer_running());
+  cl_assert_equal_i(SecurityCountdownManual, s_countdown_source);
+
+  // And the reconnect that follows the reboot does not cancel it either.
+  prv_session_event(true);
+  cl_assert_equal_i(5000, s_shred_deadline);
+}
+
+//! The PIN clears the deadlines through the record store, which cannot reach
+//! into this file to stop the timer. The next tick has to notice and retire it,
+//! or the watch ticks for the rest of the day over nothing.
+void test_security_lock_endpoint__the_timer_stops_once_nothing_is_counting_down(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+  cl_assert(prv_timer_running());
+
+  // What unlocking does to the record.
+  s_state = SecurityLockStateArmed;
+  security_lock_clear_deadlines();
+
+  prv_tick();
+
+  cl_assert(!prv_timer_running());
+  cl_assert_equal_i(0, s_shreds);
+}
+
+//! A clock wound back is the one tamper that outruns a deadline, and a manual
+//! countdown is no more exempt from it than a disconnect one.
+void test_security_lock_endpoint__a_rollback_still_erases_under_a_manual_countdown(void) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+
+  s_rolled_back = true;
+  prv_tick();
+
+  cl_assert_equal_i(1, s_shreds);
 }
 
 // Hazard: the blackout closing the session

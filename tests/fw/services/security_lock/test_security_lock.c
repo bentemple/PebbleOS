@@ -306,7 +306,8 @@ void test_security_lock__the_feature_cannot_be_turned_off_while_locked(void) {
 //! check declines to act on.
 void test_security_lock__turning_the_feature_off_retires_the_deadlines(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(5000, 6000));
+  cl_assert_equal_i(S_SUCCESS,
+                    security_lock_set_deadlines(5000, 6000, SecurityCountdownDisconnect));
 
   cl_assert_equal_i(S_SUCCESS, security_lock_disable());
 
@@ -494,7 +495,7 @@ void test_security_lock__unlocking_clears_attempts_and_deadline(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
   cl_assert(!security_lock_verify_pin(WRONG_PIN, strlen(WRONG_PIN), NULL));
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 5000));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 5000, SecurityCountdownDisconnect));
 
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
   cl_assert_equal_i(0, security_lock_get_failed_attempts());
@@ -631,21 +632,21 @@ void test_security_lock__turning_it_off_does_not_drop_an_unfinished_wipe(void) {
 void test_security_lock__deadline_expiry(void) {
   cl_assert(!security_lock_shred_deadline_expired(100000));
 
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 1000));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 1000, SecurityCountdownDisconnect));
   cl_assert(!security_lock_shred_deadline_expired(999));
   cl_assert(security_lock_shred_deadline_expired(1000));
   cl_assert(security_lock_shred_deadline_expired(1001));
 }
 
 void test_security_lock__deadline_survives_reboot(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 4242));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 4242, SecurityCountdownDisconnect));
   prv_simulate_reboot();
   cl_assert_equal_i(4242, security_lock_get_shred_deadline());
   cl_assert(security_lock_shred_deadline_expired(4242));
 }
 
 void test_security_lock__cleared_deadline_never_expires(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 1000));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 1000, SecurityCountdownDisconnect));
   cl_assert_equal_i(S_SUCCESS, security_lock_clear_deadlines());
   cl_assert(!security_lock_shred_deadline_expired(999999));
 }
@@ -691,9 +692,38 @@ void test_security_lock__first_note_is_never_a_rollback(void) {
 // Configurable delays
 ////////////////////////////////////
 
-void test_security_lock__delays_default_to_five_and_thirty_minutes(void) {
+//! The erase ships off. It is the destructive half, so it is opt-in: out of the
+//! box every countdown in the feature ends in a lock and nothing else, and a
+//! user who wants an erase picks a delay for it.
+void test_security_lock__the_timed_erase_is_off_by_default(void) {
   cl_assert_equal_i(5 * 60, security_lock_get_lock_delay_s());
-  cl_assert_equal_i(30 * 60, security_lock_get_shred_delay_s());
+  cl_assert_equal_i(SECURITY_LOCK_SHRED_DELAY_NEVER, security_lock_get_shred_delay_s());
+}
+
+//! Never as the default must not trip the ordering rule the delays are stored
+//! through. A default pair the store would refuse is one no watch could ship
+//! with, and the refusal would only surface the first time anything wrote it.
+void test_security_lock__the_default_pair_is_one_the_store_accepts(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(SECURITY_LOCK_DEFAULT_LOCK_DELAY_S,
+                                                        SECURITY_LOCK_DEFAULT_SHRED_DELAY_S));
+  cl_assert_equal_i(SECURITY_LOCK_DEFAULT_LOCK_DELAY_S, security_lock_get_lock_delay_s());
+  cl_assert_equal_i(SECURITY_LOCK_SHRED_DELAY_NEVER, security_lock_get_shred_delay_s());
+}
+
+//! The other path the defaults are reached by: a runtime record from a version
+//! this firmware does not recognise is discarded, and what replaces it has to be
+//! the same shipped answer rather than a second one kept in step by hand.
+void test_security_lock__an_unreadable_record_falls_back_to_the_same_defaults(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(60, 1800));
+
+  prv_corrupt_runtime_version();
+  prv_simulate_reboot();
+
+  cl_assert_equal_i(SECURITY_LOCK_DEFAULT_LOCK_DELAY_S, security_lock_get_lock_delay_s());
+  cl_assert_equal_i(SECURITY_LOCK_DEFAULT_SHRED_DELAY_S, security_lock_get_shred_delay_s());
+  // And the lock itself is still on, which is the half that must never be lost.
+  cl_assert(security_lock_is_enabled());
 }
 
 void test_security_lock__delays_are_configurable(void) {
@@ -737,7 +767,7 @@ void test_security_lock__never_survives_reboot(void) {
 //! Never disarms the countdown, not the deadline machinery: an unarmed shred
 //! deadline is already how "nothing pending" is represented.
 void test_security_lock__a_never_shred_deadline_never_expires(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1000, 0));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1000, 0, SecurityCountdownDisconnect));
   cl_assert(security_lock_lock_deadline_expired(1000));
   cl_assert(!security_lock_shred_deadline_expired(999999));
 }
@@ -746,7 +776,8 @@ void test_security_lock__a_never_shred_deadline_never_expires(void) {
 ////////////////////////////////////
 
 void test_security_lock__both_deadlines_arm_and_expire_independently(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1000, 2000));
+  cl_assert_equal_i(S_SUCCESS,
+                    security_lock_set_deadlines(1000, 2000, SecurityCountdownDisconnect));
 
   cl_assert(!security_lock_lock_deadline_expired(999));
   cl_assert(security_lock_lock_deadline_expired(1000));
@@ -758,7 +789,8 @@ void test_security_lock__both_deadlines_arm_and_expire_independently(void) {
 void test_security_lock__unlocking_clears_both_deadlines(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1000, 2000));
+  cl_assert_equal_i(S_SUCCESS,
+                    security_lock_set_deadlines(1000, 2000, SecurityCountdownDisconnect));
 
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
 
@@ -770,7 +802,8 @@ void test_security_lock__unlocking_clears_both_deadlines(void) {
 //! Cleared deadlines stay cleared across a reboot -- an unlocked watch must not
 //! come back still counting down.
 void test_security_lock__cleared_deadlines_stay_cleared_over_reboot(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1000, 2000));
+  cl_assert_equal_i(S_SUCCESS,
+                    security_lock_set_deadlines(1000, 2000, SecurityCountdownDisconnect));
   cl_assert_equal_i(S_SUCCESS, security_lock_clear_deadlines());
   prv_simulate_reboot();
   cl_assert_equal_i(0, security_lock_get_shred_deadline());
@@ -783,11 +816,13 @@ void test_security_lock__deadlines_rearm_from_scratch(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(60, 600));
 
   // First disconnect at t=1000.
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(1060, 1600));
+  cl_assert_equal_i(S_SUCCESS,
+                    security_lock_set_deadlines(1060, 1600, SecurityCountdownDisconnect));
   // Reconnect clears.
   cl_assert_equal_i(S_SUCCESS, security_lock_clear_deadlines());
   // Second disconnect much later at t=5000.
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(5060, 5600));
+  cl_assert_equal_i(S_SUCCESS,
+                    security_lock_set_deadlines(5060, 5600, SecurityCountdownDisconnect));
 
   // The old deadline must not still be pending.
   cl_assert(!security_lock_shred_deadline_expired(5599));
@@ -797,10 +832,98 @@ void test_security_lock__deadlines_rearm_from_scratch(void) {
 //! An already-locked watch arms only the shred countdown; there is nothing left
 //! to lock.
 void test_security_lock__locked_watch_arms_only_the_shred_deadline(void) {
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 2000));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 2000, SecurityCountdownDisconnect));
   cl_assert_equal_i(0, security_lock_get_lock_deadline());
   cl_assert(!security_lock_lock_deadline_expired(999999));
   cl_assert(security_lock_shred_deadline_expired(2000));
+}
+
+// Why the countdown is armed
+////////////////////////////////////
+//
+// What may retire a countdown depends entirely on what started it: a reconnect
+// retires one the phone's absence armed and must never touch one the user
+// asked for. The two are otherwise identical in the record, so the reason is
+// stored beside them.
+
+void test_security_lock__nothing_is_counting_down_out_of_the_box(void) {
+  cl_assert_equal_i(SecurityCountdownNone, security_lock_get_countdown_source());
+}
+
+void test_security_lock__arming_records_why(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 2000, SecurityCountdownManual));
+  cl_assert_equal_i(SecurityCountdownManual, security_lock_get_countdown_source());
+
+  cl_assert_equal_i(S_SUCCESS,
+                    security_lock_set_deadlines(1000, 2000, SecurityCountdownDisconnect));
+  cl_assert_equal_i(SecurityCountdownDisconnect, security_lock_get_countdown_source());
+}
+
+//! A reboot while locked is a designed-for case, so a manual countdown has to
+//! come back knowing it was manual. Coming back as a disconnect countdown would
+//! hand the very next Bluetooth reconnect the power to cancel it.
+void test_security_lock__why_it_was_armed_survives_a_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 4242, SecurityCountdownManual));
+
+  prv_simulate_reboot();
+
+  cl_assert_equal_i(SecurityCountdownManual, security_lock_get_countdown_source());
+  cl_assert_equal_i(4242, security_lock_get_shred_deadline());
+}
+
+//! "Armed" has one spelling. A source left behind by a countdown that has been
+//! retired would describe a countdown that is not there, and every reader that
+//! asks "is this manual" before asking "is anything armed" would believe it.
+void test_security_lock__a_countdown_with_no_deadline_is_not_armed(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 0, SecurityCountdownManual));
+  cl_assert_equal_i(SecurityCountdownNone, security_lock_get_countdown_source());
+}
+
+void test_security_lock__clearing_the_deadlines_clears_why(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 2000, SecurityCountdownManual));
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_deadlines());
+  cl_assert_equal_i(SecurityCountdownNone, security_lock_get_countdown_source());
+}
+
+//! The PIN is the one thing that retires a manual countdown, and it retires it
+//! through here: leaving the locked state clears the deadlines, so it has to
+//! clear the reason with them.
+void test_security_lock__unlocking_retires_a_manual_countdown(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 2000, SecurityCountdownManual));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert_equal_i(SecurityCountdownNone, security_lock_get_countdown_source());
+  cl_assert_equal_i(0, security_lock_get_shred_deadline());
+}
+
+//! And it stays retired across a reboot, rather than the record coming back
+//! with a countdown the user already cancelled.
+void test_security_lock__a_cancelled_manual_countdown_stays_cancelled(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 2000, SecurityCountdownManual));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  prv_simulate_reboot();
+
+  cl_assert_equal_i(SecurityCountdownNone, security_lock_get_countdown_source());
+  cl_assert_equal_i(0, security_lock_get_shred_deadline());
+}
+
+//! Turning the feature off takes a manual countdown with it. Off is a clean
+//! slate, and it already costs the PIN -- which is the same price cancelling
+//! the countdown costs.
+void test_security_lock__turning_the_feature_off_retires_a_manual_countdown(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(0, 2000, SecurityCountdownManual));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
+
+  cl_assert_equal_i(SecurityCountdownNone, security_lock_get_countdown_source());
+  cl_assert_equal_i(0, security_lock_get_shred_deadline());
 }
 
 // Duress PIN

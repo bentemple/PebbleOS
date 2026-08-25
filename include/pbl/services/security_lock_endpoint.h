@@ -36,7 +36,28 @@ void security_lock_endpoint_send_state_changed(SecurityLockState state);
 
 //! Track connect/disconnect so a locked watch that loses the phone for too
 //! long shreds. Called from the kernel event loop.
+//!
+//! A session opening retires a disconnect countdown and never a manual one:
+//! the phone coming back makes the first moot and says nothing at all about the
+//! second. A session closing arms a disconnect countdown, and leaves a manual
+//! one exactly as it found it.
 void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event);
 
 //! Start the periodic deadline check. Called during service init.
 void security_lock_endpoint_init(void);
+
+//! Arm the erase countdown for a lockdown the user asked for, and make sure the
+//! periodic check is running.
+//!
+//! Lives here rather than beside the lock funnel because the deadline record and
+//! the timer that reads it are one mechanism, and splitting them would allow a
+//! deadline written with nothing running to notice it expire.
+//!
+//! Arms nothing when Erase After is Never. Keeps a disconnect countdown that was
+//! already closer than the configured delay, so pressing Lockdown can only ever
+//! bring an erase forward -- but records it as manual either way, which is what
+//! stops a reconnect retiring it.
+//!
+//! Called from security_lock_engage_with_countdown() once the lock has actually
+//! taken, so a refused lock leaves no countdown behind.
+void security_lock_endpoint_arm_manual_countdown(void);

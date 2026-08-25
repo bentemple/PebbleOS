@@ -15,6 +15,7 @@
 #include "pbl/services/compositor/compositor.h"
 #include "pbl/services/compositor/compositor_display.h"
 #include "pbl/services/security_lock.h"
+#include "pbl/services/security_lock_endpoint.h"
 #include "shell/normal/watchface.h"
 #include "system/passert.h"
 
@@ -93,7 +94,19 @@ static void prv_release_ui_lockout(void) {
   modal_manager_set_min_priority(ModalPriorityMin);
 }
 
-static void prv_engage(SecurityShredReason reason, bool shred) {
+//! What locking should leave behind it.
+typedef enum {
+  //! Erase now. The triggers that mean "the content goes, and it goes now":
+  //! Lockdown + Erase, and the escalation paths.
+  EngageEraseNow,
+  //! Lock and arm nothing. For the disconnect lock deadline, where the same
+  //! disconnect already armed the erase deadline.
+  EngageArmNothing,
+  //! Lock and start the erase countdown. Every manual trigger.
+  EngageArmCountdown,
+} EngageAction;
+
+static void prv_engage(SecurityShredReason reason, EngageAction action) {
   PBL_ASSERT_TASK(PebbleTask_KernelMain);
 
   // One of the two funnels the master switch is enforced at, so a trigger that
@@ -117,7 +130,13 @@ static void prv_engage(SecurityShredReason reason, bool shred) {
   security_lock_set_state(SecurityLockStateLocked);
   security_lock_ui_lockout();
 
-  if (!shred) {
+  if (action != EngageEraseNow) {
+    // After the lock has taken, so a refusal above leaves no countdown behind
+    // to erase a watch that was never locked. Before the quiesce, which
+    // repaints the display: the record is what survives a power cut here.
+    if (action == EngageArmCountdown) {
+      security_lock_endpoint_arm_manual_countdown();
+    }
     security_lock_ui_quiesce();
     return;
   }
@@ -135,11 +154,15 @@ static void prv_engage(SecurityShredReason reason, bool shred) {
 }
 
 void security_lock_engage(SecurityShredReason reason) {
-  prv_engage(reason, true /* shred */);
+  prv_engage(reason, EngageEraseNow);
 }
 
 void security_lock_engage_lock_only(SecurityShredReason reason) {
-  prv_engage(reason, false /* shred */);
+  prv_engage(reason, EngageArmNothing);
+}
+
+void security_lock_engage_with_countdown(SecurityShredReason reason) {
+  prv_engage(reason, EngageArmCountdown);
 }
 
 void security_lock_disengage(void) {

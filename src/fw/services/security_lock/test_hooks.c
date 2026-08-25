@@ -155,10 +155,30 @@ static void prv_security_lock_cb(void *unused) {
   PBL_LOG_INFO("%s", buf);
 }
 
+//! Lock and erase on the spot: what the Settings Lockdown + Erase row does.
 void command_security_lock(void) {
   prv_sectest_report("SECTEST lock queued");
   prompt_command_finish();
   launcher_task_add_callback(prv_security_lock_cb, NULL);
+}
+
+//! Lock and start the erase countdown: what the Lockdown app, the Quick Launch
+//! chord, the Settings Lockdown row and the phone's LOCK all do.
+static void prv_security_lockdown_cb(void *unused) {
+  char buf[96];
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+  const time_t now = rtc_get_time();
+  const time_t shred_deadline = security_lock_get_shred_deadline();
+  snprintf(buf, sizeof(buf), "SECTEST lockdown done state=%d shred_in=%d countdown=%d",
+           (int)security_lock_get_state(), (shred_deadline == 0) ? -1 : (int)(shred_deadline - now),
+           (int)security_lock_get_countdown_source());
+  PBL_LOG_INFO("%s", buf);
+}
+
+void command_security_lockdown(void) {
+  prv_sectest_report("SECTEST lockdown queued");
+  prompt_command_finish();
+  launcher_task_add_callback(prv_security_lockdown_cb, NULL);
 }
 
 typedef struct SecurityUnlockInfo {
@@ -215,13 +235,18 @@ void command_security_delays(const char *lock_s, const char *shred_s) {
 
 //! Seconds from now, so a test can arm a deadline that expires while it
 //! watches. 0 disarms, matching the record's own convention.
+//!
+//! Always a disconnect countdown: this pokes the record the way a disconnect
+//! would, so what it arms is retired by the next reconnect. `security lockdown`
+//! is the way to reach a manual one, which goes through the real funnel.
 void command_security_deadlines(const char *lock_in_s, const char *shred_in_s) {
   char buf[96];
   const time_t now = rtc_get_time();
   const int lock_in = atoi(lock_in_s);
   const int shred_in = atoi(shred_in_s);
   const status_t rv = security_lock_set_deadlines((lock_in == 0) ? 0 : now + lock_in,
-                                                  (shred_in == 0) ? 0 : now + shred_in);
+                                                  (shred_in == 0) ? 0 : now + shred_in,
+                                                  SecurityCountdownDisconnect);
   snprintf(buf, sizeof(buf), "SECTEST deadlines lock_in=%d shred_in=%d rv=%" PRId32, lock_in,
            shred_in, (int32_t)rv);
   prv_sectest_report(buf);
@@ -264,10 +289,13 @@ void command_security_session(const char *is_open_str) {
   const time_t now = rtc_get_time();
   const time_t lock_deadline = security_lock_get_lock_deadline();
   const time_t shred_deadline = security_lock_get_shred_deadline();
-  snprintf(buf, sizeof(buf), "SECTEST session open=%d state=%d lock_in=%d shred_in=%d",
+  // countdown= is what makes a reconnect that leaves a manual countdown alone
+  // distinguishable from one that cleared it and rearmed something identical.
+  snprintf(buf, sizeof(buf), "SECTEST session open=%d state=%d lock_in=%d shred_in=%d countdown=%d",
            (int)info.is_open, (int)security_lock_get_state(),
            (lock_deadline == 0) ? -1 : (int)(lock_deadline - now),
-           (shred_deadline == 0) ? -1 : (int)(shred_deadline - now));
+           (shred_deadline == 0) ? -1 : (int)(shred_deadline - now),
+           (int)security_lock_get_countdown_source());
   prv_sectest_report(buf);
 }
 

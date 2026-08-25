@@ -26,23 +26,29 @@
 //! Wrong PINs tolerated before the watch re-shreds and stays locked.
 #define SECURITY_LOCK_MAX_PIN_ATTEMPTS 3
 
-//! Defaults only. Both are configurable by the phone and in watch Settings,
-//! and both are measured from the moment the phone went away.
-//!
-//! The watch locks first and shreds later, so a brief separation costs the
-//! user a PIN entry while a real one still destroys the data.
-#define SECURITY_LOCK_DEFAULT_LOCK_DELAY_S (5 * 60)
-#define SECURITY_LOCK_DEFAULT_SHRED_DELAY_S (30 * 60)
-
-//! Shred delay meaning "no timed erase". The watch still locks when the phone
-//! goes away, and every explicit trigger -- the phone's LOCK command, Lock Now,
-//! a duress PIN, exhausted attempts -- still erases. Only the disconnect
-//! countdown is disarmed.
+//! Shred delay meaning "no timed erase". The watch still locks -- when the
+//! phone goes away, and when the user asks for a Lockdown -- and the triggers
+//! that erase outright still do: Lockdown + Erase, a duress PIN, exhausted
+//! attempts, a reboot while locked. Only the timed erase is disarmed.
 //!
 //! Zero rather than a large sentinel because an unarmed deadline is already 0
 //! everywhere, so this needs no special case beyond the ordering check in
 //! security_lock_set_delays().
 #define SECURITY_LOCK_SHRED_DELAY_NEVER 0
+
+//! Defaults only. Both are configurable in watch Settings. The lock delay is
+//! measured from the moment the phone went away; the erase delay from whatever
+//! started the lockdown, which is that same disconnect or the user's press.
+//!
+//! The watch locks first and erases later, so a brief separation costs the
+//! user a PIN entry while a real one still destroys the data.
+//!
+//! The erase ships off. It is the destructive half and the half the watch
+//! cannot undo on its own, so it is opt-in: a user who wants it picks a delay
+//! under Settings > Security > Erase After. Until they do, every countdown in
+//! the feature ends in a lock and nothing else.
+#define SECURITY_LOCK_DEFAULT_LOCK_DELAY_S (5 * 60)
+#define SECURITY_LOCK_DEFAULT_SHRED_DELAY_S SECURITY_LOCK_SHRED_DELAY_NEVER
 
 //! Slack allowed when comparing against the persisted time high-water mark.
 //! The RTC can legitimately drift or be nudged by a resync; anything beyond
@@ -248,14 +254,8 @@ void security_lock_radio_blackout_release(void);
 //! nothing is left to run a countdown for and only the PIN gets out.
 bool security_lock_is_radio_blackout(void);
 
-//! Absolute wall-clock deadlines armed when the phone disconnects. 0 means
-//! not armed.
-//!
-//! Both are cleared on unlock and on reconnect, and neither re-arms until the
-//! next unexpected disconnect -- so an unlocked, reconnected watch is not
-//! sitting on a countdown the user cannot see.
-//! How long after a disconnect the watch locks, and how long after a
-//! disconnect it shreds. Persisted, so a reboot keeps the user's choice.
+//! How long after a disconnect the watch locks, and how long after a lockdown
+//! begins it erases. Persisted, so a reboot keeps the user's choice.
 uint32_t security_lock_get_lock_delay_s(void);
 uint32_t security_lock_get_shred_delay_s(void);
 
@@ -263,9 +263,48 @@ uint32_t security_lock_get_shred_delay_s(void);
 //!         SECURITY_LOCK_SHRED_DELAY_NEVER is exempt: it schedules no erase.
 status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s);
 
+//! Why the armed countdown is armed.
+//!
+//! Persisted beside the deadlines, because what may retire a countdown depends
+//! entirely on what started it and a reboot while locked is a designed-for
+//! case. Without this the two are indistinguishable in the record, and the
+//! reconnect handler -- which is right to retire one and must never touch the
+//! other -- has nothing to tell them apart by.
+typedef enum {
+  //! Nothing is counting down. Holds exactly when both deadlines are 0, which
+  //! security_lock_set_deadlines() enforces rather than trusts.
+  SecurityCountdownNone = 0,
+  //! The phone went away. Its coming back makes the countdown moot, so a
+  //! session opening retires this one.
+  SecurityCountdownDisconnect = 1,
+  //! The user asked for it: the Lockdown app, the Quick Launch chord, the
+  //! Settings row or the phone's LOCK. Only the PIN retires this one. A
+  //! Bluetooth blip must not cancel a lockdown someone triggered on purpose,
+  //! and the disconnect delays must not shorten, restart or extend it either.
+  SecurityCountdownManual = 2,
+} SecurityCountdownSource;
+
+//! Absolute wall-clock deadlines. 0 means not armed.
+//!
+//! A disconnect countdown is cleared on unlock and on reconnect, and does not
+//! re-arm until the next unexpected disconnect -- so an unlocked, reconnected
+//! watch is not sitting on a countdown the user cannot see. A manual one
+//! outlives every reconnect and only the PIN clears it.
 time_t security_lock_get_lock_deadline(void);
 time_t security_lock_get_shred_deadline(void);
-status_t security_lock_set_deadlines(time_t lock_deadline, time_t shred_deadline);
+SecurityCountdownSource security_lock_get_countdown_source(void);
+
+//! Arm, re-arm or retire the countdown, recording what armed it.
+//!
+//! One write rather than a deadline setter and a separate flag: the two are
+//! flushed together, so no reader can catch a countdown whose source has not
+//! caught up, and no caller can arm one without saying why.
+//!
+//! Both deadlines at 0 forces the source to SecurityCountdownNone whatever was
+//! passed, so "armed" has one spelling and a stale source cannot outlive the
+//! countdown it described.
+status_t security_lock_set_deadlines(time_t lock_deadline, time_t shred_deadline,
+                                     SecurityCountdownSource source);
 status_t security_lock_clear_deadlines(void);
 
 //! True if the corresponding deadline is armed and `now` is at or past it.

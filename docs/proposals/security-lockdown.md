@@ -37,8 +37,18 @@ resolves it: **the shred only ever destroys data the phone can give back.**
 Anything that fails that test does not belong in the target list.
 
 Shredding health data was considered as an opt-in setting and deliberately not
-built. It would be the only control here capable of destroying something the
-user cannot get back, and no threat in the model above justifies offering it.
+built. It would be the only control capable of destroying something the user
+cannot get back, and no threat in the model above justifies offering it.
+
+A menu for *which* data gets erased, health and apps included, was proposed and
+then withdrawn — see "Not built, deliberately" under Status. Two notes for
+anyone who revisits it. Nothing in the countdown machinery names a target list:
+every trigger calls `security_lock_shred(reason)` and the scope is decided
+inside, so a list would be read when the wipe runs rather than when the
+countdown is armed — which is the easier of the two to build, but means
+changing the list mid-countdown changes what that countdown destroys. And more
+importantly, adding anything unrestorable invalidates the reasoning in "Locking
+almost always ends in a shred", which has to be revisited at the same time.
 
 This has a consequence that must not be glossed over: **a seized watch still
 yields step, sleep, and heart-rate history.** That is a deliberate trade, not
@@ -79,25 +89,50 @@ an oversight.
 ```
               set PIN
 Disabled ──────────────> Armed ──────────────────> Locked
-   ^                       ^   phone LOCK cmd        │
-   │                       │   manual panic          │  correct PIN
-   │  turn off (PIN goes)  │   disconnect grace      │
+   ^                       ^   Lockdown              │ (erase countdown armed)
+   │                       │   phone LOCK cmd        │
+   │                       │   disconnect grace      │  correct PIN
+   │  turn off (PIN goes)  │   Lockdown + Erase ─────┤  cancels the countdown
    └───────────────────────┴─────────────────────────┘
-                                   ^                 │
-                                   │                 v
+                                   ^                 │  Erase After elapses
+                                   │                 v  / reboot / 3 bad PINs
                                    └───────────── Shredding
-                          (re-shred + stay locked on
-                           reboot / 30min / 3 bad PINs)
+                          (re-shred + stay locked)
 ```
+
+**Locking and erasing are two things, and only one trigger does both at once.**
+Everything that locks — the Lockdown app, the Quick Launch chord, the Settings
+row, the phone's `LOCK`, the disconnect grace — locks *now* and arms the erase
+for `Erase After` later. The PIN cancels it. `Lockdown + Erase`, in Settings, is
+the single control that destroys the content on the spot.
+
+That is a change from an earlier revision, where every manual trigger erased
+immediately and only the disconnect path deferred. The reasoning:
+
+- The triggers a user can hit by accident are exactly the manual ones — a Quick
+  Launch chord in a pocket, the wrong launcher row, a `LOCK` Gadgetbridge
+  derived from a platform callback. An immediate erase made all of them
+  unrecoverable in the only sense that matters to the user: the watch goes
+  blank and stays blank until the phone resyncs.
+- Locking without *some* timed erase is not offered, because it would be a
+  second way to spell `Erase After: Never` and the two would drift. A user who
+  wants lock-only sets Never, which every countdown path already honours.
+- `LOCK` arrives over the air. Erasing on it outright is an unconditional
+  remote-wipe primitive available to anything that can speak the protocol, on a
+  watch that is still on the user's wrist with the PIN in their head. See
+  §8.
 
 `Disabled` is the master switch for the whole feature, and it is where the watch
 ships. It is not a second notion of "on" beside the PIN: there is exactly one,
 so nothing can consult the wrong one. Off means no trigger fires — not the
-phone's `LOCK`, not Lock Now, not the console, not a disconnect deadline (none
-is armed in the first place), not a clock rollback. It is enforced at the two
-funnels every trigger goes through, `security_lock_engage()` and
+phone's `LOCK`, not Lockdown, not Lockdown + Erase, not the console, not a
+disconnect deadline (none is armed in the first place), not a clock rollback. It
+is enforced at the two funnels every trigger goes through, `prv_engage()` in
+`lock.c` — which `security_lock_engage()`, `security_lock_engage_lock_only()`
+and `security_lock_engage_with_countdown()` all reach — and
 `security_lock_shred()`, rather than at each caller, so a trigger added later is
-gated without knowing about it.
+gated without knowing about it. A refused lock arms no countdown either: the
+arming happens after the state change, not before the attempt.
 
 **Off is a clean slate, and getting there costs the PIN.** Setting a PIN is the
 only way in; `security_lock_disable()` is the only way out, and it clears the
@@ -128,12 +163,26 @@ Settings > Security has exactly two shapes, and the switch is row 0 in both:
 | | Lock After — *N min after disconnect* |
 | | Erase After — *N min after disconnect* / *Never, locks only* |
 | | Duress PIN — *(no subtitle, ever)* |
-| | Lock Now — *Lock and erase* |
+| | Lockdown — *Locks, erases in N min* / *Locks, erases in N hr* / *Locks, no timed erase* |
+| | Lockdown + Erase — *Locks and erases now* |
 | | Show in Launcher — *On* / *Off, Quick Launch only* |
 
 There is no Clear PIN row: clearing the PIN is what turning the switch off does,
 so a row for it would be the same button under a second name. There is no PIN
-Length row either — see below.
+Length row either — see below. And there is no lock-only row: that is `Erase
+After: Never` plus *Lockdown*, and a row for it would be a second spelling of a
+setting the disconnect path already obeys.
+
+`Lock Now` is gone rather than reused. Once there were two actions its name and
+its subtitle (*Lock and erase*) described neither accurately, and the one it
+described worst was the destructive one.
+
+**The Lockdown row's subtitle is the only place the concrete delay appears
+beside the action it applies to.** `Erase After` says what the number is and
+what it is counted from; the row below says what pressing it will cost. Without
+that, learning that *Lockdown* starts an erase at all means reading a setting
+three rows up and joining them yourself. It follows the setting live, so
+changing `Erase After` and glancing down is the ordinary way to use the pair.
 
 **PIN length is a step in the set-PIN flow**, not a row. With the menu down to
 one row while the feature is off there is nowhere for a standalone row to live,
@@ -173,13 +222,13 @@ triggers differ only in that they re-run it and keep the watch locked. This is
 a simplification over an earlier two-tier draft, and it follows directly from
 the shred being non-destructive.
 
-### Locking almost always ends in a shred
+### Locking ends in a shred if the user has asked for one
 
 Worth stating plainly, because it is the practical behaviour rather than an
-edge case. Once the watch locks, avoiding the shred requires the user to enter
-the correct PIN before the shred delay elapses *and* not reboot in the
-meantime. A flat battery, a crash, a five-second SELECT+BACK, or simply not
-noticing for half an hour all end in a wipe.
+edge case. With an `Erase After` set, avoiding the shred once the watch locks
+requires entering the correct PIN before that delay elapses *and* not rebooting
+in the meantime. A flat battery, a crash, a five-second SELECT+BACK, or simply
+not noticing all end in a wipe.
 
 That is intended, and it is only reasonable because of the scope decision
 above: everything the shred destroys comes back from the phone on reconnect.
@@ -187,22 +236,84 @@ Nothing unrecoverable is at stake -- health and step history, the one category
 the phone cannot restore, is deliberately never touched. So the cost of an
 unnecessary shred is a resync, not a loss.
 
-The lock phase is therefore best understood as a short grace period, not as a
-durable state the watch is expected to sit in. If that ever stops being true --
-if something unrestorable gets added to the shred list -- this trade has to be
+The lock phase is therefore best understood as a grace period, not as a durable
+state the watch is expected to sit in. If that ever stops being true -- if
+something unrestorable gets added to the shred list -- this trade has to be
 revisited at the same time.
+
+**`Erase After` ships as `Never`, so out of the box none of that happens.** The
+watch locks, the countdown is armed at nothing, and the content survives until
+the user opts into a delay. The erase is the destructive half and the half the
+watch cannot undo, so it is the half that is opt-in.
+
+The reboot rule is the one exception `Never` does not cover, and it is
+deliberate: a reboot while locked still shreds. Rebooting is the one reliable
+way past the lock screen -- SELECT+BACK held for five seconds hard resets from
+the button ISR, below anything software can intercept -- so restarting must
+never be cheaper than waiting. `Never` disarms the *timed* erase, not every
+erase.
 
 ### Trigger matrix
 
 | Trigger | Detected where | Result |
 |---|---|---|
-| Phone sends `LOCK` | New protocol endpoint | Lock + shred |
-| Manual panic action | Watch menu / GB action | Lock + shred |
-| Unexpected disconnect while Armed | `PebbleCommSessionEvent` close + grace | Lock + shred (configurable) |
+| Lockdown app / Quick Launch chord | `security_lock_engage_with_countdown()` | Lock now, erase at `Erase After` |
+| Settings > Lockdown | Same, after a confirmation | Lock now, erase at `Erase After` |
+| Phone sends `LOCK` | Protocol endpoint | Lock now, erase at `Erase After` |
+| Settings > Lockdown + Erase | `security_lock_engage()` | Lock + shred, immediately |
+| Unexpected disconnect while Armed | `PebbleCommSessionEvent` close + grace | Lock at `Lock After`, erase at `Erase After` |
 | Boot with state == `Locked` | Early-boot hook | Re-shred, stay locked |
-| Disconnected > 30 min while Locked | Absolute-deadline check | Re-shred, stay locked |
+| Erase countdown elapses | Absolute-deadline check | Shred, stay locked |
 | 3 consecutive wrong PINs | Lock screen | Re-shred, stay locked |
-| `rtc_get_time()` < persisted high-water mark | Deadline check | Re-shred, stay locked |
+| Duress PIN | PIN verification | Unlock, shred silently |
+| `rtc_get_time()` < persisted high-water mark | Deadline check | Shred, stay locked |
+
+Every "erase at `Erase After`" row above is a countdown the PIN cancels, and
+every one of them arms nothing at all when `Erase After` is `Never`. The rows
+below the divider are not countdowns and `Never` does not reach them.
+
+### Which countdown, and what may cancel it
+
+Two things arm the erase countdown, and what may retire it depends entirely on
+which. That is stored, not inferred:
+
+```c
+typedef enum {
+  SecurityCountdownNone = 0,
+  SecurityCountdownDisconnect = 1,
+  SecurityCountdownManual = 2,
+} SecurityCountdownSource;
+```
+
+It lives in the runtime record beside the deadlines, written by the same
+`security_lock_set_deadlines()` call, so no reader can catch a countdown whose
+source has not caught up and no caller can arm one without saying why. Both
+deadlines at zero forces the source back to `None`, so "armed" has one spelling
+and a stale source cannot outlive the countdown it described.
+
+It is persisted rather than kept in RAM because a reboot while locked is a
+designed-for case, and a manual countdown that came back as a disconnect one
+would hand the very next Bluetooth reconnect the power to cancel it.
+
+**A session opening retires a disconnect countdown and never a manual one.**
+The phone coming back makes the first moot; it says nothing whatever about the
+second. Without the distinction, a Bluetooth blip silently cancels a lockdown
+someone triggered on purpose — and Gadgetbridge reconnects on its own, so that
+is the shape an attacker holding the phone actually produces. Only the PIN
+retires a manual countdown, for the same reason only the PIN clears a lock.
+
+**A session closing leaves a manual countdown exactly as it found it.** The
+reverse direction, and just as easy to get wrong: arming afresh would restart
+the erase clock, so with a longer `Erase After` — or `Never` — walking out of
+Bluetooth range would postpone or cancel the erase the user asked for. Nothing
+is lost by skipping the arming, because a manual countdown implies the watch is
+already locked and there is no lock deadline left to arm.
+
+**A manual lockdown may only ever bring an erase forward.** If a disconnect
+countdown was already closer than the configured delay, that deadline is kept
+rather than replaced — and promoted to manual either way, which is what takes it
+out of reach of the reconnect that would otherwise have cancelled it. So
+pressing *Lockdown* on a watch that has already lost its phone cannot buy time.
 
 ## Firmware design
 
@@ -220,7 +331,9 @@ typedef struct PACKED {
   uint8_t  pin_hash[32];
   uint8_t  failed_attempts;
   bool     shred_pending;       // set before shredding, cleared after
-  time_t   disconnect_deadline; // 0 = not armed
+  time_t   lock_deadline;       // 0 = not armed
+  time_t   shred_deadline;      // 0 = not armed
+  uint8_t  countdown_source;    // why: none / disconnect / manual
   time_t   time_high_water;     // monotonic guard against RTC rollback
 } SecurityLockRecord;
 ```
@@ -359,15 +472,30 @@ but before `display_init()` (`main.c:344`), `bt_driver_init()` (`main.c:352`) an
 Read `seclock` there; if `state == Locked` or `shred_pending`, run the shred
 before any pixel is drawn or the radio comes up.
 
-### 7. Disconnect deadline and clock trust
+### 7. Erase countdown and clock trust
 
 Timers survive neither sleep nor reboot. Use the pattern established by
 `cron/service.c`: persist an **absolute deadline**, re-arm a short capped timer
 on each wake.
 
-- On session close while `Locked`: `disconnect_deadline = rtc_get_time() + 1800`.
-- On session open: clear it.
-- Check on every wake, timer tick, and at the boot hook.
+- On session close while Armed or Locked, and no manual countdown running:
+  `lock_deadline = now + Lock After`, `shred_deadline = now + Erase After`,
+  `countdown_source = Disconnect`.
+- On a manual lockdown: `shred_deadline = now + Erase After`,
+  `countdown_source = Manual`, never later than a deadline already pending.
+- On session open: clear, **unless the source is Manual**.
+- On unlock: clear, whatever the source. This is the only thing that retires a
+  manual countdown, and it goes through `security_lock_set_state()` so no caller
+  has to remember.
+- Check on every wake, timer tick, and at the boot hook. The tick also stops the
+  timer once nothing is armed, which is how an unlock retires it: the record
+  store cannot reach into the endpoint to stop a timer.
+
+`Erase After: Never` leaves the shred deadline at zero, which is already how
+"nothing pending" is spelled everywhere else, so it needs no special case
+beyond the ordering check in `security_lock_set_delays()`. **`Never` is the
+shipped default**, which makes that path the ordinary one rather than an
+option.
 
 `rtc_get_time()` is settable by the user and the phone; there is no
 reboot-persistent monotonic clock (`rtc_get_ticks()` resets on boot). Keep
@@ -420,6 +548,33 @@ every time the two reconnected.
 A phone built against the older protocol still sending it is ignored on the
 unknown-command path — logged and dropped, with no reply and no side effect.
 
+**`LOCK` locks and starts the erase countdown; it does not erase.** The
+argument is the same one that governs the chord, plus one the chord does not
+have: `LOCK` arrives over the air, so treating it as an immediate wipe hands an
+unconditional remote-erase primitive to anything that can speak the protocol.
+It is also the trigger least likely to have been aimed — Gadgetbridge derives it
+from `REASON_LOCKDOWN`, a platform callback, not a button — and the watch is
+still on the user's wrist with the PIN in their head either way. A phone that
+wants the content gone sooner asks for a shorter `Erase After`; there is
+deliberately no command that erases on demand, because that is precisely the
+primitive being withheld.
+
+This shifts what `LOCK_ACK` means, without changing the wire format:
+`LOCK_ACK` says the watch is locked. `SHRED_COMPLETE` says the content is gone,
+and arrives when and if the countdown runs out. The phone can watch the gap via
+`STATUS_RESPONSE.deadline_remaining_s`, which now reports a manual countdown as
+readily as a disconnect one. A phone that reads `LOCK_ACK` as "locked and
+erased" is now slightly optimistic; a phone that reads it as "locked" is right,
+and that was always the accurate reading — the ack is keyed on
+`security_lock_is_locked()`, not on anything having been destroyed.
+
+An unfortunate consequence worth naming: the same phone reconnecting cannot
+call off the countdown it started. That is not an oversight — a `LOCK` a
+reconnect undoes would be undone by the phone's own reconnect logic within
+seconds — but it does mean a `LOCK` sent in error costs the user a PIN entry,
+and there is no `UNLOCK`. There is deliberately no `UNLOCK`: it would be a way
+past the lock screen that does not require the PIN.
+
 `LOCK` is refused outright while the feature is off, and the watch replies with
 `STATE_CHANGED(Disabled)` rather than `LOCK_ACK`. `LOCK_ACK` carries only a
 reason echo and has no failure encoding; `STATE_CHANGED` is a message the phone
@@ -434,12 +589,20 @@ from the state. The two agree by construction now, but reading the thing being
 reported keeps them honest: a record where they disagree reports what is
 actually stored rather than what the state implies.
 
-Both delays are counted **from the disconnect**, not from each other, so the
-defaults lock at five minutes and erase at thirty — twenty-five minutes after
-locking, not thirty. `SECURITY_LOCK_SHRED_DELAY_NEVER` is zero and simply leaves
-the shred deadline unarmed, which is how "nothing pending" is already spelled
-everywhere else; `STATUS_RESPONSE.deadline_remaining_s` reports zero for it,
-which is accurate, because there is no countdown to report.
+`Lock After` is counted **from the disconnect**. `Erase After` is counted from
+whatever started the lockdown — that same disconnect, or the press — and never
+from the lock. So on the disconnect path a `Lock After` of five minutes and an
+`Erase After` of thirty give twenty-five minutes of lock, not thirty, which is
+why the subtitles say what they are counted from. On a manual lockdown the same
+thirty is thirty from the press, because that is when the lockdown began.
+
+`SECURITY_LOCK_SHRED_DELAY_NEVER` is zero and simply leaves the shred deadline
+unarmed, which is how "nothing pending" is already spelled everywhere else;
+`STATUS_RESPONSE.deadline_remaining_s` reports zero for it, which is accurate,
+because there is no countdown to report. Note that the *setting* being zero and
+the *deadline* being zero are different fields answering different questions —
+"is a timed erase configured" and "is one running" — and `countdown_source`
+answers the second unambiguously.
 
 State values match `SecurityLockState`: `0` disabled, `1` armed, `2` locked.
 
@@ -487,7 +650,7 @@ public void onNotificationRemoved(StatusBarNotification sbn,
 **Gap: if no notifications are active when lockdown is entered, nothing fires** —
 the platform iterates an empty list. Close it with a composite check
 (`isDeviceLocked()` && active notifications just went non-empty → empty) and ship
-a manual panic action regardless.
+a manual Lockdown action regardless.
 
 What does not work, so nobody re-litigates it: `KeyguardManager.isDeviceLocked()`
 / `isKeyguardLocked()` / `isDeviceSecure()` cannot distinguish lockdown from an
@@ -515,6 +678,19 @@ REASON_LOCKDOWN
 The 10-second delay leaves room for the `LOCK_ACK` round trip and a retry, while
 bounding the exposure window. Watch-side disconnect detection remains the
 backstop for a watch that never got the message.
+
+**`LOCK_ACK` means locked, not erased.** The watch arms its erase countdown and
+runs it down over `Erase After`; `SHRED_COMPLETE` arrives when — and only if —
+that expires. GB must not treat the ack as confirmation that content is gone,
+and must not treat the absence of a `SHRED_COMPLETE` as a failed `LOCK`. A
+second `LOCK` sent to "make sure" is harmless but pointless: the watch keeps
+whichever deadline is nearer, so a repeat can never postpone the erase and can
+only bring it forward if `Erase After` was shortened in between.
+
+The teardown at t=10s closes the session, which the watch sees as an ordinary
+disconnect. That is safe by construction — the watch leaves a manual countdown
+alone on a session close — and so is the reconnect that follows when GB comes
+back, which cannot cancel it either.
 
 - **GB never calls `BluetoothAdapter.enable()`/`disable()` anywhere** (verified by
   grep across the app), so the API-33 deprecation is a non-issue. Existing
@@ -748,12 +924,15 @@ watch by a forgotten four-digit PIN with three attempts.
   PFS sector level, but the translation layer below it may have remapped pages we
   cannot reach. Best-effort against chip-off.
 - **Lock-on-disconnect UX.** Locking every time the watch leaves BT range would be
-  miserable. Default off; when on, use a grace period.
+  miserable. Gated on the master switch, which is off out of the box, and on a
+  `Lock After` grace period when it is on. The *erase* half of it is separately
+  off by default, so the worst an unconfigured disconnect can cost is a PIN
+  entry.
 - **Flash wear.** The GC sweep erases sectors on every shred. Frequent triggering
   costs NOR endurance — bounded, but worth measuring.
 - **GB cannot switch the Bluetooth adapter off** without privileged access.
-- **Zero-notification blind spot** in `REASON_LOCKDOWN` detection; the manual
-  panic action is the fallback, not a nicety.
+- **Zero-notification blind spot** in `REASON_LOCKDOWN` detection; the Lockdown
+  app and its Quick Launch chord are the fallback, not a nicety.
 - **The forced repaint does not blank the screen.** `security_lock_engage()`
   uses `compositor_render_app()`, which repaints from the app framebuffer. It
   reliably removes a notification modal, which is the stated requirement, but
@@ -975,3 +1154,48 @@ That is false: Android keeps Bluetooth up while the screen is locked and
 Gadgetbridge reconnects on its own. A reconnect is something an attacker can
 arrange — a shielded bag, or simply carrying the phone out of range and back —
 so it proves nothing. Only the PIN clears a lock, whatever caused it.
+
+### Reconnecting must not cancel a manual countdown either
+
+The same argument, one level down, and it only became reachable when manual
+triggers started arming countdowns instead of erasing on the spot.
+`security_lock_handle_comm_session_event()` cleared *both* deadlines on every
+session open. That is right for a countdown the phone's absence armed — the
+phone is back, the countdown is moot — and wrong for one the user asked for.
+Left alone it would have meant a Bluetooth blip silently cancelling a lockdown
+someone triggered on purpose, with nothing on screen to say so, and the shape
+that produces it is not exotic: Gadgetbridge reconnects by itself, so an
+attacker holding the phone gets it for free.
+
+The fix is `countdown_source`, persisted beside the deadlines. Both directions
+have to hold, and the reverse is the easier one to miss — a manual countdown
+must not be shortened, restarted or extended by the disconnect arming logic when
+the phone later goes away, or walking out of range would postpone the erase the
+user asked for. Both are covered by explicit tests, because a reconnect
+cancelling a manual lockdown is exactly the bug that only surfaces the day
+someone actually needs the feature.
+
+### The timed erase is opt-in
+
+`SECURITY_LOCK_DEFAULT_SHRED_DELAY_S` was thirty minutes. It is `Never` now, so
+the feature ships lock-only.
+
+One consequence is worth stating rather than discovering: `prv_runtime_defaults()`
+feeds both the fresh-record path and the unreadable-record path, and there is
+still only one default. A firmware upgrade that discards the runtime record —
+which is what the separate `CFG_RECORD_VERSION` and `RT_RECORD_VERSION` exist to
+survive — therefore returns a user who had configured an erase delay to `Never`.
+
+That is the deliberate direction. Reinstating a real delay would arm a
+destructive countdown the user never asked for as a side effect of an upgrade,
+and the erase is opt-in precisely so that cannot happen. Everything that
+protects them is untouched: the watch still locks, still needs the PIN, and
+still erases on a reboot while locked, on three wrong PINs and on a duress PIN.
+Only the timed erase is lost, and it is the one thing the user explicitly chose
+and can choose again.
+
+The other place `Never` interacts with the record is the clock-rollback trigger,
+which is gated on a shred deadline being armed. With `Never` as the default,
+nothing is armed by default, so a rollback shreds nothing until the user opts
+in. That is the same rule as before — "with the timed erase turned off there is
+nothing to outrun" — but it is now the default rather than a choice.

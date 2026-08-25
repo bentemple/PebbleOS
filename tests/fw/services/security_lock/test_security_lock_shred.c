@@ -127,6 +127,12 @@ bool security_lock_shred_deadline_expired(time_t now) {
   return false;
 }
 
+//! Never armed here, so the boot wipe never reaches the branch that reads this.
+//! The other boot triggers are what this file is about.
+SecurityCountdownSource security_lock_get_countdown_source(void) {
+  return SecurityCountdownNone;
+}
+
 //! Whether the clock looks wound back. Driven directly: it is one of the boot
 //! triggers the master switch has to gate.
 static bool s_rolled_back;

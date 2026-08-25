@@ -37,6 +37,8 @@ static SecurityLockState s_state;
 static uint8_t s_failed_attempts;
 static int s_reset_attempts_calls;
 static int s_engage_calls;
+static int s_erase_now_calls;
+static int s_countdown_calls;
 static uint32_t s_lock_delay_s;
 static uint32_t s_shred_delay_s;
 static int s_rejected_delays;
@@ -202,8 +204,17 @@ bool security_lock_attempts_exhausted(void) {
   return s_failed_attempts >= SECURITY_LOCK_MAX_PIN_ATTEMPTS;
 }
 
+//! The two funnels, counted separately. Settings offers both actions, so which
+//! row reaches which one is the thing that must not drift: aiming at the
+//! recoverable row and erasing the watch instead is the whole hazard.
 void security_lock_engage(SecurityShredReason reason) {
   s_engage_calls++;
+  s_erase_now_calls++;
+}
+
+void security_lock_engage_with_countdown(SecurityShredReason reason) {
+  s_engage_calls++;
+  s_countdown_calls++;
 }
 
 uint32_t security_lock_get_lock_delay_s(void) {
@@ -409,13 +420,18 @@ void i18n_free_all(const void *owner) {}
 //! Row order once the feature is on. There is no Clear PIN and no PIN Length:
 //! clearing the PIN is what turning it off does, and the length is picked as
 //! part of setting a PIN.
+//!
+//! Two lockdown rows rather than one: the recoverable action and the immediate
+//! one are different enough that a single row would have to lie about one of
+//! them. Lockdown is first, because it is the one to land on by accident.
 #define ROW_CHANGE_PIN 1
 #define ROW_LOCK_AFTER 2
 #define ROW_ERASE_AFTER 3
 #define ROW_DURESS_PIN 4
-#define ROW_LOCK_NOW 5
-#define ROW_SHOW_IN_LAUNCHER 6
-#define ROWS_WHEN_ON 7
+#define ROW_LOCKDOWN 5
+#define ROW_LOCKDOWN_ERASE 6
+#define ROW_SHOW_IN_LAUNCHER 7
+#define ROWS_WHEN_ON 8
 
 static void prv_open_settings(void) {
   settings_security_get_info()->init();
@@ -450,6 +466,10 @@ static void prv_install_pin(const char *pin) {
 //! with the rest of the length helpers further down.
 static void prv_choose_length(uint8_t len);
 
+//! Pick an Erase After, through the picker rather than by writing the store.
+//! Defined with the rest of the delay helpers further down.
+static void prv_choose_shred_delay(uint32_t seconds);
+
 //! Turn the feature on from the menu, the way a user would: the switch, the
 //! length picker, then the PIN twice.
 static void prv_enable_with_pin(const char *pin) {
@@ -483,8 +503,13 @@ void test_settings_security__initialize(void) {
   s_duress_shred_seq = 0;
   s_disable_seq = 0;
   s_engage_calls = 0;
+  s_erase_now_calls = 0;
+  s_countdown_calls = 0;
   s_lock_delay_s = SECURITY_LOCK_DEFAULT_LOCK_DELAY_S;
-  s_shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S;
+  // Not the shipped default, which is Never. Most of this file is about rows
+  // and prompts rather than about the erase being off, and a Never default
+  // would make every subtitle assertion below read the disarmed wording.
+  s_shred_delay_s = 30 * 60;
   s_rejected_delays = 0;
   s_drawn_title[0] = '\0';
   s_drawn_subtitle[0] = '\0';
@@ -702,6 +727,8 @@ void test_settings_security__nothing_else_is_reachable_while_it_is_off(void) {
 
   for (uint16_t row = 0; row < prv_num_rows(); row++) {
     prv_draw(row);
+    cl_assert(strcmp(s_drawn_title, "Lockdown") != 0);
+    cl_assert(strcmp(s_drawn_title, "Lockdown + Erase") != 0);
     cl_assert(strcmp(s_drawn_title, "Lock Now") != 0);
     cl_assert(strcmp(s_drawn_title, "Lock After") != 0);
     cl_assert(strcmp(s_drawn_title, "Erase After") != 0);
@@ -771,10 +798,12 @@ void test_settings_security__rows_follow_the_pin_appearing(void) {
   prv_draw(ROW_CHANGE_PIN);
   cl_assert_equal_s("Change PIN", s_drawn_title);
 
-  // And Lock Now really is where the index says, not something that fell
-  // through to a default.
-  prv_select(ROW_LOCK_NOW);
-  cl_assert(s_dialog_confirm != NULL);
+  // And the lockdown rows really are where the indices say, not something that
+  // fell through to a default.
+  prv_draw(ROW_LOCKDOWN);
+  cl_assert_equal_s("Lockdown", s_drawn_title);
+  prv_draw(ROW_LOCKDOWN_ERASE);
+  cl_assert_equal_s("Lockdown + Erase", s_drawn_title);
 }
 
 // Duress PIN
@@ -1279,34 +1308,79 @@ void test_settings_security__backing_out_of_the_picker_drops_the_prompt(void) {
   cl_assert(s_option_select != NULL);
 }
 
-// Lock Now
+// Lockdown and Lockdown + Erase
 ////////////////////////////////////
+//
+// Two actions, because they are not the same promise. Lockdown locks and starts
+// the Erase After countdown, which the PIN calls off; Lockdown + Erase destroys
+// the content there and then. A single row would have to describe one of them
+// inaccurately, and the inaccurate one is always the destructive one.
 
-void test_settings_security__lock_now_is_hidden_while_it_is_off(void) {
+void test_settings_security__the_lockdown_rows_are_hidden_while_it_is_off(void) {
   prv_open_settings();
-  // Only the master switch; nothing here erases anything.
+  // Only the master switch; nothing here locks or erases anything.
   cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
   prv_draw(ROW_ENABLED);
-  cl_assert(strcmp("Lock Now", s_drawn_title) != 0);
+  cl_assert(strcmp("Lockdown", s_drawn_title) != 0);
+  cl_assert(strcmp("Lockdown + Erase", s_drawn_title) != 0);
 }
 
-void test_settings_security__lock_now_confirms_before_engaging(void) {
+void test_settings_security__lockdown_confirms_before_engaging(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
-  prv_select(ROW_LOCK_NOW);
+  prv_select(ROW_LOCKDOWN);
   cl_assert(s_dialog_confirm != NULL);
   cl_assert_equal_i(0, s_engage_calls);
   cl_assert(s_deferred_callback == NULL);
 }
 
-// security_lock_engage() asserts it is on KernelMain and blocks for the length
-// of the shred; this runs on the app task, so it has to be handed over.
-void test_settings_security__lock_now_defers_engage_to_the_kernel(void) {
+void test_settings_security__lockdown_erase_confirms_before_engaging(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
-  prv_select(ROW_LOCK_NOW);
+  prv_select(ROW_LOCKDOWN_ERASE);
+  cl_assert(s_dialog_confirm != NULL);
+  cl_assert_equal_i(0, s_engage_calls);
+  cl_assert(s_deferred_callback == NULL);
+}
+
+//! The row that must not erase. Reaching the erase-now funnel from here would
+//! destroy the content of a user who chose the recoverable action, and nothing
+//! on screen would have said so.
+void test_settings_security__lockdown_starts_a_countdown_rather_than_erasing(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_LOCKDOWN);
+  s_dialog_confirm(NULL, &s_expandable_dialog);
+  prv_run_deferred();
+
+  cl_assert_equal_i(1, s_countdown_calls);
+  cl_assert_equal_i(0, s_erase_now_calls);
+}
+
+//! And the row that must. This is the only control in the whole feature that
+//! erases on the spot without the user having been locked out first.
+void test_settings_security__lockdown_erase_erases_on_the_spot(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_LOCKDOWN_ERASE);
+  s_dialog_confirm(NULL, &s_expandable_dialog);
+  prv_run_deferred();
+
+  cl_assert_equal_i(1, s_erase_now_calls);
+  cl_assert_equal_i(0, s_countdown_calls);
+}
+
+// Both funnels assert they are on KernelMain and the erasing one blocks for the
+// length of the wipe; this runs on the app task, so it has to be handed over.
+void test_settings_security__the_lockdown_rows_defer_to_the_kernel(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_LOCKDOWN);
   s_dialog_confirm(NULL, &s_expandable_dialog);
 
   cl_assert_equal_i(1, s_dialog_pops);
@@ -1315,6 +1389,86 @@ void test_settings_security__lock_now_defers_engage_to_the_kernel(void) {
 
   s_deferred_callback(NULL);
   cl_assert_equal_i(1, s_engage_calls);
+}
+
+//! The subtitle is the only place the concrete delay appears, so it is what a
+//! user reads to learn how long they have to change their mind.
+void test_settings_security__the_lockdown_row_says_how_long_the_erase_is(void) {
+  prv_install_pin("1234");
+  s_shred_delay_s = 30 * 60;
+  prv_open_settings();
+
+  prv_draw(ROW_LOCKDOWN);
+  cl_assert_equal_s("Lockdown", s_drawn_title);
+  cl_assert(strstr(s_drawn_subtitle, "30 min") != NULL);
+}
+
+void test_settings_security__the_lockdown_row_reports_hours_as_hours(void) {
+  prv_install_pin("1234");
+  s_shred_delay_s = 4 * 60 * 60;
+  prv_open_settings();
+
+  prv_draw(ROW_LOCKDOWN);
+  cl_assert(strstr(s_drawn_subtitle, "4 hr") != NULL);
+}
+
+//! Erase After set to Never is how a user gets lock-without-erase -- there is
+//! deliberately no separate lock-only action -- so the row has to stop
+//! promising an erase rather than show a bare zero.
+void test_settings_security__the_lockdown_row_says_when_nothing_will_be_erased(void) {
+  prv_install_pin("1234");
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+  prv_open_settings();
+
+  prv_draw(ROW_LOCKDOWN);
+  cl_assert_equal_s("Lockdown", s_drawn_title);
+  cl_assert(strstr(s_drawn_subtitle, "no timed erase") != NULL);
+  cl_assert(strstr(s_drawn_subtitle, "min") == NULL);
+}
+
+//! It follows the setting rather than being read once at open. The two rows sit
+//! below Erase After in the same menu, so changing one and looking down at the
+//! other is the ordinary way to use them.
+void test_settings_security__the_lockdown_row_follows_the_erase_after_setting(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_choose_shred_delay(SECURITY_LOCK_SHRED_DELAY_NEVER);
+  prv_draw(ROW_LOCKDOWN);
+  cl_assert(strstr(s_drawn_subtitle, "no timed erase") != NULL);
+
+  prv_choose_shred_delay(60 * 60);
+  prv_draw(ROW_LOCKDOWN);
+  cl_assert(strstr(s_drawn_subtitle, "1 hr") != NULL);
+}
+
+//! Never changes nothing about the immediate action: it is the setting for the
+//! timed erase, and this row does not use a timer.
+void test_settings_security__lockdown_erase_still_erases_with_never_set(void) {
+  prv_install_pin("1234");
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+  prv_open_settings();
+
+  prv_draw(ROW_LOCKDOWN_ERASE);
+  cl_assert_equal_s("Lockdown + Erase", s_drawn_title);
+  cl_assert(strstr(s_drawn_subtitle, "now") != NULL);
+
+  prv_select(ROW_LOCKDOWN_ERASE);
+  s_dialog_confirm(NULL, &s_expandable_dialog);
+  prv_run_deferred();
+  cl_assert_equal_i(1, s_erase_now_calls);
+}
+
+//! "Lock Now" described neither action once there were two of them, so it is
+//! gone rather than reused for one of them.
+void test_settings_security__there_is_no_lock_now_row(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  for (uint16_t row = 0; row < prv_num_rows(); row++) {
+    prv_draw(row);
+    cl_assert(strcmp(s_drawn_title, "Lock Now") != 0);
+  }
 }
 
 // Show in Launcher

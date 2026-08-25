@@ -171,11 +171,18 @@ static void prv_refuse_lock(void) {
   security_lock_endpoint_send_state_changed(security_lock_get_state());
 }
 
-//! security_lock_engage() touches the app and modal stacks, so it is
-//! KernelMain-only. It also blocks for the duration of the shred.
+//! The lock funnel touches the app and modal stacks, so it is KernelMain-only.
+//!
+//! The countdown rather than an immediate erase. LOCK arrives over the air,
+//! which makes an unconditional wipe on it a remote-wipe primitive available to
+//! anything that can speak the protocol -- and it is the trigger least likely
+//! to have been aimed: Gadgetbridge derives it from a platform callback rather
+//! than from a button. The watch is still on the user's wrist either way, so
+//! the PIN is a real way out. A phone that means "now" can say so by locking
+//! the watch and letting the countdown run.
 static void prv_lock_callback(void *data) {
   const SecurityShredReason reason = (SecurityShredReason)(uintptr_t)data;
-  security_lock_engage(reason);
+  security_lock_engage_with_countdown(reason);
 
   // Keyed on what actually happened rather than on having asked. engage()
   // refuses on more than the master switch -- an unusable stored PIN length
@@ -224,11 +231,11 @@ void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *ms
   }
 }
 
-// Disconnect deadline
+// The erase countdown
 ////////////////////////////////////
 
-static void prv_deadline_shred_callback(void *unused) {
-  security_lock_shred(SecurityShredReasonDisconnectTimeout);
+static void prv_deadline_shred_callback(void *data) {
+  security_lock_shred((SecurityShredReason)(uintptr_t)data);
 }
 
 static void prv_rollback_shred_callback(void *unused) {
@@ -246,6 +253,17 @@ static void prv_deadline_lock_callback(void *unused) {
   security_lock_engage_lock_only(SecurityShredReasonDisconnectTimeout);
 }
 
+//! What an expiring countdown should tell the phone it was.
+//!
+//! Read before the deadlines are cleared, which takes the source with them. A
+//! manual lockdown reported as a disconnect timeout would be a lie about a
+//! watch that never lost its phone, and the phone acts on the reason.
+static SecurityShredReason prv_countdown_reason(void) {
+  return (security_lock_get_countdown_source() == SecurityCountdownManual)
+             ? SecurityShredReasonManualPanic
+             : SecurityShredReasonDisconnectTimeout;
+}
+
 //! Re-checked on a timer rather than armed as one long timeout, because a
 //! one-shot timer survives neither the watch sleeping nor a reboot. The
 //! deadlines are absolute timestamps in the lock record, so they survive both
@@ -258,16 +276,26 @@ static void prv_deadline_check(void *unused) {
   // Locked with the radio down is terminal: nothing can arrive, so a countdown
   // armed before the wipe has nothing left to count down and only the PIN gets
   // out. Retire it rather than tick uselessly for the duration of the lock.
+  // Manual countdowns included: the blackout only follows a wipe, so whatever
+  // this one was counting towards has already happened.
   if (security_lock_is_radio_blackout()) {
     security_lock_clear_deadlines();
     prv_stop_deadline_timer();
     return;
   }
 
+  // Nothing left to count. Also how the PIN retires the timer: unlocking clears
+  // the deadlines through the record store, which cannot reach in here to stop
+  // it, so the next tick has to notice.
+  if ((security_lock_get_lock_deadline() == 0) && (security_lock_get_shred_deadline() == 0)) {
+    prv_stop_deadline_timer();
+    return;
+  }
+
   const time_t now = rtc_get_time();
-  // Only a shred deadline can be outrun by winding the clock back. With the
-  // timed erase turned off there is nothing to outrun, and shredding anyway
-  // would be the one outcome the user asked not to have.
+  // Only a shred deadline can be outrun by winding the clock back. With no
+  // erase armed there is nothing to outrun, and shredding anyway would be the
+  // one outcome the user asked not to have.
   if (security_lock_note_time(now) && (security_lock_get_shred_deadline() != 0)) {
     launcher_task_add_callback(prv_rollback_shred_callback, NULL);
     return;
@@ -276,12 +304,14 @@ static void prv_deadline_check(void *unused) {
   // Shred first: if the watch was powered off past both deadlines, the data
   // mattering more than the lock screen is the whole point.
   if (security_lock_shred_deadline_expired(now)) {
-    PBL_LOG_DBG("Shred delay elapsed while disconnected");
+    // Before the clear below, which takes the source with the deadlines.
+    const SecurityShredReason reason = prv_countdown_reason();
+    PBL_LOG_DBG("Erase countdown elapsed, reason %" PRIu8, (uint8_t)reason);
     security_lock_clear_deadlines();
     prv_stop_deadline_timer();
     // KernelMain: the wipe closes and reopens databases, which deadlocks if
     // driven from here. See security_lock_engage().
-    launcher_task_add_callback(prv_deadline_shred_callback, NULL);
+    launcher_task_add_callback(prv_deadline_shred_callback, (void *)(uintptr_t)reason);
     return;
   }
 
@@ -311,6 +341,41 @@ static void prv_stop_deadline_timer(void) {
   s_deadline_timer_running = false;
 }
 
+void security_lock_endpoint_arm_manual_countdown(void) {
+  const uint32_t shred_delay_s = security_lock_get_shred_delay_s();
+  const time_t now = rtc_get_time();
+
+  time_t deadline =
+      (shred_delay_s == SECURITY_LOCK_SHRED_DELAY_NEVER) ? 0 : now + (time_t)shred_delay_s;
+
+  // A lockdown may only ever bring an erase forward. A disconnect countdown
+  // already closer than the configured delay is kept rather than replaced, so
+  // reaching for Lockdown cannot buy time -- and it is promoted to manual
+  // either way, which takes it out of reach of the reconnect that would
+  // otherwise have cancelled it.
+  const time_t pending = security_lock_get_shred_deadline();
+  if ((pending != 0) && ((deadline == 0) || (pending < deadline))) {
+    deadline = pending;
+  }
+
+  // The lock deadline goes whatever happens: the watch is locked now, so the
+  // lock a disconnect was counting towards has already happened.
+  security_lock_set_deadlines(0, deadline,
+                              (deadline != 0) ? SecurityCountdownManual : SecurityCountdownNone);
+
+  if (deadline == 0) {
+    // Erase After is Never and nothing was already scheduled. This is how a
+    // user gets lock-without-erase, which is why no menu carries a separate
+    // lock-only action.
+    PBL_LOG_DBG("Locked by hand; no timed erase");
+    return;
+  }
+
+  prv_start_deadline_timer();
+  PBL_LOG_INFO("Locked by hand; erasing in %" PRId32 "s unless the PIN is entered",
+               (int32_t)(deadline - now));
+}
+
 void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event) {
   if (!event->is_system) {
     return;
@@ -323,8 +388,18 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
     // carried out of range and back -- or shielded and unshielded -- would
     // otherwise clear the lock without anyone knowing the PIN. Only the PIN
     // clears a lock, whatever caused it.
-    security_lock_clear_deadlines();
-    prv_stop_deadline_timer();
+    //
+    // And only a countdown the phone's absence armed. The phone coming back
+    // makes that one moot and says nothing whatever about a lockdown the user
+    // asked for, so a Bluetooth blip must not be able to call one off. Only the
+    // PIN retires a manual countdown, for the same reason only the PIN clears a
+    // lock.
+    if (security_lock_get_countdown_source() != SecurityCountdownManual) {
+      security_lock_clear_deadlines();
+      prv_stop_deadline_timer();
+    } else {
+      PBL_LOG_DBG("Phone back while a manual lockdown counts down; leaving it armed");
+    }
 
     // The phone is back, so anything the watch could not tell it while it was
     // gone goes now. This is the half that matters: an unlock releases the
@@ -351,8 +426,21 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
     return;
   }
 
+  // The other half of the rule above, and just as easy to get wrong. A manual
+  // countdown belongs to the user, so the disconnect delays may not reschedule
+  // it: arming afresh would restart the erase clock, and with a longer Erase
+  // After -- or Never -- walking out of Bluetooth range would postpone or
+  // cancel the erase the user asked for. There is nothing to arm anyway; the
+  // watch is already locked.
+  if (security_lock_get_countdown_source() == SecurityCountdownManual) {
+    PBL_LOG_DBG("Phone gone while a manual lockdown counts down; leaving it alone");
+    // Idempotent, and the countdown must survive a boot that lost the timer.
+    prv_start_deadline_timer();
+    return;
+  }
+
   // Both are measured from the disconnect, so a watch that is already locked
-  // still gets the full shred delay rather than an immediate wipe.
+  // still gets the full erase delay rather than an immediate wipe.
   const time_t now = rtc_get_time();
   const uint32_t shred_delay_s = security_lock_get_shred_delay_s();
   const time_t lock_deadline =
@@ -361,7 +449,7 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
   // pending" is spelled everywhere else.
   const time_t shred_deadline =
       (shred_delay_s == SECURITY_LOCK_SHRED_DELAY_NEVER) ? 0 : now + (time_t)shred_delay_s;
-  security_lock_set_deadlines(lock_deadline, shred_deadline);
+  security_lock_set_deadlines(lock_deadline, shred_deadline, SecurityCountdownDisconnect);
 
   if ((lock_deadline == 0) && (shred_deadline == 0)) {
     // Already locked with no timed erase: nothing left to count down.
@@ -370,7 +458,7 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
   }
   prv_start_deadline_timer();
 
-  PBL_LOG_DBG("Phone gone: lock in %" PRIu32 "s, shred in %" PRIu32 "s",
+  PBL_LOG_DBG("Phone gone: lock in %" PRIu32 "s, erase in %" PRIu32 "s",
               security_lock_get_lock_delay_s(), shred_delay_s);
 }
 

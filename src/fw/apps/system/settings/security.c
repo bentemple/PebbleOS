@@ -96,6 +96,10 @@ typedef struct SettingsSecurityData {
   char pin_subtitle[SUBTITLE_BUF_SIZE];
   char lock_delay_subtitle[DELAY_SUBTITLE_BUF_SIZE];
   char shred_delay_subtitle[DELAY_SUBTITLE_BUF_SIZE];
+  //! What Lockdown will actually do, which is the Erase After setting read from
+  //! the moment it is pressed. The only place the concrete delay appears
+  //! alongside the action it applies to.
+  char lockdown_subtitle[DELAY_SUBTITLE_BUF_SIZE];
 
   //! Erase After rows, filtered down to those still legal for the current Lock
   //! After. Held here because the option menu keeps the array rather than
@@ -161,6 +165,27 @@ static void prv_format_delay(uint32_t seconds, char *buf, size_t buf_size) {
   }
 }
 
+//! Render the Erase After delay as what Lockdown will do with it.
+//!
+//! Stated on the action rather than only on the setting, because the two rows
+//! answer different questions: Erase After says what the number is and what it
+//! is counted from, and this says what pressing the row above it will cost.
+//! Without it, the only way to learn that Lockdown starts an erase at all is to
+//! read a setting three rows up and join them yourself.
+static void prv_format_lockdown(uint32_t seconds, char *buf, size_t buf_size) {
+  char format[DELAY_SUBTITLE_BUF_SIZE];
+  if ((seconds >= DELAY_SECONDS_PER_HOUR) && ((seconds % DELAY_SECONDS_PER_HOUR) == 0)) {
+    /// Subtitle on the Lockdown row, in hours: the watch locks now and erases
+    /// after this long unless the PIN is entered first.
+    i18n_get_with_buffer(i18n_noop("Locks, erases in %u hr"), format, sizeof(format));
+    sniprintf(buf, buf_size, format, (unsigned)(seconds / DELAY_SECONDS_PER_HOUR));
+  } else {
+    /// Same, in minutes.
+    i18n_get_with_buffer(i18n_noop("Locks, erases in %u min"), format, sizeof(format));
+    sniprintf(buf, buf_size, format, (unsigned)(seconds / DELAY_SECONDS_PER_MINUTE));
+  }
+}
+
 //! Recompute the cached state the rows are drawn from. Reads flash, so it is
 //! done here rather than in draw_row, which MenuLayer calls on every redraw.
 static void prv_update_state(SettingsSecurityData *data) {
@@ -206,9 +231,16 @@ static void prv_update_state(SettingsSecurityData *data) {
     /// because turning the erase off is not turning the feature off.
     i18n_get_with_buffer(i18n_noop("Never, locks only"), data->shred_delay_subtitle,
                          sizeof(data->shred_delay_subtitle));
+    /// Subtitle on the Lockdown row when Erase After is Never. Setting Never is
+    /// how a user gets lock-without-erase, so the row has to stop promising one
+    /// rather than show a bare zero.
+    i18n_get_with_buffer(i18n_noop("Locks, no timed erase"), data->lockdown_subtitle,
+                         sizeof(data->lockdown_subtitle));
   } else {
     prv_format_delay(data->shred_delay_s, data->shred_delay_subtitle,
                      sizeof(data->shred_delay_subtitle));
+    prv_format_lockdown(data->shred_delay_s, data->lockdown_subtitle,
+                        sizeof(data->lockdown_subtitle));
   }
 }
 
@@ -681,42 +713,97 @@ static void prv_shred_delay_menu_push(SettingsSecurityData *data) {
                             data->shred_rows, data);
 }
 
-// Lock Now
+// Lockdown and Lockdown + Erase
 //////////////////////////////////////////////////////////////////////////////
+//
+// Two actions, because they make different promises and one row would have to
+// describe one of them inaccurately -- always the destructive one. Lockdown
+// locks and starts the Erase After countdown, which the PIN calls off, exactly
+// as a disconnect countdown behaves. Lockdown + Erase destroys the content
+// there and then.
+//
+// There is deliberately no third "lock only" row: that is Erase After set to
+// Never, which the countdown action honours by arming nothing. A separate row
+// would be the same outcome reachable two ways, and the setting is the one the
+// disconnect path already obeys.
 
-static void prv_engage_callback(void *unused) {
-  // Runs on KernelMain, which security_lock_engage() asserts on: it kills the
-  // running app (this one) and blocks for the length of the shred.
+//! Runs on KernelMain, which both funnels assert on: they kill the running app
+//! (this one), and the erasing one blocks for the length of the wipe.
+static void prv_countdown_callback(void *unused) {
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+}
+
+static void prv_erase_now_callback(void *unused) {
   security_lock_engage(SecurityShredReasonManualPanic);
 }
 
-static void prv_lock_now_confirm(ClickRecognizerRef recognizer, void *e_dialog) {
+static void prv_lockdown_confirm(ClickRecognizerRef recognizer, void *e_dialog) {
   expandable_dialog_pop(e_dialog);
-  launcher_task_add_callback(prv_engage_callback, NULL);
+  launcher_task_add_callback(prv_countdown_callback, NULL);
 }
 
-static void prv_lock_now_push(SettingsSecurityData *data) {
-  /// Explanation shown before the watch locks and erases its copy of the
-  /// phone's content. Says what goes, what stays, and what this is not.
-  const char *text = i18n_get(
-      "Locks the watch behind your PIN and erases its copy of your "
-      "notifications, calendar, reminders, contacts and weather. Your phone "
-      "puts them back when you unlock and reconnect.\n\n"
-      "Step and sleep history is not erased.\n\n"
-      "Nothing on the watch is encrypted. This protects the screen, not the "
-      "flash.", data);
+static void prv_lockdown_erase_confirm(ClickRecognizerRef recognizer, void *e_dialog) {
+  expandable_dialog_pop(e_dialog);
+  launcher_task_add_callback(prv_erase_now_callback, NULL);
+}
 
+//! Push a confirmation, and hand over only if the user takes it.
+//!
+//! Nothing happens when the dialog cannot be built, rather than locking or
+//! erasing without having said what it costs.
+//!
+//! `name` goes through WINDOW_NAME() for the window, which compiles it out of a
+//! release build, and is used raw for the log, where log strings cost no flash.
+//! So the two rows stay distinguishable in a capture from a shipping watch.
+static void prv_push_confirmation(const char *name, const char *header, const char *text,
+                                  ClickHandler confirm) {
   ExpandableDialog *e_dialog = expandable_dialog_create_with_params(
-      WINDOW_NAME("Lock Now"), RESOURCE_ID_GENERIC_WARNING_LARGE, text, GColorBlack, GColorWhite,
-      NULL, RESOURCE_ID_ACTION_BAR_ICON_CHECK, prv_lock_now_confirm);
+      WINDOW_NAME(name), RESOURCE_ID_GENERIC_WARNING_LARGE, text, GColorBlack, GColorWhite, NULL,
+      RESOURCE_ID_ACTION_BAR_ICON_CHECK, confirm);
   if (!e_dialog) {
-    // Nothing happens rather than locking without having explained what it
-    // destroys.
-    PBL_LOG_ERR("Could not create the Lock Now confirmation");
+    PBL_LOG_ERR("Could not create the %s confirmation", name);
     return;
   }
-  expandable_dialog_set_header(e_dialog, i18n_get("Lock Now", data));
+  expandable_dialog_set_header(e_dialog, header);
   app_expandable_dialog_push(e_dialog);
+}
+
+static void prv_lockdown_push(SettingsSecurityData *data) {
+  /// Explanation shown before the watch locks and starts the erase countdown.
+  /// The delay itself is on the row, so this says what stops it rather than
+  /// repeating a number: the countdown is the part users have to know is
+  /// escapable.
+  const char *text = i18n_get(
+      "Locks the watch behind your PIN straight away, then erases its copy of "
+      "your notifications, calendar, reminders, contacts and weather when Erase "
+      "After runs out.\n\n"
+      "Entering your PIN before then cancels the erase. Rebooting does not.\n\n"
+      "Step and sleep history is never erased, and your phone puts the rest "
+      "back when you unlock and reconnect.\n\n"
+      "Nothing on the watch is encrypted. This protects the screen, not the "
+      "flash.",
+      data);
+
+  prv_push_confirmation("Lockdown", i18n_get("Lockdown", data), text,
+                        prv_lockdown_confirm);
+}
+
+static void prv_lockdown_erase_push(SettingsSecurityData *data) {
+  /// Explanation shown before the watch locks and erases its copy of the
+  /// phone's content on the spot. Says what goes, what stays, and what this is
+  /// not.
+  const char *text = i18n_get(
+      "Locks the watch behind your PIN and erases its copy of your "
+      "notifications, calendar, reminders, contacts and weather immediately. "
+      "There is no countdown and your PIN will not bring it back.\n\n"
+      "Your phone puts them back when you unlock and reconnect.\n\n"
+      "Step and sleep history is not erased.\n\n"
+      "Nothing on the watch is encrypted. This protects the screen, not the "
+      "flash.",
+      data);
+
+  prv_push_confirmation("Lockdown + Erase", i18n_get("Lockdown + Erase", data), text,
+                        prv_lockdown_erase_confirm);
 }
 
 // Menu
@@ -729,7 +816,9 @@ enum SettingsSecurityItem {
   SettingsSecurityLockDelay,
   SettingsSecurityShredDelay,
   SettingsSecurityDuressPin,
-  SettingsSecurityLockNow,
+  //! The recoverable one first: it is the row to land on by accident.
+  SettingsSecurityLockdown,
+  SettingsSecurityLockdownErase,
   SettingsSecurityLockdownInLauncher,
   NumSettingsSecurityItems
 };
@@ -816,11 +905,21 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       // No subtitle, deliberately: any state shown here is the state that has
       // to stay hidden, and "Off" versus "On" is the whole secret.
       break;
-    case SettingsSecurityLockNow:
-      title = i18n_noop("Lock Now");
-      /// Subtitle on the Lock Now row. The erase is the point, so say so here
-      /// and not only in the confirmation.
-      subtitle = i18n_get(i18n_noop("Lock and erase"), data);
+    case SettingsSecurityLockdown:
+      /// Lock now, erase at the configured Erase After unless the PIN is
+      /// entered first. The same action the Lockdown app and the Quick Launch
+      /// chord perform.
+      title = i18n_noop("Lockdown");
+      subtitle = data->lockdown_subtitle;
+      break;
+    case SettingsSecurityLockdownErase:
+      /// Lock now and erase now. Named so the difference from the row above is
+      /// the destructive word rather than a shade of wording.
+      title = i18n_noop("Lockdown + Erase");
+      /// Subtitle on the Lockdown + Erase row. "Now" is the whole difference
+      /// from the row above, so it is said here and not only in the
+      /// confirmation.
+      subtitle = i18n_get(i18n_noop("Locks and erases now"), data);
       break;
     case SettingsSecurityLockdownInLauncher:
       /// Whether the Lockdown app is listed in the launcher. Off is decluttering
@@ -875,8 +974,11 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
       // answer the question the menu exists to refuse to answer.
       prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetDuress);
       break;
-    case SettingsSecurityLockNow:
-      prv_lock_now_push(data);
+    case SettingsSecurityLockdown:
+      prv_lockdown_push(data);
+      break;
+    case SettingsSecurityLockdownErase:
+      prv_lockdown_erase_push(data);
       break;
     case SettingsSecurityLockdownInLauncher:
       shell_prefs_set_lockdown_app_in_launcher(!shell_prefs_get_lockdown_app_in_launcher());

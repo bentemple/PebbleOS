@@ -56,6 +56,7 @@ extern void command_security_set_pin(const char*);
 extern void command_security_set_duress(const char*);
 extern void command_security_clear_pin(void);
 extern void command_security_lock(void);
+extern void command_security_lockdown(void);
 extern void command_security_unlock(const char*);
 extern void command_security_delays(const char*, const char*);
 extern void command_security_deadlines(const char*, const char*);
@@ -354,6 +355,10 @@ static const Command s_prompt_commands[] = {
   { "security set pin", command_security_set_pin, 1 },
   { "security set duress", command_security_set_duress, 1 },
   { "security clear pin", command_security_clear_pin, 0 },
+  // Before "security lock", which is a prefix of it: the table is matched by
+  // prefix in order, so the longer name has to come first or it can never be
+  // reached. This is the one pair in the table where that matters.
+  { "security lockdown", command_security_lockdown, 0 },
   { "security lock", command_security_lock, 0 },
   { "security unlock", command_security_unlock, 1 },
   { "security delays", command_security_delays, 2 },

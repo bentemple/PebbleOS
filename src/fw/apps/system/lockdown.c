@@ -68,14 +68,21 @@ static void prv_show_lock_unavailable(void) {
   app_simple_dialog_push(simple_dialog);
 }
 
-//! Runs on KernelMain, which security_lock_engage() asserts on: it drives the
-//! app and modal stacks and holds the task for the length of the erase.
+//! Runs on KernelMain, which the lock funnel asserts on: it drives the app and
+//! modal stacks.
+//!
+//! The countdown rather than an immediate erase. This app is the one trigger
+//! that can be reached by accident -- a Quick Launch chord in a pocket, a
+//! misremembered binding, the wrong launcher row -- and locking without a timed
+//! erase is not an option either: a user who wants that sets Erase After to
+//! Never, which this path honours by arming nothing. Erasing on the spot is a
+//! separate action and lives in Settings, where it cannot be hit by mistake.
 //!
 //! Closing this app is part of what it does -- security_lock_ui_quiesce() calls
 //! app_manager_close_current_app() and lands on the watchface -- so there is
 //! nothing to do afterwards and nothing here that outlives the call.
 static void prv_engage_callback(void *unused) {
-  security_lock_engage(SecurityShredReasonManualPanic);
+  security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
 }
 
 static void prv_main(void) {
@@ -101,8 +108,8 @@ static void prv_main(void) {
   app_window_stack_push(window, false /* animated */);
 
   // No confirmation, deliberately. A panic button that asks is a worse panic
-  // button, and everything the erase destroys comes back from the phone on
-  // reconnect -- a mistaken tap costs a resync, not data.
+  // button, and nothing is destroyed by the time it runs: the erase it starts
+  // is one the PIN calls off, so a mistaken tap costs a PIN entry.
   launcher_task_add_callback(prv_engage_callback, NULL);
 
   app_event_loop();

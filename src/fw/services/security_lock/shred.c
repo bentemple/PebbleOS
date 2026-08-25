@@ -459,7 +459,12 @@ void security_lock_handle_boot(void) {
     PBL_LOG_INFO("SECBOOT handle_boot leave owed=0 disabled=1");
     return;
   } else if (security_lock_shred_deadline_expired(now)) {
-    reason = SecurityShredReasonDisconnectTimeout;
+    // A countdown that lapsed while the watch was powered off, reported as
+    // whatever armed it. The phone acts on the reason, and a lockdown the user
+    // asked for is not a disconnect timeout.
+    reason = (security_lock_get_countdown_source() == SecurityCountdownManual)
+                 ? SecurityShredReasonManualPanic
+                 : SecurityShredReasonDisconnectTimeout;
   } else if (rolled_back) {
     // Winding the clock back is how a deadline gets outrun.
     reason = SecurityShredReasonClockRollback;
