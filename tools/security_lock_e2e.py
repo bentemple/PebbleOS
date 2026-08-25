@@ -42,11 +42,16 @@ PEBBLE_PORT = 12344
 # --- Things to adjust when the UI changes -----------------------------------
 
 #: Row index of each Security menu entry, mirroring the SettingsSecurityRow
-#: order in src/fw/apps/system/settings/security.c. Most rows appear only once
-#: a PIN is set; "Show in Launcher" is present either way because the Lockdown
-#: app is in the launcher regardless.
-SECURITY_ROWS_NO_PIN = ["Set PIN", "PIN Length", "Show in Launcher"]
+#: order in src/fw/apps/system/settings/security.c. Three shapes, because rows
+#: appear as the feature becomes usable: the master switch is always there,
+#: most rows need a PIN, and the triggers need the switch on as well.
+#:
+#: This list has gone stale twice. If a menu assertion fails on a row that
+#: obviously exists, check this against the SettingsSecurityRow enum first.
+SECURITY_ROWS_NO_PIN = ["Security Lock", "Set PIN", "PIN Length"]
+SECURITY_ROWS_PIN_OFF = ["Security Lock", "Change PIN", "PIN Length", "Clear PIN"]
 SECURITY_ROWS_WITH_PIN = [
+    "Security Lock",
     "Change PIN",
     "PIN Length",
     "Lock After",
@@ -278,7 +283,13 @@ class Phone:
     def send(self, payload):
         self._qemu(self.SPP, struct.pack(">HH", len(payload), self.ENDPOINT) + payload)
 
-    def configure(self, enabled=True, lock_delay=300, shred_delay=1800):
+    def retired_configure(self, enabled=True, lock_delay=300, shred_delay=1800):
+        """Send the retired CONFIGURE (0x01), which the watch must now ignore.
+
+        Kept so a test can prove the phone cannot reach the watch's settings.
+        The command was removed because the phone re-sent it on every
+        connection, overriding what the user had chosen on the watch.
+        """
         self.send(struct.pack(">BBHH", 0x01, 1 if enabled else 0, lock_delay, shred_delay))
         time.sleep(0.8)
 
@@ -475,7 +486,7 @@ def test_lock_and_unlock(console, pad):
         set_or_change_pin(console, pad, "1234")
     phone = Phone()
     phone.set_connected(True)
-    phone.configure(lock_delay=300, shred_delay=1800)
+    # The watch owns its delays now; nothing to configure from here.
     marker = console.mark()
     phone.lock()
     time.sleep(8.0)
@@ -550,7 +561,7 @@ def test_wrong_pin_counts_up(console, pad):
 def test_disconnect_arms_countdown(console, pad):
     phone = Phone()
     phone.set_connected(True)
-    phone.configure(lock_delay=300, shred_delay=1800)
+    # The watch owns its delays now; nothing to configure from here.
     time.sleep(1.0)
     phone.set_connected(False)
     time.sleep(3.0)
@@ -570,22 +581,26 @@ def test_disconnect_arms_countdown(console, pad):
     phone.close()
 
 
-def test_configure_changes_delays(console, pad):
+def test_phone_cannot_change_the_delays(console, pad):
+    """The delays belong to the watch, so a phone asking must change nothing.
+
+    CONFIGURE used to carry them and was retired: the phone re-sent it on
+    every connection, overriding whatever the user had chosen in Settings. A
+    phone that can disarm the watch is a phone that can be compelled to.
+    """
+    before = console.status()
     phone = Phone()
     phone.set_connected(True)
-    marker = console.mark()
-    phone.configure(lock_delay=60, shred_delay=600)
+    phone.retired_configure(lock_delay=60, shred_delay=600)
     time.sleep(1.5)
 
-    # The log says whether the message arrived at all, which state alone
-    # cannot: an ignored message and a rejected one look identical from
-    # outside.
     st = console.status()
-    check("phone can set the lock delay", st["lock_delay"] == 60, f"={st['lock_delay']}")
-    check("phone can set the shred delay", st["shred_delay"] == 600, f"={st['shred_delay']}")
-
-    phone.configure(lock_delay=300, shred_delay=1800)
-    time.sleep(1.0)
+    check("the retired message leaves the lock delay alone",
+          st["lock_delay"] == before["lock_delay"],
+          f"{before['lock_delay']} -> {st['lock_delay']}")
+    check("the retired message leaves the erase delay alone",
+          st["shred_delay"] == before["shred_delay"],
+          f"{before['shred_delay']} -> {st['shred_delay']}")
     phone.close()
 
 
@@ -607,7 +622,7 @@ TESTS = [
     ("starts_clean", test_starts_clean),
     ("set_pin", test_set_pin),
     ("mismatched_pin_is_rejected", test_mismatched_pin_is_rejected),
-    ("configure_changes_delays", test_configure_changes_delays),
+    ("phone_cannot_change_the_delays", test_phone_cannot_change_the_delays),
     ("disconnect_arms_countdown", test_disconnect_arms_countdown),
     ("lock_and_unlock", test_lock_and_unlock),
     ("wrong_pin_counts_up", test_wrong_pin_counts_up),
