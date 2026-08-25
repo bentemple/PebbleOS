@@ -622,13 +622,34 @@ not reintroduced:
 so boards on the QEMU Bluetooth stack never build it and both the include path
 and the link fail there. A lock that only works on some boards is not a lock.
 
+### Recovering a watch whose PIN is lost
+
+Hold SELECT+BACK+UP. The button ISR sets `BOOT_BIT_FORCE_PRF`
+(`debounced_button.c`), below anything software can intercept, and the watch
+boots recovery firmware. PRF does not build this feature at all —
+`services_normal_early_init()`, which is what calls `security_lock_init()` and
+`security_lock_handle_boot()`, sits behind `#ifndef CONFIG_RECOVERY_FW` — so
+there is no lock screen there. A factory reset from PRF erases the filesystem
+and the watch comes back empty, ready to re-pair and resync.
+
+**This is deliberate, not a hole to be closed.** It reads like one, because the
+escape exists as a consequence of PRF not building the feature rather than as
+anything anyone wrote — so it is recorded here to stop a later change "fixing"
+it.
+
+The reasoning: what the escape gives an attacker is a *wiped watch*, which is
+the outcome this feature is trying to produce anyway. It cannot be used to read
+anything. The only way it could leak data is if PRF's console exposed
+filesystem reads, and reaching that console means physical access to the debug
+port — which means opening the watch, at which point the flash can be read
+directly and the threat model has already conceded (see "What this cannot
+defend against").
+
+Closing it would trade nothing for a user permanently locked out of their own
+watch by a forgotten four-digit PIN with three attempts.
+
 ## Risks and open questions
 
-- **PRF gap.** SELECT+BACK+UP boots recovery firmware, which does not run
-  `services_normal_early_init()`. PRF is built from this tree
-  (`bluetooth_persistent_storage_prf.c` exists), so an equivalent hook can be
-  added — but a device carrying an older PRF image is unprotected. Needs a
-  decision.
 - **Health data survives a seizure.** Accepted trade; stated here so it stays a
   conscious one.
 - **FTL retains stale physical pages.** `pfs_gc_deleted_sectors()` erases at the
