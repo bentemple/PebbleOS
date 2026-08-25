@@ -42,22 +42,21 @@ PEBBLE_PORT = 12344
 # --- Things to adjust when the UI changes -----------------------------------
 
 #: Row index of each Security menu entry, mirroring the SettingsSecurityRow
-#: order in src/fw/apps/system/settings/security.c. Three shapes, because rows
-#: appear as the feature becomes usable: the master switch is always there,
-#: most rows need a PIN, and the triggers need the switch on as well.
+#: order in src/fw/apps/system/settings/security.c. Two shapes only: the
+#: master switch alone when off, everything when on. Off and "no PIN" are the
+#: same state, because turning the feature off is what clears the PIN.
 #:
-#: This list has gone stale twice. If a menu assertion fails on a row that
-#: obviously exists, check this against the SettingsSecurityRow enum first.
-SECURITY_ROWS_NO_PIN = ["Security Lock", "Set PIN", "PIN Length"]
-SECURITY_ROWS_PIN_OFF = ["Security Lock", "Change PIN", "PIN Length", "Clear PIN"]
+#: This list has gone stale three times. If a menu assertion fails on a row
+#: that obviously exists, check it against the SettingsSecurityRow enum first
+#: -- a shifted index shows up as the wrong row silently doing nothing, and
+#: the assertion that notices is rarely the one that broke.
+SECURITY_ROWS_NO_PIN = ["Security Lock"]
 SECURITY_ROWS_WITH_PIN = [
     "Security Lock",
     "Change PIN",
-    "PIN Length",
     "Lock After",
     "Erase After",
     "Duress PIN",
-    "Clear PIN",
     "Lock Now",
     "Show in Launcher",
 ]
@@ -329,33 +328,54 @@ def select_security_row(name, pin_set):
     press("select")
 
 
+def choose_pin_length(digits, current=4):
+    """Pick 4 or 6 on the length step of the set-PIN flow.
+
+    The picker opens on the current length, so most of the time this is a
+    single SELECT. It has no row constant because it is a two-item option
+    menu rather than the Security menu.
+    """
+    if digits != current:
+        press("down" if digits > current else "up", settle=0.15)
+    press("select")
+    time.sleep(0.8)
+
+
 def set_or_change_pin(console, pad, new_pin, old_pin=None):
     """Set the PIN, taking whichever flow applies.
 
-    The menu differs depending on whether a PIN already exists -- row 0 is
-    "Set PIN" on a fresh watch and "Change PIN" once one is stored, and the
-    latter asks for the current PIN first. Getting this wrong leaves the pad
-    sitting on a stage the test never satisfies, so the state is queried
-    rather than assumed. That matters because the emulator keeps its
-    filesystem across a run, so the second test to touch the PIN is never
-    looking at a fresh watch.
+    Setting a PIN is what turns the feature on, so a fresh watch has one row
+    and reaching the pad goes through it; once a PIN exists the flow is
+    "Change PIN" and asks for the current one first. Both then step through
+    the length picker before the pad. Getting this wrong leaves the pad on a
+    stage the test never satisfies, so the state is queried rather than
+    assumed -- the emulator keeps its filesystem across a run, so the second
+    test to touch the PIN is never looking at a fresh watch.
     """
-    pin_set = console.status()["pin_len"] > 0
+    st = console.status()
+    pin_set = st["pin_len"] > 0
     open_security(console)
-    select_security_row("Change PIN" if pin_set else "Set PIN", pin_set)
+    select_security_row("Change PIN" if pin_set else "Security Lock", pin_set)
     if pin_set:
         type_pin(pad, old_pin or new_pin)   # authorise
+    choose_pin_length(len(new_pin), current=st["pin_len"] or 4)
     type_pin(pad, new_pin)                  # new
     type_pin(pad, new_pin)                  # repeat
     time.sleep(1.5)
 
 
 def ensure_no_pin(console, pad, current="1234"):
-    """Leave the watch with no PIN, whatever state it is in now."""
+    """Leave the watch with no PIN, whatever state it is in now.
+
+    Turning the feature off is what clears the PIN -- there is no separate
+    Clear PIN row, because it would be the same button under a second name --
+    and it asks for the PIN first, so an unlocked watch cannot be disarmed by
+    whoever happens to be holding it.
+    """
     if console.status()["pin_len"] == 0:
         return
     open_security(console)
-    select_security_row("Clear PIN", pin_set=True)
+    select_security_row("Security Lock", pin_set=True)
     type_pin(pad, current)
     time.sleep(1.5)
 
@@ -464,11 +484,13 @@ def test_set_pin(console, pad):
 
 
 def test_mismatched_pin_is_rejected(console, pad):
-    pin_set = console.status()["pin_len"] > 0
+    st = console.status()
+    pin_set = st["pin_len"] > 0
     open_security(console)
-    select_security_row("Change PIN" if pin_set else "Set PIN", pin_set)
+    select_security_row("Change PIN" if pin_set else "Security Lock", pin_set)
     if pin_set:
         type_pin(pad, "1234")    # authorise
+    choose_pin_length(4, current=st["pin_len"] or 4)
     type_pin(pad, "5678")        # new
     type_pin(pad, "8765")        # mismatched repeat
     time.sleep(1.0)
@@ -604,18 +626,33 @@ def test_phone_cannot_change_the_delays(console, pad):
     phone.close()
 
 
-def test_clear_pin(console, pad):
+def test_turning_it_off_clears_the_pin(console, pad):
+    """Off is a clean slate, and getting there costs the PIN.
+
+    There is no Clear PIN row: clearing the PIN is what turning the switch
+    off does. It asks for the PIN first, so an unlocked watch cannot be
+    disarmed by whoever is holding it -- which the switch used to allow in
+    two presses, protecting less than the lock screen it controlled.
+    """
     if console.status()["pin_len"] == 0:
-        check("nothing to clear", False, "no PIN was set")
+        check("nothing to turn off", False, "no PIN was set")
         return
     open_security(console)
-    select_security_row("Clear PIN", pin_set=True)
+    select_security_row("Security Lock", pin_set=True)
+
+    type_pin(pad, "9999")
+    time.sleep(1.0)
+    st = console.status()
+    check("a wrong PIN will not turn it off", st["state"] != 0, f"state={st['state']}")
+    check("a wrong PIN leaves the PIN in place", st["pin_len"] == 4,
+          f"pin_len={st['pin_len']}")
+
     type_pin(pad, "1234")
     time.sleep(1.5)
-    screenshot("10-after-clear")
+    screenshot("10-after-turning-off")
     st = console.status()
-    check("clearing removes the PIN", st["pin_len"] == 0, f"pin_len={st['pin_len']}")
-    check("clearing disables the lock", st["state"] == 0, f"state={st['state']}")
+    check("turning it off clears the PIN", st["pin_len"] == 0, f"pin_len={st['pin_len']}")
+    check("turning it off disables the lock", st["state"] == 0, f"state={st['state']}")
 
 
 TESTS = [
@@ -626,7 +663,7 @@ TESTS = [
     ("disconnect_arms_countdown", test_disconnect_arms_countdown),
     ("lock_and_unlock", test_lock_and_unlock),
     ("wrong_pin_counts_up", test_wrong_pin_counts_up),
-    ("clear_pin", test_clear_pin),
+    ("turning_it_off_clears_the_pin", test_turning_it_off_clears_the_pin),
 ]
 
 
