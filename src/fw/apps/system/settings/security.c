@@ -52,8 +52,8 @@
 typedef enum {
   //! Prove you know the existing PIN before being allowed to set another.
   PinStageAuthorizeSet,
-  //! Same, before being allowed to remove it.
-  PinStageAuthorizeClear,
+  //! Same, before turning the whole feature off -- which discards that PIN.
+  PinStageAuthorizeDisable,
   PinStageNewFirst,
   PinStageNewRepeat,
 } PinStage;
@@ -75,8 +75,9 @@ typedef struct SettingsSecurityData {
   char first_entry[SECURITY_LOCK_PIN_MAX_LEN];
   uint8_t auth_attempts;
 
-  //! Length the next PIN will be set to. Independent of the current PIN's
-  //! length, which is what the authorize step prompts for.
+  //! Length the next PIN will be set to, from the picker that opens the
+  //! set-PIN flow. Independent of the current PIN's length, which is what the
+  //! authorize step prompts for.
   uint8_t new_pin_len;
 
   //! Cached so drawing a row does not read flash on every MenuLayer redraw.
@@ -93,7 +94,6 @@ typedef struct SettingsSecurityData {
 
   char enabled_subtitle[SUBTITLE_BUF_SIZE];
   char pin_subtitle[SUBTITLE_BUF_SIZE];
-  char length_subtitle[SUBTITLE_BUF_SIZE];
   char lock_delay_subtitle[DELAY_SUBTITLE_BUF_SIZE];
   char shred_delay_subtitle[DELAY_SUBTITLE_BUF_SIZE];
 
@@ -164,31 +164,29 @@ static void prv_format_delay(uint32_t seconds, char *buf, size_t buf_size) {
 //! Recompute the cached state the rows are drawn from. Reads flash, so it is
 //! done here rather than in draw_row, which MenuLayer calls on every redraw.
 static void prv_update_state(SettingsSecurityData *data) {
-  // Deliberately does not touch new_pin_len. That is seeded once in prv_init()
-  // and otherwise belongs to the user: this runs on every appear, so seeding it
-  // from the current PIN here would silently undo the PIN Length row every time
-  // the menu came back into view.
+  // Deliberately does not touch new_pin_len. That belongs to the flow currently
+  // in progress: this runs on every appear, and the picker sits between the
+  // menu and the pad.
   data->current_pin_len = security_lock_get_pin_len();
-  data->enabled = security_lock_is_enabled();
+  // A PIN and the switch are the same fact now, since turning it off discards
+  // the PIN. Anded anyway, so a record where they disagree reads Off and offers
+  // the one row that repairs it rather than a menu of controls with nothing
+  // behind them.
+  data->enabled = security_lock_is_enabled() && prv_pin_is_set(data);
 
   // i18n_get_with_buffer rather than i18n_get: these are rebuilt on every
   // refresh and there is no reason to keep an owned translation around for a
   // string that is immediately copied.
   if (data->enabled) {
     i18n_get_with_buffer(i18n_noop("On"), data->enabled_subtitle, sizeof(data->enabled_subtitle));
-  } else if (prv_pin_is_set(data)) {
-    /// Subtitle on the master switch when it is off but a PIN is stored. Says
-    /// the PIN survives, so turning it back on does not mean setting one again.
-    i18n_get_with_buffer(i18n_noop("Off, PIN kept"), data->enabled_subtitle,
-                         sizeof(data->enabled_subtitle));
   } else {
     i18n_get_with_buffer(i18n_ctx_noop("SecurityLock", "Off"), data->enabled_subtitle,
                          sizeof(data->enabled_subtitle));
   }
 
-  // Deliberately not On/Off: that is what the master switch above says now, and
-  // "Change PIN -- On" beneath "Security Lock -- Off" reads as a contradiction.
-  // This row is about the credential, so it reports the credential.
+  // Deliberately not On/Off: that is what the master switch above says, and a
+  // second row saying it too reads as a separate control. This row is about the
+  // credential, so it reports the credential. Only drawn while there is one.
   if (prv_pin_is_set(data)) {
     char format[SUBTITLE_BUF_SIZE];
     /// Subtitle on the Change PIN row: a PIN exists and is this many digits.
@@ -196,12 +194,8 @@ static void prv_update_state(SettingsSecurityData *data) {
     sniprintf(data->pin_subtitle, sizeof(data->pin_subtitle), format,
               (unsigned)data->current_pin_len);
   } else {
-    /// Subtitle on the Set PIN row when there is no PIN yet.
-    i18n_get_with_buffer(i18n_noop("Not set"), data->pin_subtitle, sizeof(data->pin_subtitle));
+    data->pin_subtitle[0] = '\0';
   }
-
-  i18n_get_with_buffer(s_pin_length_labels[prv_length_index(data->new_pin_len)],
-                       data->length_subtitle, sizeof(data->length_subtitle));
 
   data->lock_delay_s = security_lock_get_lock_delay_s();
   data->shred_delay_s = security_lock_get_shred_delay_s();
@@ -264,8 +258,17 @@ static void prv_show_attempts_left(SettingsSecurityData *data, uint8_t left) {
 //! The local budget is not rate limiting in any real sense either; someone
 //! holding an unlocked watch has already won. It exists so that a menu cannot
 //! be used as a frictionless PIN oracle.
-static bool prv_verify_current_pin(const char *digits, uint8_t len) {
-  const bool matched = security_lock_verify_pin(digits, len, NULL);
+//!
+//! `allow_duress` is false for exactly one prompt, the one that turns the
+//! feature off. A duress PIN unlocks normally and wipes in the background, but
+//! the wipe is queued onto KernelMain while this runs on the app task, and
+//! turning the feature off is precisely what makes that queued wipe decline to
+//! run -- so the two race, and one outcome is a lock disarmed with nothing
+//! erased. Refusing it there is not duress support; it is refusing to be the
+//! worse of the two answers until there is a decision about the better one.
+static bool prv_verify_current_pin(const char *digits, uint8_t len, bool allow_duress) {
+  const bool matched = allow_duress ? security_lock_verify_pin(digits, len, NULL)
+                                    : security_lock_verify_real_pin(digits, len);
   security_lock_reset_failed_attempts();
   return matched;
 }
@@ -322,31 +325,44 @@ static void prv_handle_wrong_pin(SettingsSecurityData *data) {
   prv_show_attempts_left(data, SETTINGS_PIN_ATTEMPTS - data->auth_attempts);
 }
 
+//! Defined below with the rest of the picker.
+static void prv_length_menu_push(SettingsSecurityData *data);
+
 static void prv_pin_submit(const char *digits, uint8_t len, void *context) {
   SettingsSecurityData *data = context;
 
   switch (data->stage) {
     case PinStageAuthorizeSet:
-      if (!prv_verify_current_pin(digits, len)) {
+      if (!prv_verify_current_pin(digits, len, true /* allow_duress */)) {
         prv_handle_wrong_pin(data);
         return;
       }
-      prv_begin_new_pin(data);
+      if (data->target == PinTargetDuress) {
+        // No length to pick: a duress PIN is pinned to the real PIN's length.
+        prv_begin_new_pin(data);
+        return;
+      }
+      // The length is chosen as part of setting the PIN rather than in a row of
+      // its own, so the pad steps aside for the picker. Removed rather than left
+      // underneath it: BACK out of the picker should reach the menu, not a
+      // prompt whose authorisation has already been spent.
+      prv_finish_prompt(data);
+      prv_length_menu_push(data);
       return;
 
-    case PinStageAuthorizeClear: {
-      if (!prv_verify_current_pin(digits, len)) {
+    case PinStageAuthorizeDisable: {
+      if (!prv_verify_current_pin(digits, len, false /* allow_duress */)) {
         prv_handle_wrong_pin(data);
         return;
       }
-      PBL_LOG_DBG("Clearing PIN");
-      const status_t rv = security_lock_clear_pin();
+      PBL_LOG_DBG("Turning the security lock off");
+      const status_t rv = security_lock_disable();
       if (rv != S_SUCCESS) {
-        PBL_LOG_ERR("Failed to clear the PIN (%" PRId32 ")", (int32_t)rv);
-        // Stay put and say why. Popping back to a menu that still reads "On"
-        // would look like the clear had simply been ignored.
-        prv_report_store_failure(data, rv);
-        data->stage = PinStageAuthorizeClear;
+        // Only refused while Locked, where this menu is unreachable. Stay put
+        // and say so: popping back to a menu that still reads "On" would look
+        // like the switch had simply been ignored.
+        PBL_LOG_ERR("Refused to turn the security lock off (%" PRId32 ")", (int32_t)rv);
+        prv_set_prompt_message(data, i18n_noop("Could not turn it off"));
         return;
       }
       prv_finish_prompt(data);
@@ -394,7 +410,7 @@ static void prv_push_pin_prompt(SettingsSecurityData *data, PinStage stage, PinT
   memset(data->first_entry, 0, sizeof(data->first_entry));
 
   const bool authorizing =
-      (stage == PinStageAuthorizeSet) || (stage == PinStageAuthorizeClear);
+      (stage == PinStageAuthorizeSet) || (stage == PinStageAuthorizeDisable);
   const uint8_t len = authorizing ? data->current_pin_len : prv_new_pin_len(data);
 
   security_pin_entry_window_init(&data->pin_window, len, prv_pin_submit, data);
@@ -405,6 +421,11 @@ static void prv_push_pin_prompt(SettingsSecurityData *data, PinStage stage, PinT
                                      : ((target == PinTargetDuress)
                                             ? i18n_get("New duress PIN", data)
                                             : i18n_get("New PIN", data)));
+  if (stage == PinStageAuthorizeDisable) {
+    /// Message on the PIN prompt that guards turning the feature off. Off is a
+    /// clean slate rather than a pause, so say what it costs before it is typed.
+    prv_set_prompt_message(data, i18n_noop("Turning off clears your PIN"));
+  }
 
   app_window_stack_push(&data->pin_window.window, true /* animated */);
 }
@@ -412,20 +433,34 @@ static void prv_push_pin_prompt(SettingsSecurityData *data, PinStage stage, PinT
 
 // PIN length
 //////////////////////////////////////////////////////////////////////////////
+//
+// A step in the set-PIN flow rather than a row of its own. It has to be: with
+// the menu down to the master switch while the feature is off, there is nowhere
+// for a standalone row to live, and a first PIN would silently get whatever
+// length happened to be stored. Folding it in also retires the old two-step
+// dance -- pick a length, then go and change the PIN -- which was awkward
+// enough to be listed as a known wart.
 
 static void prv_length_menu_select(OptionMenu *option_menu, int selection, void *context) {
   SettingsSecurityData *data = settings_option_menu_get_context(context);
   data->new_pin_len = s_pin_lengths[selection];
-  prv_refresh(data);
+  // Removed before the pad goes up, so the picker is not left underneath a
+  // prompt it would reappear behind on the way back.
   app_window_stack_remove(&option_menu->window, true /* animated */);
+  prv_push_pin_prompt(data, PinStageNewFirst, PinTargetMain);
 }
 
+//! Ask which length the PIN being set should be, then collect it.
 static void prv_length_menu_push(SettingsSecurityData *data) {
+  // Changing a PIN keeps its length unless the user says otherwise; a first one
+  // starts at the shortest offered.
+  const uint8_t opens_on = prv_pin_is_set(data) ? data->current_pin_len : s_pin_lengths[0];
+
   const OptionMenuCallbacks callbacks = {
     .select = prv_length_menu_select,
   };
   settings_option_menu_push(i18n_noop("PIN Length"), OptionMenuContentType_SingleLine,
-                            prv_length_index(data->new_pin_len), &callbacks,
+                            prv_length_index(opens_on), &callbacks,
                             ARRAY_LENGTH(s_pin_length_labels), false /* icons_enabled */,
                             s_pin_length_labels, data);
 }
@@ -642,19 +677,25 @@ static void prv_lock_now_push(SettingsSecurityData *data) {
 //////////////////////////////////////////////////////////////////////////////
 
 enum SettingsSecurityItem {
-  //! First, because everything below it is inert while it is off.
+  //! First, and the only one that survives the feature being turned off.
   SettingsSecurityEnabled,
   SettingsSecurityPin,
-  SettingsSecurityPinLength,
   SettingsSecurityLockDelay,
   SettingsSecurityShredDelay,
   SettingsSecurityDuressPin,
-  SettingsSecurityClearPin,
   SettingsSecurityLockNow,
   SettingsSecurityLockdownInLauncher,
   NumSettingsSecurityItems
 };
 
+//! Off leaves exactly one row.
+//!
+//! Every other row configures or triggers something that does not exist while
+//! the feature is off -- there is no PIN to change, nothing to time, nothing to
+//! erase -- and a row that does nothing is worse than no row: it reads as a
+//! control. There is no Clear PIN either: clearing the PIN is what turning it
+//! off does, so the two would be the same button under different names.
+//!
 //! Nothing here may consult security_lock_has_duress_pin().
 //!
 //! Whether a duress PIN exists is the one thing this menu must not reveal --
@@ -662,44 +703,10 @@ enum SettingsSecurityItem {
 //! duress PIN only works if they cannot tell it is there. A "Clear duress PIN"
 //! row that came and went would leak that bit exactly as loudly as a subtitle
 //! would, so the row set is identical either way: one row that always offers to
-//! set a new one, and clearing that happens only as a side effect of clearing
-//! the real PIN.
-//!
-//! The master switch and the two PIN rows stay put whatever else is hidden.
-//! Those three are how the feature is configured rather than things it does:
-//! the length has to be pickable before a first PIN exists, and Clear PIN has
-//! to stay reachable or a PIN kept across a switch-off could never be got rid
-//! of without turning the feature back on first.
+//! set a new one, and clearing that happens only as a side effect of turning
+//! the feature off.
 static bool prv_item_is_visible(SettingsSecurityData *data, uint16_t item) {
-  //! Everything below the switch does nothing while it is off, and a row that
-  //! does nothing is worse than no row: it reads as a control.
-  const bool live = prv_pin_is_set(data) && data->enabled;
-
-  switch (item) {
-    case SettingsSecurityLockDelay:
-    case SettingsSecurityShredDelay:
-      // Without a PIN the watch neither locks nor erases when the phone goes
-      // away, so a configured delay would be a countdown that never runs.
-      return live;
-    case SettingsSecurityDuressPin:
-      // Follows the real PIN, which the row above already announces. Nothing
-      // about the duress PIN itself is being disclosed.
-      return live;
-    case SettingsSecurityClearPin:
-      return prv_pin_is_set(data);
-    case SettingsSecurityLockNow:
-      // Without a PIN there is nothing to unlock with, so this would erase
-      // without locking. Offering it under this name would be a lie.
-      return live;
-    case SettingsSecurityLockdownInLauncher:
-      // The app itself is hidden from the launcher and from Quick Launch
-      // without a PIN, so this would offer to show something that is not there.
-      // The stored preference is left alone and means what it meant again as
-      // soon as a PIN is set.
-      return live;
-    default:
-      return true;
-  }
+  return (item == SettingsSecurityEnabled) || data->enabled;
 }
 
 static uint16_t prv_item_from_row(SettingsSecurityData *data, uint16_t row) {
@@ -743,12 +750,9 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       subtitle = data->enabled_subtitle;
       break;
     case SettingsSecurityPin:
-      title = prv_pin_is_set(data) ? i18n_noop("Change PIN") : i18n_noop("Set PIN");
+      // Only drawn while the feature is on, which means a PIN exists.
+      title = i18n_noop("Change PIN");
       subtitle = data->pin_subtitle;
-      break;
-    case SettingsSecurityPinLength:
-      title = i18n_noop("PIN Length");
-      subtitle = data->length_subtitle;
       break;
     case SettingsSecurityLockDelay:
       /// How long after the phone disconnects the watch locks itself.
@@ -765,9 +769,6 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       title = i18n_noop("Duress PIN");
       // No subtitle, deliberately: any state shown here is the state that has
       // to stay hidden, and "Off" versus "On" is the whole secret.
-      break;
-    case SettingsSecurityClearPin:
-      title = i18n_noop("Clear PIN");
       break;
     case SettingsSecurityLockNow:
       title = i18n_noop("Lock Now");
@@ -799,32 +800,23 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
   SettingsSecurityData *data = (SettingsSecurityData *)context;
 
   switch (prv_item_from_row(data, row)) {
-    case SettingsSecurityEnabled: {
+    case SettingsSecurityEnabled:
       if (!prv_pin_is_set(data)) {
         // Turning it on means having something to unlock with, so this is the
-        // Set PIN flow -- and setting a PIN is itself what turns it on.
-        prv_push_pin_prompt(data, PinStageNewFirst, PinTargetMain);
-        break;
-      }
-      const status_t rv = security_lock_set_enabled(!data->enabled);
-      if (rv != S_SUCCESS) {
-        // Unreachable from here: the store only refuses this without a PIN,
-        // handled above, or while Locked, where Settings cannot be reached.
-        PBL_LOG_ERR("Refused to set the security lock enabled (%" PRId32 ")", (int32_t)rv);
-      }
-      prv_refresh(data);
-      break;
-    }
-    case SettingsSecurityPin:
-      if (!prv_pin_is_set(data)) {
-        prv_push_pin_prompt(data, PinStageNewFirst, PinTargetMain);
+        // Set PIN flow -- and setting a PIN is itself what turns it on. Keyed
+        // on the PIN rather than on the switch so a record where the two
+        // disagree is repaired rather than made worse.
+        prv_length_menu_push(data);
       } else {
-        // Changing a PIN means proving you know the current one first.
-        prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetMain);
+        // Turning it off discards the PIN, so it has to be as protected as
+        // unlocking is: otherwise anyone holding an unlocked watch could walk
+        // in here and disarm the whole thing.
+        prv_push_pin_prompt(data, PinStageAuthorizeDisable, PinTargetMain);
       }
       break;
-    case SettingsSecurityPinLength:
-      prv_length_menu_push(data);
+    case SettingsSecurityPin:
+      // Changing a PIN means proving you know the current one first.
+      prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetMain);
       break;
     case SettingsSecurityLockDelay:
       prv_lock_delay_menu_push(data);
@@ -836,9 +828,6 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
       // Always straight to setting a new one. Asking "set or clear?" would
       // answer the question the menu exists to refuse to answer.
       prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetDuress);
-      break;
-    case SettingsSecurityClearPin:
-      prv_push_pin_prompt(data, PinStageAuthorizeClear, PinTargetMain);
       break;
     case SettingsSecurityLockNow:
       prv_lock_now_push(data);
@@ -888,13 +877,9 @@ static Window *prv_init(void) {
     .appear = prv_appear_cb,
   };
 
-  data->current_pin_len = security_lock_get_pin_len();
-  // Changing a PIN keeps its length unless the user says otherwise; setting a
-  // first one starts at the shortest offered. Routed through the table either
-  // way so this can never hold a length the picker cannot show.
-  data->new_pin_len =
-      prv_pin_is_set(data) ? s_pin_lengths[prv_length_index(data->current_pin_len)]
-                           : s_pin_lengths[0];
+  // Always overwritten by the picker before a PIN is collected; seeded so it
+  // can never hold a length the pad would clamp.
+  data->new_pin_len = s_pin_lengths[0];
   prv_update_state(data);
 
   return settings_window_create(SettingsMenuItemSecurity, &data->callbacks);

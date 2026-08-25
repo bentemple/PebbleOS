@@ -211,8 +211,8 @@ void test_security_lock__verify_without_pin_fails(void) {
 ////////////////////////////////////
 //
 // Not a field of its own: Disabled already meant "nothing fires", already
-// defaulted off, and setting a PIN already left it. The only thing that changes
-// here is that a PIN may now outlive it.
+// defaulted off, and setting a PIN already left it. Turning it off discards the
+// PIN, so "has a PIN" and "is on" are one fact and cannot disagree.
 
 void test_security_lock__the_feature_is_off_out_of_the_box(void) {
   cl_assert(!security_lock_is_enabled());
@@ -225,57 +225,81 @@ void test_security_lock__setting_a_pin_turns_the_feature_on(void) {
   cl_assert(security_lock_is_enabled());
 }
 
-//! The point of the switch: off again without losing the PIN, so turning it
-//! back on does not mean typing a new one.
-void test_security_lock__turning_the_feature_off_keeps_the_pin(void) {
+//! The point of the switch: off is off, not paused. A PIN that outlived it
+//! would leave the switch protecting less than the lock screen does.
+void test_security_lock__turning_the_feature_off_clears_the_pin(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
 
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(false));
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
 
   cl_assert(!security_lock_is_enabled());
   cl_assert_equal_i(SecurityLockStateDisabled, security_lock_get_state());
-  cl_assert_equal_i(strlen(PIN), security_lock_get_pin_len());
+  cl_assert_equal_i(0, security_lock_get_pin_len());
+  cl_assert(!security_lock_verify_pin(PIN, strlen(PIN), NULL));
 }
 
-void test_security_lock__turning_it_back_on_needs_no_new_pin(void) {
+//! And the duress PIN with it. A forgotten one surviving into the next PIN
+//! would be a wipe nobody remembers arming.
+void test_security_lock__turning_the_feature_off_clears_the_duress_pin(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(false));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
 
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(true));
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
 
-  cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
-  cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
+  cl_assert(!security_lock_has_duress_pin());
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert(!security_lock_has_duress_pin());
 }
 
-//! The switch is persisted, so a reboot keeps the user's answer rather than
-//! coming back armed because a PIN happens to be stored.
-void test_security_lock__the_switch_survives_a_reboot(void) {
+//! "Everything behaves like before this feature existed": the delays go back to
+//! their defaults rather than being kept for a lock that no longer exists.
+void test_security_lock__turning_the_feature_off_restores_the_defaults(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(false));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(90, 900));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
+
+  cl_assert_equal_i(SECURITY_LOCK_DEFAULT_LOCK_DELAY_S, security_lock_get_lock_delay_s());
+  cl_assert_equal_i(SECURITY_LOCK_DEFAULT_SHRED_DELAY_S, security_lock_get_shred_delay_s());
+}
+
+//! Off is persisted, and nothing is left to come back: the config record went
+//! with the PIN, so there is no stored credential for a reboot to rearm from.
+void test_security_lock__off_survives_a_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
 
   prv_simulate_reboot();
 
   cl_assert(!security_lock_is_enabled());
-  cl_assert_equal_i(strlen(PIN), security_lock_get_pin_len());
+  cl_assert_equal_i(0, security_lock_get_pin_len());
 }
 
-//! Nothing to unlock with is nothing to turn on. A lock screen with no PIN to
-//! prompt for has no way to let the user back in.
-void test_security_lock__the_feature_cannot_be_turned_on_without_a_pin(void) {
-  cl_assert_equal_i(E_INVALID_OPERATION, security_lock_set_enabled(true));
+//! The same, through the path that discards the runtime record. This is the one
+//! that used to disarm the lock silently: the config record versions separately
+//! and survives, so a watch that was on comes back on -- and a watch that was
+//! turned off has no PIN to be rearmed from.
+void test_security_lock__off_survives_an_unreadable_runtime_record(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
+
+  prv_corrupt_runtime_version();
+  prv_simulate_reboot();
+
   cl_assert(!security_lock_is_enabled());
+  cl_assert_equal_i(0, security_lock_get_pin_len());
 }
 
-//! Turning the feature off is not a way past the lock screen. The phone can
-//! send this, so a watch it locked a moment ago must not open to a second
-//! message; only the PIN clears a lock.
+//! Turning the feature off is not a way past the lock screen: it would be an
+//! unlock without the PIN. Only the PIN clears a lock.
 void test_security_lock__the_feature_cannot_be_turned_off_while_locked(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
 
-  cl_assert_equal_i(E_INVALID_OPERATION, security_lock_set_enabled(false));
+  cl_assert_equal_i(E_INVALID_OPERATION, security_lock_disable());
 
   cl_assert(security_lock_is_locked());
+  cl_assert_equal_i(strlen(PIN), security_lock_get_pin_len());
 }
 
 //! Off means no countdown is left running, rather than one running that every
@@ -284,27 +308,24 @@ void test_security_lock__turning_the_feature_off_retires_the_deadlines(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(5000, 6000));
 
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(false));
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
 
   cl_assert_equal_i(0, security_lock_get_lock_deadline());
   cl_assert_equal_i(0, security_lock_get_shred_deadline());
 }
 
-void test_security_lock__setting_the_switch_to_what_it_already_is_is_a_no_op(void) {
-  cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_set_enabled(false));
-  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
-  cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_set_enabled(true));
+void test_security_lock__turning_off_an_already_off_feature_is_a_no_op(void) {
+  cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_disable());
 }
 
-//! Clearing the PIN turns the feature off too -- it is the other way out, and
-//! it takes the credential with it.
+//! Clearing the PIN is what turning the feature off does, so it is the same
+//! outcome reached from the recovery side.
 void test_security_lock__clearing_the_pin_turns_the_feature_off(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_clear_pin());
 
   cl_assert(!security_lock_is_enabled());
   cl_assert_equal_i(0, security_lock_get_pin_len());
-  cl_assert_equal_i(E_INVALID_OPERATION, security_lock_set_enabled(true));
 }
 
 // PIN configuration
@@ -768,6 +789,41 @@ void test_security_lock__wrong_pin_does_not_shred(void) {
   cl_assert(!security_lock_verify_pin("9999", 4, NULL));
   prv_run_pending_callback();
   cl_assert_equal_i(0, s_duress_shreds);
+}
+
+//! For the caller that cannot honour duress semantics: a duress PIN is simply
+//! a wrong PIN, and nothing is scheduled by it. Turning the feature off is what
+//! stops a queued wipe from running, so accepting one there would sometimes
+//! disarm the lock and erase nothing.
+void test_security_lock__real_pin_verify_refuses_a_duress_pin(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
+
+  cl_assert(!security_lock_verify_real_pin(DURESS, strlen(DURESS)));
+  prv_run_pending_callback();
+  cl_assert_equal_i(0, s_duress_shreds);
+}
+
+void test_security_lock__real_pin_verify_accepts_the_real_pin(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
+
+  cl_assert(security_lock_verify_real_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(0, security_lock_get_failed_attempts());
+  prv_run_pending_callback();
+  cl_assert_equal_i(0, s_duress_shreds);
+}
+
+//! It counts against the same budget as any other guess, so it cannot be used
+//! as a free oracle for whether an entry is the duress PIN.
+void test_security_lock__real_pin_verify_burns_an_attempt(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
+
+  cl_assert(!security_lock_verify_real_pin(DURESS, strlen(DURESS)));
+  cl_assert_equal_i(1, security_lock_get_failed_attempts());
+  cl_assert(!security_lock_verify_real_pin("9999", 4));
+  cl_assert_equal_i(2, security_lock_get_failed_attempts());
 }
 
 void test_security_lock__duress_pin_survives_reboot(void) {

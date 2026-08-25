@@ -114,12 +114,18 @@ void command_security_set_pin(const char *digits) {
 
 //! The master switch, so a test can reach the "feature off" cases without
 //! walking the Settings menu.
+//!
+//! Only off is a thing that can be commanded. Turning it on is setting a PIN
+//! and nothing else, so `security set pin` is the other half; `enable 1` is
+//! kept and refused rather than removed, so a script asking for it gets an
+//! answer that says why instead of an unknown command.
 void command_security_enable(const char *on_str) {
   char buf[96];
   const bool enable = (on_str[0] != '0');
-  const status_t rv = security_lock_set_enabled(enable);
-  snprintf(buf, sizeof(buf), "SECTEST enable on=%d rv=%" PRId32 " state=%d", (int)enable,
-           (int32_t)rv, (int)security_lock_get_state());
+  const status_t rv = enable ? E_INVALID_OPERATION : security_lock_disable();
+  snprintf(buf, sizeof(buf), "SECTEST enable on=%d rv=%" PRId32 " state=%d%s", (int)enable,
+           (int32_t)rv, (int)security_lock_get_state(),
+           enable ? " (use `security set pin` to turn it on)" : "");
   prv_sectest_report(buf);
 }
 

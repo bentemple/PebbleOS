@@ -173,10 +173,10 @@ void security_lock_init(void) {
     // watching -- every trigger is gated on the state -- which is an upgrade
     // that silently disarms the lock.
     //
-    // This does mean an upgrade re-enables a feature the user had turned off,
-    // because the master switch lives in the record that just went. A separate
-    // flag would live there too and lose the same way; coming back on is the
-    // safer of the two guesses, and the user turned a PIN on at some point.
+    // A stored PIN is the whole of "on" now, so this is not a guess about what
+    // the user wanted: turning the feature off discards the PIN, and a watch
+    // that still has one was never turned off. The two records losing step is
+    // the only way to reach here.
     //
     // Armed rather than Locked: a firmware upgrade is a deliberate act by
     // someone who already had the watch open, and locking them out of it is the
@@ -306,39 +306,25 @@ status_t security_lock_set_state(SecurityLockState state) {
   return rv;
 }
 
-status_t security_lock_set_enabled(bool enabled) {
+status_t security_lock_disable(void) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
   const SecurityLockState state = security_lock_get_state();
-
-  if (enabled) {
-    if (state != SecurityLockStateDisabled) {
-      return S_NO_ACTION_REQUIRED;
-    }
-    // Nothing to unlock with means nothing to turn on: the lock screen would
-    // have no PIN to prompt for and no way to let the user back in.
-    if (security_lock_get_pin_len() == 0) {
-      PBL_LOG_WRN("Refusing to enable the security lock with no PIN");
-      return E_INVALID_OPERATION;
-    }
-    PBL_LOG_INFO("Security lock enabled");
-    return security_lock_set_state(SecurityLockStateArmed);
-  }
-
   if (state == SecurityLockStateDisabled) {
     return S_NO_ACTION_REQUIRED;
   }
-  // Turning the feature off is not a way past the lock screen. Nothing on the
-  // wire reaches this any more, but keeping the rule here is what makes that
-  // true of every caller rather than of the endpoint alone.
+  // Turning the feature off is not a way past the lock screen. Nothing reaches
+  // this from a locked watch today, but keeping the rule here is what makes
+  // that true of every caller rather than of the one that exists.
   if (state == SecurityLockStateLocked) {
     PBL_LOG_WRN("Refusing to disable the security lock while locked");
     return E_INVALID_OPERATION;
   }
-  PBL_LOG_INFO("Security lock disabled; the PIN is kept");
-  // Retires any armed deadline along with it -- see security_lock_set_state().
-  return security_lock_set_state(SecurityLockStateDisabled);
+  PBL_LOG_INFO("Security lock disabled; discarding the PIN");
+  // Which is the whole of turning it off: the config record goes, and the
+  // runtime record goes back to its defaults -- state, deadlines and delays.
+  return security_lock_clear_pin();
 }
 
 void security_lock_radio_blackout_engage(void) {
@@ -622,7 +608,8 @@ static void prv_duress_shred_callback(void *unused) {
   security_lock_shred(SecurityShredReasonDuressPin);
 }
 
-bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out) {
+static bool prv_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out,
+                           bool allow_duress) {
   if (attempts_remaining_out) {
     *attempts_remaining_out = 0;
   }
@@ -656,7 +643,7 @@ bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts
         security_lock_pin_hash(digits, len, cfg.salt, attempt_hash) == S_SUCCESS) {
       matched = security_lock_hash_equal(attempt_hash, cfg.pin_hash);
     }
-    if (!matched && cfg.has_duress_pin && (cfg.duress_len == len) &&
+    if (!matched && allow_duress && cfg.has_duress_pin && (cfg.duress_len == len) &&
         security_lock_pin_hash(digits, len, cfg.duress_salt, attempt_hash) == S_SUCCESS) {
       // Reported to the caller as an ordinary success. Nothing above this layer
       // is told the difference, so nothing can leak it into the UI.
@@ -688,6 +675,14 @@ bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts
   }
 
   return matched;
+}
+
+bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out) {
+  return prv_verify_pin(digits, len, attempts_remaining_out, true /* allow_duress */);
+}
+
+bool security_lock_verify_real_pin(const char *digits, uint8_t len) {
+  return prv_verify_pin(digits, len, NULL, false /* allow_duress */);
 }
 
 uint8_t security_lock_get_failed_attempts(void) {

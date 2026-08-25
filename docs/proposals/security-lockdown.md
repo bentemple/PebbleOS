@@ -77,11 +77,11 @@ an oversight.
 ### State machine
 
 ```
-        configure PIN / turn on
+              set PIN
 Disabled ──────────────> Armed ──────────────────> Locked
    ^                       ^   phone LOCK cmd        │
    │                       │   manual panic          │  correct PIN
-   │  turn off / clear PIN │   disconnect grace      │
+   │  turn off (PIN goes)  │   disconnect grace      │
    └───────────────────────┴─────────────────────────┘
                                    ^                 │
                                    │                 v
@@ -99,11 +99,69 @@ funnels every trigger goes through, `security_lock_engage()` and
 `security_lock_shred()`, rather than at each caller, so a trigger added later is
 gated without knowing about it.
 
-A PIN outlives the switch, so turning the lock back on does not cost the user
-another one. Two refusals keep that from being a weakness: it cannot be turned
-on without a PIN, which would be a lock screen with nothing to prompt for, and
-it cannot be turned off while `Locked`, which would be an unlock without the
-PIN. Only the PIN clears a lock.
+**Off is a clean slate, and getting there costs the PIN.** Setting a PIN is the
+only way in; `security_lock_disable()` is the only way out, and it clears the
+PIN, the duress PIN and every setting the feature keeps. So "has a PIN" and "is
+on" are one fact rather than two that have to be kept in step, and there is no
+`set_enabled(true)` for them to disagree through.
+
+That is a security property, not tidiness. A switch that merely paused the
+feature protected less than the lock screen did: anyone holding an *unlocked*
+watch could walk into Settings and disarm the whole thing in two presses.
+Turning it off now goes through the same PIN prompt as changing the PIN does.
+
+One refusal remains: it cannot be turned off while `Locked`, which would be an
+unlock without the PIN. Settings is unreachable from a locked watch so nothing
+reaches it today, but the rule lives in the store rather than in the caller.
+Only the PIN clears a lock.
+
+`security_lock_clear_pin()` is the same operation reached from the recovery
+side — the console hook and internal cleanup — and deliberately does *not*
+carry the `Locked` refusal.
+
+Settings > Security has exactly two shapes, and the switch is row 0 in both:
+
+| Off | On |
+|---|---|
+| Security Lock — *Off* | Security Lock — *On* |
+| | Change PIN — *Set, N digits* |
+| | Lock After — *N min after disconnect* |
+| | Erase After — *N min after disconnect* / *Never, locks only* |
+| | Duress PIN — *(no subtitle, ever)* |
+| | Lock Now — *Lock and erase* |
+| | Show in Launcher — *On* / *Off, Quick Launch only* |
+
+There is no Clear PIN row: clearing the PIN is what turning the switch off does,
+so a row for it would be the same button under a second name. There is no PIN
+Length row either — see below.
+
+**PIN length is a step in the set-PIN flow**, not a row. With the menu down to
+one row while the feature is off there is nowhere for a standalone row to live,
+and a user turning the feature on from scratch would otherwise get whatever
+length happened to be stored rather than one they chose. So:
+
+- Turning it on: *Security Lock* → length picker → New PIN → Repeat PIN.
+- Changing it: *Change PIN* → Current PIN → length picker → New PIN → Repeat.
+- Turning it off: *Security Lock* → Current PIN ("Turning off clears your PIN").
+- Duress PIN: *Duress PIN* → Current PIN → New duress PIN → Repeat. **No
+  picker** — a duress PIN is pinned to the real PIN's length, because
+  `security_lock_verify_pin()` only tries the duress hash when the entered
+  length matches and the lock screen only ever prompts for the real PIN's.
+
+The picker opens on the current PIN's length (or four when there is none), so
+the extra step costs one press when the length is not the point. This also
+retires the old two-step dance — set the length in one row, then go and change
+the PIN in another — which was listed as a known wart.
+
+The two records can still lose step: the config record holds the PIN and the
+runtime record holds the state, and they version independently, so a firmware
+upgrade that bumps only the runtime version discards the state while the PIN
+survives. `security_lock_init()` repairs that by coming back `Armed` when it
+falls back to defaults with a PIN still stored. This is *not* made redundant by
+off clearing the PIN — a watch that was turned off has no config record to be
+rearmed from, so the fallback now only ever fires for someone who genuinely had
+the feature on, and the old caveat that it might re-enable something the user
+had switched off no longer applies.
 
 The one thing the switch does not gate is finishing a wipe that was interrupted
 by power loss (`shred_pending`). The content is already half destroyed by then,
@@ -372,8 +430,9 @@ rule covers every other way a lock can fail to take — the ack is keyed on the
 watch actually being locked afterwards, not on having asked.
 
 `STATUS_RESPONSE`'s `pin_configured` is answered from the stored PIN rather than
-from the state, because a PIN now outlives the switch and `Disabled` no longer
-implies there is none.
+from the state. The two agree by construction now, but reading the thing being
+reported keeps them honest: a record where they disagree reports what is
+actually stored rather than what the state implies.
 
 Both delays are counted **from the disconnect**, not from each other, so the
 defaults lock at five minutes and erase at thirty — twenty-five minutes after
@@ -670,8 +729,13 @@ watch by a forgotten four-digit PIN with three attempts.
 - **`security_lock_verify_pin()` blocks KernelMain for roughly 350ms** (10,000
   SHA-256 rounds) with no progress indication and no watchdog kick. Fine today;
   worth revisiting if the KernelMain watchdog is ever tightened.
-- **Changing PIN length is a two-step flow** (PIN Length, then Change PIN)
-  rather than a picker inside the change flow. Contained, but slightly awkward.
+- **Turning the feature off costs the PIN, and there is no confirmation
+  dialog.** The PIN prompt is the confirmation: it says "Turning off clears your
+  PIN" and cannot be got past without knowing it. A user who genuinely wanted a
+  pause has to set the PIN again afterwards, which is the price of the switch
+  being as protected as the lock screen.
+- **What a duress PIN should do at the disable prompt is undecided.** Today it
+  is simply not accepted there — see "Duress at the disable prompt" below.
 - **Nothing has run on hardware yet.** It has now been driven extensively under
   QEMU (`tools/pebble_harness.py`, `tools/security_lock_stress.py`), which is
   where most of the bugs below were found — but no claim here has been checked
@@ -682,6 +746,55 @@ watch by a forgotten four-digit PIN with three attempts.
 - Unverified: whether ANCS caches caller ID to flash (`ancs/ancs_phone_call.c`),
   and whether the voice/audio endpoints buffer audio to flash. Both need a read
   before finalising the shred target list.
+
+### Duress at the disable prompt
+
+Turning the feature off now asks for the PIN, which raises a question the duress
+PIN did not have to answer before: what should happen if the *duress* PIN is
+typed there?
+
+Consistent duress semantics say it should appear to succeed while wiping. Being
+made to switch the protection off is close to the case the duress PIN exists
+for. **This is undecided and deliberately not implemented.**
+
+What is implemented is the refusal to be the strictly worse answer. A duress PIN
+at that prompt is treated as a wrong PIN — `security_lock_verify_real_pin()`,
+which skips the duress branch and schedules nothing.
+
+The reason it cannot simply be left to work is an ordering problem rather than a
+policy one:
+
+- `security_lock_verify_pin()` reports a duress match to its caller as an
+  ordinary success and queues the wipe onto KernelMain (`tskIDLE_PRIORITY + 3`).
+- Settings runs on the app task (`tskIDLE_PRIORITY + 2`), and carries straight
+  on to turn the feature off.
+- `security_lock_shred()` refuses while the feature is off.
+
+So the higher-priority wipe usually preempts and runs first, and then the app
+task resumes and disables — but not reliably: the wipe also quiesces the UI,
+which kills the app mid-flow, and if the disable lands first the wipe finds the
+feature off and erases nothing. One of the two outcomes is *a lock disarmed with
+nothing erased on a compelled duress entry*, which is worse than refusing.
+
+Whichever way this is settled, it has to be settled in an order that does not
+depend on task priorities. The options look like:
+
+1. **Refuse, as now.** Cheapest. Costs the user under coercion the duress
+   behaviour they expected at that one prompt, silently.
+2. **Wipe, then disable, synchronously**, rather than queueing. Needs the shred
+   driven from a task that may block for seconds — which the app task may not —
+   so realistically it means deferring the *disable* onto KernelMain behind the
+   wipe rather than deferring the wipe.
+3. **Wipe and leave the feature on**, showing whatever a successful disable
+   shows. Best duress story: the attacker sees the switch go off, the watch is
+   wiped, and the lock is still armed. Also the most machinery, and the menu
+   would then be lying about its own state, which nothing else here does.
+
+The other Settings prompts are unaffected and unchanged: a duress PIN
+authorises Change PIN and Duress PIN and takes its wipe with it, because nothing
+in those flows turns the feature off underneath the queued shred. That is pinned
+by a test so settling the question above is a deliberate change rather than a
+side effect.
 
 ## What running it actually found
 

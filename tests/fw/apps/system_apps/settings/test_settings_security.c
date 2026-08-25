@@ -49,24 +49,18 @@ SecurityLockState security_lock_get_state(void) {
   return s_state;
 }
 
-//! Mirrors the store's own rules. The two that matter here are that a PIN
-//! outlives the switch, and that turning the switch on without one is refused.
-status_t security_lock_set_enabled(bool enabled) {
-  if (enabled) {
-    if (s_state != SecurityLockStateDisabled) {
-      return S_NO_ACTION_REQUIRED;
-    }
-    if (s_stored_pin_len == 0) {
-      return E_INVALID_OPERATION;
-    }
-    s_state = SecurityLockStateArmed;
-    return S_SUCCESS;
-  }
+static status_t prv_clear_pin(void);
+
+//! Mirrors the store's own rules: turning the feature off is clearing the PIN,
+//! and it is refused while Locked.
+status_t security_lock_disable(void) {
   if (s_state == SecurityLockStateDisabled) {
     return S_NO_ACTION_REQUIRED;
   }
-  s_state = SecurityLockStateDisabled;
-  return S_SUCCESS;
+  if (s_state == SecurityLockStateLocked) {
+    return E_INVALID_OPERATION;
+  }
+  return prv_clear_pin();
 }
 
 status_t security_lock_set_pin(const char *digits, uint8_t len) {
@@ -102,7 +96,7 @@ bool security_lock_has_duress_pin(void) {
   return false;
 }
 
-status_t security_lock_clear_pin(void) {
+static status_t prv_clear_pin(void) {
   memset(s_stored_pin, 0, sizeof(s_stored_pin));
   s_stored_pin_len = 0;
   // Clearing the real PIN takes the duress PIN with it; that is the only way
@@ -110,14 +104,35 @@ status_t security_lock_clear_pin(void) {
   memset(s_stored_duress, 0, sizeof(s_stored_duress));
   s_stored_duress_len = 0;
   s_state = SecurityLockStateDisabled;
+  s_lock_delay_s = SECURITY_LOCK_DEFAULT_LOCK_DELAY_S;
+  s_shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S;
   return S_SUCCESS;
 }
 
-bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out) {
+//! A tripwire, like the duress one below: the menu turns the feature off
+//! through security_lock_disable(), which keeps the Locked refusal. Reaching
+//! the store's recovery path directly would skip it.
+status_t security_lock_clear_pin(void) {
+  cl_fail("Settings must turn the feature off through security_lock_disable()");
+  return E_INTERNAL;
+}
+
+//! Wipes the real store would have queued because a duress PIN was accepted.
+static int s_duress_shreds;
+
+static bool prv_verify(const char *digits, uint8_t len, uint8_t *attempts_remaining_out,
+                       bool allow_duress) {
   if (s_failed_attempts < UINT8_MAX) {
     s_failed_attempts++;
   }
-  const bool matched = (len == s_stored_pin_len) && (memcmp(digits, s_stored_pin, len) == 0);
+  bool matched = (len == s_stored_pin_len) && (memcmp(digits, s_stored_pin, len) == 0);
+  if (!matched && allow_duress && (s_stored_duress_len != 0) && (len == s_stored_duress_len) &&
+      (memcmp(digits, s_stored_duress, len) == 0)) {
+    // Reported as an ordinary success, exactly as the real one does, and the
+    // wipe it queues is the thing that must not be lost to a switch-off.
+    matched = true;
+    s_duress_shreds++;
+  }
   if (matched) {
     s_failed_attempts = 0;
   }
@@ -127,6 +142,14 @@ bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts
                                   : SECURITY_LOCK_MAX_PIN_ATTEMPTS - s_failed_attempts;
   }
   return matched;
+}
+
+bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out) {
+  return prv_verify(digits, len, attempts_remaining_out, true /* allow_duress */);
+}
+
+bool security_lock_verify_real_pin(const char *digits, uint8_t len) {
+  return prv_verify(digits, len, NULL, false /* allow_duress */);
 }
 
 uint8_t security_lock_get_failed_attempts(void) {
@@ -332,32 +355,22 @@ void i18n_free_all(const void *owner) {}
 // Helpers
 ////////////////////////////////////
 
-//! The master switch is first on every row set, because everything below it is
-//! inert while it is off.
+//! The master switch is first on both row sets, and while the feature is off it
+//! is the only row: everything else configures or triggers something that does
+//! not exist until there is a PIN.
 #define ROW_ENABLED 0
+#define ROWS_WHEN_OFF 1
 
-//! Row order when no PIN is configured. Everything that needs one to mean
-//! anything is gone, Show in Launcher included: the Lockdown app is itself
-//! hidden without a PIN, so the row would toggle nothing that exists.
-#define ROW_SET_PIN 1
-#define ROW_PIN_LENGTH_UNSET 2
-#define ROWS_WITHOUT_PIN 3
-//! Row order once one is and the feature is on.
+//! Row order once the feature is on. There is no Clear PIN and no PIN Length:
+//! clearing the PIN is what turning it off does, and the length is picked as
+//! part of setting a PIN.
 #define ROW_CHANGE_PIN 1
-#define ROW_PIN_LENGTH_SET 2
-#define ROW_LOCK_AFTER 3
-#define ROW_ERASE_AFTER 4
-#define ROW_DURESS_PIN 5
-#define ROW_CLEAR_PIN 6
-#define ROW_LOCK_NOW 7
-#define ROW_SHOW_IN_LAUNCHER_SET 8
-#define ROWS_WITH_PIN 9
-//! And with a PIN kept across a switch-off: the switch, the two PIN rows and
-//! Clear PIN. Those configure the feature rather than being things it does, and
-//! a PIN that could not be got rid of without turning the lock back on first
-//! would be a trap.
-#define ROW_CLEAR_PIN_OFF 3
-#define ROWS_WITH_PIN_OFF 4
+#define ROW_LOCK_AFTER 2
+#define ROW_ERASE_AFTER 3
+#define ROW_DURESS_PIN 4
+#define ROW_LOCK_NOW 5
+#define ROW_SHOW_IN_LAUNCHER 6
+#define ROWS_WHEN_ON 7
 
 static void prv_open_settings(void) {
   settings_security_get_info()->init();
@@ -388,6 +401,27 @@ static void prv_install_pin(const char *pin) {
   s_reset_attempts_calls = 0;
 }
 
+//! Choose a length on the picker that now opens every set-PIN flow. Defined
+//! with the rest of the length helpers further down.
+static void prv_choose_length(uint8_t len);
+
+//! Turn the feature on from the menu, the way a user would: the switch, the
+//! length picker, then the PIN twice.
+static void prv_enable_with_pin(const char *pin) {
+  prv_select(ROW_ENABLED);
+  prv_choose_length(strlen(pin));
+  prv_submit(pin);
+  prv_submit(pin);
+  s_module->appear(s_module);
+}
+
+//! And off again, which costs the current PIN.
+static void prv_disable_with_pin(const char *pin) {
+  prv_select(ROW_ENABLED);
+  prv_submit(pin);
+  s_module->appear(s_module);
+}
+
 void test_settings_security__initialize(void) {
   memset(s_stored_pin, 0, sizeof(s_stored_pin));
   s_stored_pin_len = 0;
@@ -396,6 +430,7 @@ void test_settings_security__initialize(void) {
   s_state = SecurityLockStateDisabled;
   s_failed_attempts = 0;
   s_reset_attempts_calls = 0;
+  s_duress_shreds = 0;
   s_engage_calls = 0;
   s_lock_delay_s = SECURITY_LOCK_DEFAULT_LOCK_DELAY_S;
   s_shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S;
@@ -467,8 +502,8 @@ void test_settings_security__setting_a_pin_turns_the_switch_on(void) {
   cl_assert_equal_s("On", s_drawn_subtitle);
 }
 
-//! On and Off belong to the master switch alone now. A PIN row that also said
-//! "On" would sit under "Security Lock: Off" and read as a contradiction.
+//! On and Off belong to the master switch alone. A PIN row that also said "On"
+//! would read as a second control over the same thing.
 void test_settings_security__the_pin_row_does_not_say_on_or_off(void) {
   prv_install_pin("1234");
   prv_open_settings();
@@ -476,99 +511,143 @@ void test_settings_security__the_pin_row_does_not_say_on_or_off(void) {
   prv_draw(ROW_CHANGE_PIN);
   cl_assert(strstr(s_drawn_subtitle, "4") != NULL);
   cl_assert(strstr(s_drawn_subtitle, "On") == NULL);
-
-  prv_select(ROW_ENABLED);
-  prv_draw(ROW_CHANGE_PIN);
-  cl_assert(strstr(s_drawn_subtitle, "On") == NULL);
 }
 
 //! With no PIN there is nothing to unlock with, so turning it on is the Set PIN
-//! flow rather than a refusal the user has to decode.
-void test_settings_security__turning_it_on_without_a_pin_asks_for_one(void) {
+//! flow rather than a refusal the user has to decode -- starting with the
+//! length, which is otherwise unreachable now the row for it is gone.
+void test_settings_security__turning_it_on_asks_for_a_length_then_a_pin(void) {
   prv_open_settings();
 
   prv_select(ROW_ENABLED);
 
+  // The picker first, and no pad until it has been answered.
+  cl_assert(s_option_select != NULL);
+  cl_assert(s_prompt == NULL);
+
+  prv_choose_length(6);
   cl_assert(s_prompt != NULL);
-  prv_submit("1234");
-  prv_submit("1234");
-  cl_assert_equal_i(4, s_stored_pin_len);
+  cl_assert_equal_i(6, s_prompt_pin_len);
+
+  prv_submit("135792");
+  prv_submit("135792");
+  cl_assert_equal_i(6, s_stored_pin_len);
 
   s_module->appear(s_module);
   prv_draw(ROW_ENABLED);
   cl_assert_equal_s("On", s_drawn_subtitle);
 }
 
-//! The whole point of the switch: off without losing the PIN, so turning it
-//! back on does not mean typing a new one.
-void test_settings_security__turning_it_off_keeps_the_pin(void) {
+//! The security point of the whole change: anyone holding an unlocked watch
+//! could otherwise walk in here and switch the protection off. Turning it off
+//! has to be as protected as unlocking is.
+void test_settings_security__turning_it_off_requires_the_current_pin(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
   prv_select(ROW_ENABLED);
 
+  cl_assert(s_prompt != NULL);
+  cl_assert_equal_i(4, s_prompt_pin_len);
+  // Nothing has happened yet.
+  cl_assert_equal_i(SecurityLockStateArmed, s_state);
+
+  prv_submit("9999");
+  cl_assert_equal_i(SecurityLockStateArmed, s_state);
   cl_assert_equal_i(4, s_stored_pin_len);
+  cl_assert(s_prompt != NULL);
+
+  prv_submit("1234");
   cl_assert_equal_i(SecurityLockStateDisabled, s_state);
-  // No prompt: turning the feature off is not a change that needs authorising
-  // by the PIN it is keeping.
   cl_assert(s_prompt == NULL);
 }
 
-void test_settings_security__turning_it_back_on_needs_no_new_pin(void) {
+//! Off is a clean slate rather than a pause: the PIN goes with it, so "turn it
+//! back on" is setting a PIN again.
+void test_settings_security__turning_it_off_clears_the_pin(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_disable_with_pin("1234");
+
+  cl_assert_equal_i(0, s_stored_pin_len);
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+}
+
+//! And the duress PIN with it, which is the only way one is ever removed.
+void test_settings_security__turning_it_off_clears_the_duress_pin(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_DURESS_PIN);
+  prv_submit("1234");
+  prv_submit("5678");
+  prv_submit("5678");
+  cl_assert_equal_i(4, s_stored_duress_len);
+
+  s_module->appear(s_module);
+  prv_disable_with_pin("1234");
+
+  cl_assert_equal_i(0, s_stored_duress_len);
+}
+
+//! The prompt has to say what it costs. Nothing else on screen distinguishes
+//! this from the Change PIN prompt, and the two have very different outcomes.
+void test_settings_security__the_disable_prompt_says_the_pin_goes(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
   prv_select(ROW_ENABLED);
+
+  cl_assert_equal_s("Turning off clears your PIN", s_prompt_message);
+}
+
+//! Backing out of the prompt leaves the feature exactly as it was.
+void test_settings_security__walking_away_from_the_disable_prompt_changes_nothing(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
   prv_select(ROW_ENABLED);
+  cl_assert(s_prompt_cancelable);
+  s_module->appear(s_module);  // what backing out of the prompt looks like
 
   cl_assert_equal_i(SecurityLockStateArmed, s_state);
-  cl_assert(s_prompt == NULL);
-  prv_draw(ROW_ENABLED);
-  cl_assert_equal_s("On", s_drawn_subtitle);
+  cl_assert_equal_i(4, s_stored_pin_len);
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
 }
 
-//! The subtitle has to say the PIN survived, or the user has no way to tell
-//! this apart from having cleared it.
-void test_settings_security__off_with_a_pin_says_the_pin_is_kept(void) {
+//! Off leaves one row. Everything else configures or triggers something that
+//! does not exist, and a row that does nothing reads as a control.
+void test_settings_security__off_leaves_only_the_switch(void) {
   prv_install_pin("1234");
   prv_open_settings();
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
 
-  prv_select(ROW_ENABLED);
+  prv_disable_with_pin("1234");
 
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
   prv_draw(ROW_ENABLED);
-  cl_assert_equal_s("Off, PIN kept", s_drawn_subtitle);
-}
-
-//! Everything the feature does is hidden while it is off, the way it is hidden
-//! without a PIN. What stays is the switch, the two PIN rows and Clear PIN --
-//! configuration rather than triggers.
-void test_settings_security__the_rows_below_hide_while_it_is_off(void) {
-  prv_install_pin("1234");
-  prv_open_settings();
-  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
-
-  prv_select(ROW_ENABLED);
-
-  cl_assert_equal_i(ROWS_WITH_PIN_OFF, prv_num_rows());
+  cl_assert_equal_s("Security Lock", s_drawn_title);
+  cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
+  cl_assert(strstr(s_drawn_subtitle, "PIN") == NULL);
 }
 
 void test_settings_security__the_rows_come_back_when_it_is_turned_on(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
-  prv_select(ROW_ENABLED);
-  prv_select(ROW_ENABLED);
+  prv_disable_with_pin("1234");
+  prv_enable_with_pin("4321");
 
-  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
 }
 
-//! Lock Now is the one row whose absence matters most: it is the manual erase,
-//! and offering it while nothing can lock would be a button that wipes the
-//! watch and leaves it open.
-void test_settings_security__lock_now_is_gone_while_it_is_off(void) {
+//! Named individually because each was its own decision, and a row set that
+//! quietly regrew one of them would still have the right count.
+void test_settings_security__nothing_else_is_reachable_while_it_is_off(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  prv_select(ROW_ENABLED);
+  prv_disable_with_pin("1234");
 
   for (uint16_t row = 0; row < prv_num_rows(); row++) {
     prv_draw(row);
@@ -576,37 +655,23 @@ void test_settings_security__lock_now_is_gone_while_it_is_off(void) {
     cl_assert(strcmp(s_drawn_title, "Lock After") != 0);
     cl_assert(strcmp(s_drawn_title, "Erase After") != 0);
     cl_assert(strcmp(s_drawn_title, "Duress PIN") != 0);
+    cl_assert(strcmp(s_drawn_title, "Change PIN") != 0);
+    cl_assert(strcmp(s_drawn_title, "PIN Length") != 0);
+    cl_assert(strcmp(s_drawn_title, "Clear PIN") != 0);
+    cl_assert(strcmp(s_drawn_title, "Show in Launcher") != 0);
   }
 }
 
-//! Clear PIN stays, or a PIN kept across a switch-off could only be got rid of
-//! by turning the lock back on first.
-void test_settings_security__clear_pin_stays_reachable_while_it_is_off(void) {
+//! Clear PIN is gone for good: clearing the PIN is what turning the feature off
+//! does, so a row for it would be the same button under a second name.
+void test_settings_security__there_is_no_clear_pin_row(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  prv_select(ROW_ENABLED);
 
-  prv_draw(ROW_CLEAR_PIN_OFF);
-  cl_assert_equal_s("Clear PIN", s_drawn_title);
-
-  prv_select(ROW_CLEAR_PIN_OFF);
-  prv_submit("1234");
-  cl_assert_equal_i(0, s_stored_pin_len);
-}
-
-//! Rows appear and disappear underneath the selection, so the mapping from row
-//! index to action has to keep up across the switch too. Getting it wrong means
-//! aiming at Clear PIN and erasing the watch instead.
-void test_settings_security__rows_follow_the_switch(void) {
-  prv_install_pin("1234");
-  prv_open_settings();
-  prv_select(ROW_ENABLED);
-  cl_assert_equal_i(ROWS_WITH_PIN_OFF, prv_num_rows());
-
-  prv_draw(ROW_CHANGE_PIN);
-  cl_assert_equal_s("Change PIN", s_drawn_title);
-  prv_draw(ROW_PIN_LENGTH_SET);
-  cl_assert_equal_s("PIN Length", s_drawn_title);
+  for (uint16_t row = 0; row < prv_num_rows(); row++) {
+    prv_draw(row);
+    cl_assert(strcmp(s_drawn_title, "Clear PIN") != 0);
+  }
 }
 
 // Rows
@@ -614,40 +679,55 @@ void test_settings_security__rows_follow_the_switch(void) {
 
 void test_settings_security__hides_pin_actions_until_there_is_a_pin(void) {
   prv_open_settings();
-  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
 }
 
 void test_settings_security__shows_pin_actions_once_set(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
+}
+
+//! An inconsistent record -- on with no PIN -- is not a state any control
+//! produces, but it must read as off and offer the one row that repairs it
+//! rather than a menu of controls with nothing behind them.
+void test_settings_security__on_without_a_pin_reads_as_off(void) {
+  s_state = SecurityLockStateArmed;
+  prv_open_settings();
+
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
+  prv_draw(ROW_ENABLED);
+  cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
+
+  // And selecting it sets a PIN rather than trying to turn off what is not on.
+  prv_select(ROW_ENABLED);
+  prv_choose_length(4);
+  prv_submit("1234");
+  prv_submit("1234");
+  cl_assert_equal_i(4, s_stored_pin_len);
 }
 
 // Rows appear and disappear underneath the selection, so the mapping from row
-// index to action has to keep up. Getting it wrong here means selecting "Clear
-// PIN" and erasing the watch instead.
+// index to action has to keep up. Getting it wrong here means aiming at one row
+// and erasing the watch instead.
 void test_settings_security__rows_follow_the_pin_appearing(void) {
   prv_open_settings();
-  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
 
-  prv_select(ROW_SET_PIN);
-  prv_submit("1234");
-  prv_submit("1234");
+  prv_enable_with_pin("1234");
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
 
-  s_module->appear(s_module);
-  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
+  prv_draw(ROW_CHANGE_PIN);
+  cl_assert_equal_s("Change PIN", s_drawn_title);
 
-  // The last row must now be Lock Now, not something that fell through to a
-  // default.
+  // And Lock Now really is where the index says, not something that fell
+  // through to a default.
   prv_select(ROW_LOCK_NOW);
   cl_assert(s_dialog_confirm != NULL);
 }
 
 // Duress PIN
 ////////////////////////////////////
-
-//! Defined with the rest of the length helpers further down.
-static void prv_choose_length(uint8_t len);
 
 //! Count and order of rows, which must not depend on the duress PIN.
 static void prv_capture_row_titles(int *count) {
@@ -695,18 +775,19 @@ void test_settings_security__duress_pin_requires_the_current_pin(void) {
 // verify_pin only tries the duress hash when the entered length matches the one
 // it was stored with, and the lock screen only ever prompts for the real PIN's
 // length. A duress PIN of the other length would look set and never work.
+//
+// So this flow gets no length picker: the choice would be one that cannot be
+// honoured.
 void test_settings_security__duress_pin_matches_the_real_pin_length(void) {
   prv_install_pin("123456");
   prv_open_settings();
 
-  // Even with the picker set to four, which is what the next real PIN would be.
-  prv_select(ROW_PIN_LENGTH_SET);
-  prv_choose_length(4);
-  s_module->appear(s_module);
-
   prv_select(ROW_DURESS_PIN);
   cl_assert_equal_i(6, s_prompt_pin_len);
+  s_option_select = NULL;
+
   prv_submit("123456");
+  cl_assert(s_option_select == NULL);
   cl_assert_equal_i(6, s_prompt_pin_len);
 }
 
@@ -724,9 +805,62 @@ void test_settings_security__duress_pin_must_differ_from_the_real_one(void) {
   cl_assert_equal_s("Must differ from your PIN", s_prompt_message);
 }
 
-// Clearing the real PIN is the only way to remove a duress PIN, so it has to
+// A duress PIN unlocks normally and wipes in the background. The disable prompt
+// cannot honour that: the wipe is queued onto a higher-priority task than the
+// one that then turns the feature off, and turning it off is exactly what makes
+// the queued wipe decline to run. So the two race, and one of the two outcomes
+// is a lock disarmed with nothing erased.
+//
+// Until there is a decision about what it should do there, it must not be the
+// worse answer. Refused, like any other wrong PIN.
+void test_settings_security__a_duress_pin_will_not_turn_the_feature_off(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_DURESS_PIN);
+  prv_submit("1234");
+  prv_submit("5678");
+  prv_submit("5678");
+  cl_assert_equal_i(4, s_stored_duress_len);
+  s_module->appear(s_module);
+  s_duress_shreds = 0;
+
+  prv_select(ROW_ENABLED);
+  prv_submit("5678");
+
+  // Neither disabled nor wiped, and still sitting on the prompt like any other
+  // wrong entry.
+  cl_assert_equal_i(SecurityLockStateArmed, s_state);
+  cl_assert_equal_i(4, s_stored_pin_len);
+  cl_assert_equal_i(0, s_duress_shreds);
+  cl_assert(s_prompt != NULL);
+}
+
+// The other prompts are unchanged: a duress PIN authorises them and takes its
+// wipe with it, because nothing there turns the feature off underneath it.
+// Pinned so that settling the question above is a deliberate change rather than
+// a side effect.
+void test_settings_security__a_duress_pin_still_authorises_a_pin_change(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_DURESS_PIN);
+  prv_submit("1234");
+  prv_submit("5678");
+  prv_submit("5678");
+  s_module->appear(s_module);
+  s_duress_shreds = 0;
+
+  prv_select(ROW_CHANGE_PIN);
+  prv_submit("5678");
+
+  cl_assert_equal_i(1, s_duress_shreds);
+  cl_assert(s_option_select != NULL);  // through to the length picker
+}
+
+// Turning the feature off is the only way to remove a duress PIN, so it has to
 // actually do it -- otherwise a forgotten one survives into the next PIN.
-void test_settings_security__clearing_the_pin_takes_the_duress_pin_with_it(void) {
+void test_settings_security__disabling_takes_the_duress_pin_with_it(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
@@ -737,8 +871,7 @@ void test_settings_security__clearing_the_pin_takes_the_duress_pin_with_it(void)
   cl_assert_equal_i(4, s_stored_duress_len);
 
   s_module->appear(s_module);
-  prv_select(ROW_CLEAR_PIN);
-  prv_submit("1234");
+  prv_disable_with_pin("1234");
 
   cl_assert_equal_i(0, s_stored_pin_len);
   cl_assert_equal_i(0, s_stored_duress_len);
@@ -758,16 +891,18 @@ void test_settings_security__changing_a_pin_reaches_the_prompt(void) {
   cl_assert(s_prompt != NULL);
 }
 
-void test_settings_security__clearing_a_pin_reaches_the_prompt(void) {
+void test_settings_security__turning_it_off_reaches_the_prompt(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  prv_select(ROW_CLEAR_PIN);
+  prv_select(ROW_ENABLED);
   cl_assert(s_prompt != NULL);
 }
 
-void test_settings_security__setting_a_first_pin_reaches_the_prompt(void) {
+void test_settings_security__setting_a_first_pin_reaches_the_picker(void) {
   prv_open_settings();
-  prv_select(ROW_SET_PIN);
+  prv_select(ROW_ENABLED);
+  cl_assert(s_option_select != NULL);
+  prv_choose_length(4);
   cl_assert(s_prompt != NULL);
 }
 
@@ -776,7 +911,8 @@ void test_settings_security__setting_a_first_pin_reaches_the_prompt(void) {
 
 void test_settings_security__set_pin_needs_two_matching_entries(void) {
   prv_open_settings();
-  prv_select(ROW_SET_PIN);
+  prv_select(ROW_ENABLED);
+  prv_choose_length(4);
   cl_assert(s_prompt != NULL);
 
   prv_submit("1234");
@@ -791,7 +927,8 @@ void test_settings_security__set_pin_needs_two_matching_entries(void) {
 
 void test_settings_security__mismatched_entries_set_nothing(void) {
   prv_open_settings();
-  prv_select(ROW_SET_PIN);
+  prv_select(ROW_ENABLED);
+  prv_choose_length(4);
 
   prv_submit("1234");
   prv_submit("1235");
@@ -809,11 +946,12 @@ void test_settings_security__mismatched_entries_set_nothing(void) {
 
 void test_settings_security__prompt_is_escapable_unlike_the_lock_screen(void) {
   prv_open_settings();
-  prv_select(ROW_SET_PIN);
+  prv_select(ROW_ENABLED);
+  prv_choose_length(4);
   cl_assert(s_prompt_cancelable);
 }
 
-// Changing and clearing require the current PIN
+// Changing the PIN requires the current one
 ////////////////////////////////////
 
 void test_settings_security__change_requires_the_current_pin(void) {
@@ -825,6 +963,7 @@ void test_settings_security__change_requires_the_current_pin(void) {
   cl_assert(s_prompt != NULL);
 
   prv_submit("1234");
+  prv_choose_length(4);
   prv_submit("5678");
   prv_submit("5678");
 
@@ -833,8 +972,8 @@ void test_settings_security__change_requires_the_current_pin(void) {
   cl_assert(security_lock_verify_pin("5678", 4, NULL));
 }
 
-// Without this, requiring the current PIN to clear one would be theatre: an
-// attacker would just set their own over the top.
+// Without this, requiring the current PIN to turn the feature off would be
+// theatre: an attacker would just set their own over the top.
 void test_settings_security__change_cannot_be_used_to_bypass_the_old_pin(void) {
   prv_install_pin("1234");
   prv_open_settings();
@@ -847,27 +986,13 @@ void test_settings_security__change_cannot_be_used_to_bypass_the_old_pin(void) {
   cl_assert(security_lock_verify_pin("1234", 4, NULL));
 }
 
-void test_settings_security__clear_requires_the_current_pin(void) {
-  prv_install_pin("1234");
-  prv_open_settings();
-  prv_select(ROW_CLEAR_PIN);
-
-  prv_submit("9999");
-  cl_assert_equal_i(4, security_lock_get_pin_len());
-  cl_assert(s_prompt != NULL);
-
-  prv_submit("1234");
-  cl_assert_equal_i(0, security_lock_get_pin_len());
-  cl_assert(s_prompt == NULL);
-}
-
 // Attempt counter
 ////////////////////////////////////
 
 void test_settings_security__gives_up_after_three_wrong_attempts(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  prv_select(ROW_CLEAR_PIN);
+  prv_select(ROW_ENABLED);
 
   prv_submit("9999");
   cl_assert(s_prompt != NULL);
@@ -884,7 +1009,7 @@ void test_settings_security__gives_up_after_three_wrong_attempts(void) {
 void test_settings_security__wrong_attempts_do_not_arm_the_lock_screen(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  prv_select(ROW_CLEAR_PIN);
+  prv_select(ROW_ENABLED);
 
   prv_submit("9999");
   prv_submit("9998");
@@ -897,7 +1022,7 @@ void test_settings_security__wrong_attempts_do_not_arm_the_lock_screen(void) {
 void test_settings_security__a_correct_pin_also_leaves_the_counter_clear(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  prv_select(ROW_CLEAR_PIN);
+  prv_select(ROW_ENABLED);
 
   prv_submit("1234");
 
@@ -907,6 +1032,11 @@ void test_settings_security__a_correct_pin_also_leaves_the_counter_clear(void) {
 
 // PIN length
 ////////////////////////////////////
+//
+// A step in the set-PIN flow rather than a row of its own. With the menu down
+// to the master switch while the feature is off there is nowhere for a row to
+// live, and a first PIN would otherwise get whatever length happened to be
+// stored rather than one the user chose.
 
 //! The lengths the picker must offer, in order. Stated here rather than derived
 //! from the module: "exactly four or six" is the requirement, so the test has
@@ -930,34 +1060,30 @@ static void prv_choose_length(uint8_t len) {
 
 void test_settings_security__offers_only_four_or_six_digits(void) {
   prv_open_settings();
-  prv_select(ROW_PIN_LENGTH_UNSET);
+  prv_select(ROW_ENABLED);
 
   cl_assert_equal_i(ARRAY_LENGTH(s_expected_lengths), s_option_num_rows);
 
   // And each row really does produce the length it claims.
   for (int i = 0; i < (int)ARRAY_LENGTH(s_expected_lengths); ++i) {
     s_option_select(&s_option_menu, i, NULL);
-    s_module->appear(s_module);
-    prv_select(ROW_SET_PIN);
     cl_assert_equal_i(s_expected_lengths[i], s_prompt_pin_len);
-    prv_select(ROW_PIN_LENGTH_UNSET);
+    s_module->appear(s_module);
+    prv_select(ROW_ENABLED);
   }
 }
 
-void test_settings_security__length_choice_survives_a_menu_refresh(void) {
+//! The length picked has to reach the pad that collects the new PIN, or a
+//! six-digit choice quietly produces a four-digit PIN.
+void test_settings_security__length_applies_to_a_changed_pin(void) {
   prv_install_pin("1234");
   prv_open_settings();
-
-  prv_select(ROW_PIN_LENGTH_SET);
-  prv_choose_length(6);
-
-  // A refresh is what happens every time this menu comes back into view; the
-  // choice must not be quietly reset to the current PIN's length.
-  s_module->appear(s_module);
 
   prv_select(ROW_CHANGE_PIN);
   cl_assert_equal_i(4, s_prompt_pin_len);  // authorising against the old PIN
   prv_submit("1234");
+
+  prv_choose_length(6);
   cl_assert_equal_i(6, s_prompt_pin_len);  // now collecting the new one
 
   prv_submit("135792");
@@ -968,11 +1094,8 @@ void test_settings_security__length_choice_survives_a_menu_refresh(void) {
 void test_settings_security__length_applies_to_a_first_pin(void) {
   prv_open_settings();
 
-  prv_select(ROW_PIN_LENGTH_UNSET);
+  prv_select(ROW_ENABLED);
   prv_choose_length(6);
-  s_module->appear(s_module);
-
-  prv_select(ROW_SET_PIN);
   cl_assert_equal_i(6, s_prompt_pin_len);
 
   prv_submit("135792");
@@ -980,22 +1103,48 @@ void test_settings_security__length_applies_to_a_first_pin(void) {
   cl_assert_equal_i(6, security_lock_get_pin_len());
 }
 
-void test_settings_security__length_menu_opens_on_the_current_choice(void) {
+//! Changing a PIN keeps its length unless the user says otherwise, so the
+//! picker opens on it and the extra step costs one press.
+void test_settings_security__length_menu_opens_on_the_current_length(void) {
   prv_install_pin("123456");
   prv_open_settings();
 
-  prv_select(ROW_PIN_LENGTH_SET);
+  prv_select(ROW_CHANGE_PIN);
+  prv_submit("123456");
+
   cl_assert_equal_i(prv_length_index(6), s_option_choice);
+}
+
+//! And on the shortest offered when there is no PIN to keep the length of.
+void test_settings_security__length_menu_opens_on_the_shortest_for_a_first_pin(void) {
+  prv_open_settings();
+
+  prv_select(ROW_ENABLED);
+
+  cl_assert_equal_i(prv_length_index(4), s_option_choice);
+}
+
+//! Backing out of the picker leaves the authorisation spent rather than sitting
+//! on a prompt that has already been satisfied.
+void test_settings_security__backing_out_of_the_picker_drops_the_prompt(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_CHANGE_PIN);
+  prv_submit("1234");
+
+  cl_assert(s_prompt == NULL);
+  cl_assert(s_option_select != NULL);
 }
 
 // Lock Now
 ////////////////////////////////////
 
-void test_settings_security__lock_now_is_hidden_without_a_pin(void) {
+void test_settings_security__lock_now_is_hidden_while_it_is_off(void) {
   prv_open_settings();
-  // Only Set PIN and PIN Length; nothing here erases anything.
-  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
-  prv_draw(ROWS_WITHOUT_PIN - 1);
+  // Only the master switch; nothing here erases anything.
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
+  prv_draw(ROW_ENABLED);
   cl_assert(strcmp("Lock Now", s_drawn_title) != 0);
 }
 
@@ -1029,47 +1178,42 @@ void test_settings_security__lock_now_defers_engage_to_the_kernel(void) {
 // Show in Launcher
 ////////////////////////////////////
 
-// Gated on the PIN like the rows above it. Without one the Lockdown app is
-// hidden from the launcher and from Quick Launch, so a row offering to show it
-// in the launcher would control something that is not there.
-void test_settings_security__show_in_launcher_is_hidden_without_a_pin(void) {
+// Gated on the switch like the rows above it. While it is off the Lockdown app
+// is hidden from the launcher and from Quick Launch, so a row offering to show
+// it in the launcher would control something that is not there.
+void test_settings_security__show_in_launcher_is_hidden_while_it_is_off(void) {
   prv_open_settings();
-  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
-  for (uint16_t row = 0; row < ROWS_WITHOUT_PIN; row++) {
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
+  for (uint16_t row = 0; row < ROWS_WHEN_OFF; row++) {
     prv_draw(row);
     cl_assert(strcmp("Show in Launcher", s_drawn_title) != 0);
   }
 }
 
 // And the pref is left exactly as the user last set it, so it still means what
-// it meant once a PIN comes back.
+// it meant once the feature comes back.
 void test_settings_security__hiding_the_row_does_not_rewrite_the_pref(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  prv_select(ROW_SHOW_IN_LAUNCHER_SET);
+  prv_select(ROW_SHOW_IN_LAUNCHER);
   cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
 
-  prv_select(ROW_CLEAR_PIN);
-  prv_submit("1234");
-  s_module->appear(s_module);
-  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
+  prv_disable_with_pin("1234");
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
   cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
 
-  prv_select(ROW_SET_PIN);
-  prv_submit("4321");
-  prv_submit("4321");
-  s_module->appear(s_module);
-  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
-  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
+  prv_enable_with_pin("4321");
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
+  prv_draw(ROW_SHOW_IN_LAUNCHER);
   cl_assert_equal_s("Show in Launcher", s_drawn_title);
   cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
 }
 
-void test_settings_security__show_in_launcher_is_the_last_row_with_a_pin(void) {
+void test_settings_security__show_in_launcher_is_the_last_row(void) {
   prv_install_pin("1234");
   prv_open_settings();
-  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
-  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
+  prv_draw(ROW_SHOW_IN_LAUNCHER);
   cl_assert_equal_s("Show in Launcher", s_drawn_title);
 }
 
@@ -1077,10 +1221,10 @@ void test_settings_security__show_in_launcher_toggles(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
-  prv_select(ROW_SHOW_IN_LAUNCHER_SET);
+  prv_select(ROW_SHOW_IN_LAUNCHER);
   cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
 
-  prv_select(ROW_SHOW_IN_LAUNCHER_SET);
+  prv_select(ROW_SHOW_IN_LAUNCHER);
   cl_assert(shell_prefs_get_lockdown_app_in_launcher());
 }
 
@@ -1092,11 +1236,11 @@ void test_settings_security__show_in_launcher_says_quick_launch_still_works(void
   prv_install_pin("1234");
   prv_open_settings();
 
-  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
+  prv_draw(ROW_SHOW_IN_LAUNCHER);
   cl_assert_equal_s("On", s_drawn_subtitle);
 
-  prv_select(ROW_SHOW_IN_LAUNCHER_SET);
-  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
+  prv_select(ROW_SHOW_IN_LAUNCHER);
+  prv_draw(ROW_SHOW_IN_LAUNCHER);
   cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
   cl_assert(strstr(s_drawn_subtitle, "Quick Launch") != NULL);
 }
@@ -1108,7 +1252,7 @@ void test_settings_security__show_in_launcher_reflects_the_stored_value(void) {
   shell_prefs_set_lockdown_app_in_launcher(false);
   prv_open_settings();
 
-  prv_draw(ROW_SHOW_IN_LAUNCHER_SET);
+  prv_draw(ROW_SHOW_IN_LAUNCHER);
   cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
 }
 
@@ -1169,19 +1313,16 @@ static void prv_choose_shred_delay(uint32_t seconds) {
   cl_fail("that erase delay is not offered");
 }
 
-// The delays only do anything once a PIN exists: without one nothing locks and
-// nothing is erased on a disconnect, so offering to time either would be the
-// same lie Lock Now is hidden to avoid.
+// The delays only do anything once the feature is on: while it is off nothing
+// locks and nothing is erased on a disconnect, so offering to time either would
+// be the same lie Lock Now is hidden to avoid.
 void test_settings_security__delay_rows_appear_with_the_pin(void) {
   prv_open_settings();
-  cl_assert_equal_i(ROWS_WITHOUT_PIN, prv_num_rows());
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
 
-  prv_select(ROW_SET_PIN);
-  prv_submit("1234");
-  prv_submit("1234");
-  s_module->appear(s_module);
+  prv_enable_with_pin("1234");
 
-  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
   prv_draw(ROW_LOCK_AFTER);
   cl_assert_equal_s("Lock After", s_drawn_title);
   prv_draw(ROW_ERASE_AFTER);

@@ -332,9 +332,8 @@ void test_lockdown__says_the_lock_must_be_turned_on(void) {
 // The master switch
 ////////////////////////////////////
 //
-// A PIN kept across a switch-off is not a working lock. engage() refuses while
-// the feature is off, so an app that ignored the switch would be a panic button
-// that silently did nothing.
+// engage() refuses while the feature is off, so an app that ignored the switch
+// would be a panic button that silently did nothing.
 
 void test_lockdown__is_hidden_everywhere_while_the_feature_is_off(void) {
   s_state = SecurityLockStateDisabled;
@@ -352,9 +351,10 @@ void test_lockdown__does_not_shred_while_the_feature_is_off(void) {
   cl_assert_equal_i(1, s_dialog_pushes);
 }
 
-//! A stored PIN is exactly the case that makes this hazardous: everything looks
-//! configured, and only the switch says otherwise.
-void test_lockdown__a_kept_pin_does_not_make_the_app_usable(void) {
+//! Off with a PIN still stored is not a state any control produces -- turning
+//! the feature off discards the PIN -- but an inconsistent record must not be
+//! enough to make the app usable. Only the switch decides.
+void test_lockdown__a_stored_pin_does_not_make_the_app_usable(void) {
   s_state = SecurityLockStateDisabled;
   s_pin_len = 6;
 

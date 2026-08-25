@@ -50,9 +50,8 @@
 #define SECURITY_LOCK_TIME_ROLLBACK_SLACK_S (5 * 60)
 
 typedef enum {
-  //! Feature off. Nothing locks, nothing erases, no deadline is armed. A PIN
-  //! may still be stored: turning the feature back on must not cost the user
-  //! another one.
+  //! Feature off, and a clean slate: no PIN, no duress PIN, no deadline armed,
+  //! every delay back at its default. Nothing locks and nothing erases.
   SecurityLockStateDisabled = 0,
   //! Configured and watching, but the watch is usable.
   SecurityLockStateArmed = 1,
@@ -70,9 +69,10 @@ status_t security_lock_set_state(SecurityLockState state);
 //! The master switch for the whole feature, persisted, off out of the box.
 //!
 //! Derived from the state rather than stored beside it, so there is exactly one
-//! notion of "on" and a future trigger cannot consult the wrong one. Disabled
-//! already meant "nothing fires", already defaulted off, and setting a PIN
-//! already left it -- the only thing it gains here is that a PIN may outlive it.
+//! notion of "on" and a future trigger cannot consult the wrong one. Having a
+//! PIN and being on are the same fact: setting a PIN arms, and turning it off
+//! discards the PIN, so the two cannot diverge and there is no third answer to
+//! keep in step.
 //!
 //! Enforced at the two funnels, security_lock_engage() and
 //! security_lock_shred(), so nothing that trips a lock or an erase has to
@@ -81,23 +81,33 @@ static inline bool security_lock_is_enabled(void) {
   return security_lock_get_state() != SecurityLockStateDisabled;
 }
 
-//! Turn the whole feature on or off, keeping any stored PIN either way.
-//!
-//! Refuses to turn on without a PIN: there would be no way back out of the lock
-//! screen. Refuses to turn off while Locked, which would be an unlock without
-//! the PIN -- and the phone can ask for this.
-//!
-//! @return S_NO_ACTION_REQUIRED if it was already that way.
-status_t security_lock_set_enabled(bool enabled);
-
 //! Configure the PIN and move to Armed. Digits are ASCII '0'-'9'.
 //!
 //! Setting a PIN is what turns the feature on; there is nothing else to opt in
 //! with, and a PIN that armed nothing would be a control that did nothing.
+//! There is deliberately no counterpart that turns it on without one.
 status_t security_lock_set_pin(const char *digits, uint8_t len);
 
 //! Clear the PIN and move to Disabled. Also clears any duress PIN.
+//!
+//! The recovery path as well as the user-facing one, so it takes the watch out
+//! of Locked too. security_lock_disable() is the control a user reaches.
 status_t security_lock_clear_pin(void);
+
+//! Turn the whole feature off: back to how the watch behaves with the feature
+//! never having been used.
+//!
+//! Clears the PIN and the duress PIN with it. Keeping a PIN across a switch-off
+//! meant the switch protected less than the lock screen did -- anyone holding an
+//! unlocked watch could walk into Settings and disarm it -- so off is a clean
+//! slate and turning it back on is setting a PIN again.
+//!
+//! Refuses while Locked, which would be an unlock without the PIN. Settings is
+//! unreachable from a locked watch, so nothing reaches this today; the rule
+//! lives here so that stays true of every future caller.
+//!
+//! @return S_NO_ACTION_REQUIRED if it was already off.
+status_t security_lock_disable(void);
 
 //! Configure a second PIN that unlocks the watch and silently destroys its
 //! content at the same time.
@@ -127,6 +137,22 @@ uint8_t security_lock_get_pin_len(void);
 //!             attempts left before escalation.
 //! @return true if the PIN matched.
 bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out);
+
+//! Verify against the real PIN alone. A duress PIN is a mismatch here, and
+//! nothing is triggered by it.
+//!
+//! For the one caller that cannot honour duress semantics. A duress unlock
+//! wipes in the background while the watch behaves normally, but turning the
+//! feature off is exactly what stops a background wipe from running -- and the
+//! two race, because the wipe is queued onto a higher-priority task than the
+//! one asking. Accepting a duress PIN there would sometimes disable the lock
+//! and silently skip the wipe, which is the opposite of what it is for.
+//!
+//! Not a way to find out whether a duress PIN exists: it answers false for one
+//! exactly as it does for any other wrong PIN.
+//!
+//! Burns an attempt in the same before-the-comparison order as above.
+bool security_lock_verify_real_pin(const char *digits, uint8_t len);
 
 uint8_t security_lock_get_failed_attempts(void);
 status_t security_lock_reset_failed_attempts(void);
