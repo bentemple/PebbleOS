@@ -65,12 +65,6 @@ typedef struct PACKED {
   uint8_t state;
 } SecurityLockStateMsg;
 
-//! Whether the phone has asked for the feature at all. Not persisted: the
-//! phone re-sends CONFIGURE on every connection. The delays themselves are
-//! persisted by the service, because Settings can set them too and they have
-//! to survive a reboot.
-static bool s_enabled = true;
-
 static RegularTimerInfo s_deadline_timer;
 static bool s_deadline_timer_running;
 
@@ -159,10 +153,27 @@ static void prv_send_status(void) {
   const SecurityLockStatusMsg msg = {
       .cmd = SecurityLockCmdStatusResponse,
       .state = (uint8_t)security_lock_get_state(),
-      .pin_configured = (security_lock_get_state() != SecurityLockStateDisabled) ? 1 : 0,
+      // Answered from the PIN itself, not from the state. A PIN outlives the
+      // master switch, so Disabled no longer implies there is none -- and a
+      // phone told otherwise would offer to set one that already exists.
+      .pin_configured = (security_lock_get_pin_len() != 0) ? 1 : 0,
       .deadline_remaining_s = hton32(remaining),
   };
   prv_send(&msg, sizeof(msg));
+}
+
+//! Say no to a LOCK by reporting the state that refused it.
+//!
+//! LOCK_ACK carries only a reason echo and has no failure encoding, and adding
+//! one would need a phone that understands it. STATE_CHANGED is a message the
+//! phone already parses, and Disabled is the entire reason for the refusal --
+//! so this says no in a vocabulary that exists today.
+//!
+//! What must not happen is a LOCK_ACK: the phone reads that as "locked and
+//! erased" and stops asking. Reporting success for a watch that did neither is
+//! the worst of the three outcomes.
+static void prv_refuse_lock(void) {
+  security_lock_endpoint_send_state_changed(security_lock_get_state());
 }
 
 //! security_lock_engage() touches the app and modal stacks, so it is
@@ -170,6 +181,15 @@ static void prv_send_status(void) {
 static void prv_lock_callback(void *data) {
   const SecurityShredReason reason = (SecurityShredReason)(uintptr_t)data;
   security_lock_engage(reason);
+
+  // Keyed on what actually happened rather than on having asked. engage()
+  // refuses on more than the master switch -- an unusable stored PIN length
+  // among them -- and every one of those must reach the phone as a refusal.
+  if (!security_lock_is_locked()) {
+    PBL_LOG_WRN("LOCK did not take effect; reporting state instead of acking");
+    prv_refuse_lock();
+    return;
+  }
   prv_send_lock_ack(reason);
 }
 
@@ -178,8 +198,11 @@ static void prv_handle_lock(const uint8_t *msg, size_t len) {
     PBL_LOG_ERR("Short LOCK message: %u", (unsigned)len);
     return;
   }
-  if (!s_enabled) {
-    PBL_LOG_WRN("Ignoring LOCK: feature disabled");
+  if (!security_lock_is_enabled()) {
+    // Refused here as well as at the funnel, so the watch does not tear its own
+    // UI down on the way to doing nothing.
+    PBL_LOG_WRN("Ignoring LOCK: the security lock is off");
+    prv_refuse_lock();
     return;
   }
   const SecurityLockReasonMsg *lock_msg = (const SecurityLockReasonMsg *)msg;
@@ -193,7 +216,18 @@ static void prv_handle_configure(const uint8_t *msg, size_t len) {
     return;
   }
   const SecurityLockConfigureMsg *cfg = (const SecurityLockConfigureMsg *)msg;
-  s_enabled = (cfg->enabled != 0);
+
+  // The same persisted switch Settings flips. There is one notion of "on", so
+  // the two cannot disagree and a reboot keeps whichever set it last. The phone
+  // can therefore turn the feature off remotely -- it can already LOCK, so it
+  // is inside the trust boundary either way -- but it cannot unlock: turning
+  // off is refused while Locked, and turning on is refused without a PIN.
+  const bool want_enabled = (cfg->enabled != 0);
+  const status_t enable_rv = security_lock_set_enabled(want_enabled);
+  if ((enable_rv != S_SUCCESS) && (enable_rv != S_NO_ACTION_REQUIRED)) {
+    PBL_LOG_WRN("Refused the phone's enabled=%d (%" PRId32 ")", (int)want_enabled,
+                (int32_t)enable_rv);
+  }
 
   // Zero means "leave it alone" rather than "act immediately", so a phone that
   // does not care about the timings cannot accidentally set them to nothing.
@@ -209,8 +243,9 @@ static void prv_handle_configure(const uint8_t *msg, size_t len) {
     }
   }
 
-  PBL_LOG_DBG("Configured: enabled=%d lock=%" PRIu32 "s shred=%" PRIu32 "s", (int)s_enabled,
-              security_lock_get_lock_delay_s(), security_lock_get_shred_delay_s());
+  PBL_LOG_DBG("Configured: enabled=%d lock=%" PRIu32 "s shred=%" PRIu32 "s",
+              (int)security_lock_is_enabled(), security_lock_get_lock_delay_s(),
+              security_lock_get_shred_delay_s());
 }
 
 void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *msg, size_t len) {
@@ -262,7 +297,7 @@ static void prv_deadline_lock_callback(void *unused) {
 //! deadlines are absolute timestamps in the lock record, so they survive both
 //! and are re-checked at boot.
 static void prv_deadline_check(void *unused) {
-  if (security_lock_get_state() == SecurityLockStateDisabled) {
+  if (!security_lock_is_enabled()) {
     return;
   }
 
@@ -347,7 +382,10 @@ void security_lock_handle_comm_session_event(const PebbleCommSessionEvent *event
     return;
   }
 
-  if (!s_enabled || (security_lock_get_state() == SecurityLockStateDisabled)) {
+  // Off means no deadline is ever armed, rather than one armed and then
+  // declined to act on: nothing should be counting down on a watch that has
+  // said it does not want this.
+  if (!security_lock_is_enabled()) {
     return;
   }
 
@@ -394,8 +432,17 @@ void security_lock_endpoint_init(void) {
   }
 
   // A watch that was locked and offline across a reboot needs the timer running
-  // again without waiting for another disconnect event.
-  if ((security_lock_get_lock_deadline() != 0) || (security_lock_get_shred_deadline() != 0)) {
-    prv_start_deadline_timer();
+  // again without waiting for another disconnect event. Nothing arms a deadline
+  // while the feature is off, so a leftover one is a record from before it was
+  // turned off: retire it rather than resume counting down on it.
+  const bool armed =
+      (security_lock_get_lock_deadline() != 0) || (security_lock_get_shred_deadline() != 0);
+  if (!armed) {
+    return;
   }
+  if (!security_lock_is_enabled()) {
+    security_lock_clear_deadlines();
+    return;
+  }
+  prv_start_deadline_timer();
 }

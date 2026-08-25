@@ -51,7 +51,9 @@
 #define SECURITY_LOCK_TIME_ROLLBACK_SLACK_S (5 * 60)
 
 typedef enum {
-  //! Feature off; no PIN configured.
+  //! Feature off. Nothing locks, nothing erases, no deadline is armed. A PIN
+  //! may still be stored: turning the feature back on must not cost the user
+  //! another one.
   SecurityLockStateDisabled = 0,
   //! Configured and watching, but the watch is usable.
   SecurityLockStateArmed = 1,
@@ -66,7 +68,33 @@ SecurityLockState security_lock_get_state(void);
 bool security_lock_is_locked(void);
 status_t security_lock_set_state(SecurityLockState state);
 
+//! The master switch for the whole feature, persisted, off out of the box.
+//!
+//! Derived from the state rather than stored beside it, so there is exactly one
+//! notion of "on" and a future trigger cannot consult the wrong one. Disabled
+//! already meant "nothing fires", already defaulted off, and setting a PIN
+//! already left it -- the only thing it gains here is that a PIN may outlive it.
+//!
+//! Enforced at the two funnels, security_lock_engage() and
+//! security_lock_shred(), so nothing that trips a lock or an erase has to
+//! remember to ask.
+static inline bool security_lock_is_enabled(void) {
+  return security_lock_get_state() != SecurityLockStateDisabled;
+}
+
+//! Turn the whole feature on or off, keeping any stored PIN either way.
+//!
+//! Refuses to turn on without a PIN: there would be no way back out of the lock
+//! screen. Refuses to turn off while Locked, which would be an unlock without
+//! the PIN -- and the phone can ask for this.
+//!
+//! @return S_NO_ACTION_REQUIRED if it was already that way.
+status_t security_lock_set_enabled(bool enabled);
+
 //! Configure the PIN and move to Armed. Digits are ASCII '0'-'9'.
+//!
+//! Setting a PIN is what turns the feature on; there is nothing else to opt in
+//! with, and a PIN that armed nothing would be a control that did nothing.
 status_t security_lock_set_pin(const char *digits, uint8_t len);
 
 //! Clear the PIN and move to Disabled. Also clears any duress PIN.

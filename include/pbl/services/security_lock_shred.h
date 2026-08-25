@@ -57,8 +57,12 @@ typedef enum {
 //! filesystem sweep is scheduled rather than run inline, so it outlives the
 //! call. Must not be called from a task that cannot tolerate the blocking.
 //!
+//! Does nothing and wipes nothing while the feature is off. This is one of the
+//! two funnels the master switch is enforced at, so a trigger added later is
+//! gated without having to know about it.
+//!
 //! @param reason why the shred was triggered, for logging and the phone
-//! @return bitmap of what was wiped, for SHRED_COMPLETE
+//! @return bitmap of what was wiped, for SHRED_COMPLETE. 0 if nothing ran.
 uint32_t security_lock_shred(SecurityShredReason reason);
 
 //! Finish a shred that ran at early boot: sweep the filesystem, tell the phone
@@ -76,6 +80,10 @@ void security_lock_finish_boot_shred(void);
 //! (a reboot is the one way past the lock screen, so it has to cost the data),
 //! when a disconnect deadline lapsed while powered off, or when the clock has
 //! been wound back.
+//!
+//! Every one of those but the first is gated on the master switch. An
+//! interrupted wipe is finished whatever the switch says: the content is
+//! already half gone and stopping would leave fragments behind for good.
 //!
 //! Zeroes the files inline, which is what puts the data out of reach before a
 //! pixel is drawn or the radio comes up. Skips the blob-db close/reopen

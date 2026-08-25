@@ -13,6 +13,7 @@
 
 #include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_shred.h"
+#include "pbl/util/size.h"
 
 // Stubs
 ////////////////////////////////////
@@ -120,8 +121,12 @@ bool security_lock_shred_deadline_expired(time_t now) {
   return false;
 }
 
+//! Whether the clock looks wound back. Driven directly: it is one of the boot
+//! triggers the master switch has to gate.
+static bool s_rolled_back;
+
 bool security_lock_note_time(time_t now) {
-  return false;
+  return s_rolled_back;
 }
 
 time_t rtc_get_time(void) {
@@ -247,6 +252,7 @@ void test_security_lock_shred__initialize(void) {
   s_locked = false;
   s_pin_len = 4;
   s_state = SecurityLockStateArmed;
+  s_rolled_back = false;
 }
 
 void test_security_lock_shred__cleanup(void) {}
@@ -526,6 +532,108 @@ void test_security_lock_shred__an_ordinary_boot_wipes_nothing(void) {
 
   cl_assert_equal_i(0, s_trace.files_shredded);
   cl_assert_equal_i(0, s_trace.region_erases);
+}
+
+// The master switch
+////////////////////////////////////
+//
+// Enforced here rather than at each trigger, so this is where the property is
+// stated: with the feature off, the funnel every trigger goes through does
+// nothing at all.
+
+void test_security_lock_shred__the_feature_being_off_wipes_nothing(void) {
+  s_state = SecurityLockStateDisabled;
+
+  const uint32_t wiped = security_lock_shred(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(0, wiped);
+  cl_assert_equal_i(0, s_trace.files_shredded);
+  cl_assert_equal_i(0, s_trace.region_erases);
+  cl_assert_equal_i(0, s_trace.quiesces);
+  cl_assert_equal_i(0, s_trace.shred_completes);
+  cl_assert_equal_i(0, s_trace.blackouts);
+  // And nothing was left half done for the next boot to pick up.
+  cl_assert(!security_lock_is_shred_pending());
+}
+
+//! Every trigger, not just the one the defect was found on: the guard is at the
+//! funnel, so refusing must not depend on why.
+void test_security_lock_shred__no_reason_gets_past_the_feature_being_off(void) {
+  s_state = SecurityLockStateDisabled;
+
+  const SecurityShredReason reasons[] = {
+      SecurityShredReasonPhoneLockdown,     SecurityShredReasonManualPanic,
+      SecurityShredReasonDisconnectTimeout, SecurityShredReasonRebootWhileLocked,
+      SecurityShredReasonPinAttemptsExhausted, SecurityShredReasonClockRollback,
+      SecurityShredReasonDuressPin,         SecurityShredReasonUnknown,
+  };
+  for (size_t i = 0; i < ARRAY_LENGTH(reasons); ++i) {
+    cl_assert_equal_i(0, security_lock_shred(reasons[i]));
+  }
+
+  cl_assert_equal_i(0, s_trace.files_shredded);
+}
+
+//! The switch is not a way to get a wipe half done and leave it that way. A
+//! shred that already started is finished at the next boot whatever the switch
+//! says: the content is gone either way, and stopping leaves fragments that
+//! pass for an untouched filesystem.
+void test_security_lock_shred__an_interrupted_wipe_finishes_even_when_off(void) {
+  s_state = SecurityLockStateDisabled;
+  s_shred_pending = true;
+
+  security_lock_handle_boot();
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+
+  security_lock_finish_boot_shred();
+  cl_assert(!security_lock_is_shred_pending());
+}
+
+//! Finishing that wipe is cleanup, not a lock. Locking here would turn the
+//! feature back on as a side effect.
+void test_security_lock_shred__finishing_an_interrupted_wipe_does_not_lock(void) {
+  s_state = SecurityLockStateDisabled;
+  s_shred_pending = true;
+
+  security_lock_handle_boot();
+
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+  cl_assert(!s_locked);
+}
+
+//! A deadline left in the record from before the switch was thrown must not
+//! fire at boot. Nothing arms one while off, so this is a stale record rather
+//! than a live countdown.
+void test_security_lock_shred__a_stale_deadline_does_not_fire_at_boot_when_off(void) {
+  s_state = SecurityLockStateDisabled;
+  s_locked = true;
+
+  security_lock_handle_boot();
+
+  cl_assert_equal_i(0, s_trace.files_shredded);
+  cl_assert_equal_i(0, s_trace.region_erases);
+}
+
+//! Winding the clock back is the one tamper that outruns a deadline. With the
+//! feature off there is no deadline and nothing to outrun.
+void test_security_lock_shred__a_rollback_at_boot_is_ignored_when_off(void) {
+  s_state = SecurityLockStateDisabled;
+  s_rolled_back = true;
+
+  security_lock_handle_boot();
+
+  cl_assert_equal_i(0, s_trace.files_shredded);
+}
+
+//! The same rollback with the feature on still wipes, so the test above is
+//! measuring the switch and not a rollback path that never worked.
+void test_security_lock_shred__a_rollback_at_boot_still_wipes_when_on(void) {
+  s_state = SecurityLockStateArmed;
+  s_rolled_back = true;
+
+  security_lock_handle_boot();
+
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
 }
 
 // What the wipe covers

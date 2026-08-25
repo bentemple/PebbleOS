@@ -207,6 +207,106 @@ void test_security_lock__verify_without_pin_fails(void) {
   cl_assert(!security_lock_verify_pin(PIN, strlen(PIN), NULL));
 }
 
+// The master switch
+////////////////////////////////////
+//
+// Not a field of its own: Disabled already meant "nothing fires", already
+// defaulted off, and setting a PIN already left it. The only thing that changes
+// here is that a PIN may now outlive it.
+
+void test_security_lock__the_feature_is_off_out_of_the_box(void) {
+  cl_assert(!security_lock_is_enabled());
+}
+
+//! Setting a PIN is the only way to opt in; there is nothing else to opt in
+//! with, and a PIN that armed nothing would be a control that did nothing.
+void test_security_lock__setting_a_pin_turns_the_feature_on(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert(security_lock_is_enabled());
+}
+
+//! The point of the switch: off again without losing the PIN, so turning it
+//! back on does not mean typing a new one.
+void test_security_lock__turning_the_feature_off_keeps_the_pin(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(false));
+
+  cl_assert(!security_lock_is_enabled());
+  cl_assert_equal_i(SecurityLockStateDisabled, security_lock_get_state());
+  cl_assert_equal_i(strlen(PIN), security_lock_get_pin_len());
+}
+
+void test_security_lock__turning_it_back_on_needs_no_new_pin(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(false));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(true));
+
+  cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
+  cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
+}
+
+//! The switch is persisted, so a reboot keeps the user's answer rather than
+//! coming back armed because a PIN happens to be stored.
+void test_security_lock__the_switch_survives_a_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(false));
+
+  prv_simulate_reboot();
+
+  cl_assert(!security_lock_is_enabled());
+  cl_assert_equal_i(strlen(PIN), security_lock_get_pin_len());
+}
+
+//! Nothing to unlock with is nothing to turn on. A lock screen with no PIN to
+//! prompt for has no way to let the user back in.
+void test_security_lock__the_feature_cannot_be_turned_on_without_a_pin(void) {
+  cl_assert_equal_i(E_INVALID_OPERATION, security_lock_set_enabled(true));
+  cl_assert(!security_lock_is_enabled());
+}
+
+//! Turning the feature off is not a way past the lock screen. The phone can
+//! send this, so a watch it locked a moment ago must not open to a second
+//! message; only the PIN clears a lock.
+void test_security_lock__the_feature_cannot_be_turned_off_while_locked(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+
+  cl_assert_equal_i(E_INVALID_OPERATION, security_lock_set_enabled(false));
+
+  cl_assert(security_lock_is_locked());
+}
+
+//! Off means no countdown is left running, rather than one running that every
+//! check declines to act on.
+void test_security_lock__turning_the_feature_off_retires_the_deadlines(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_deadlines(5000, 6000));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_enabled(false));
+
+  cl_assert_equal_i(0, security_lock_get_lock_deadline());
+  cl_assert_equal_i(0, security_lock_get_shred_deadline());
+}
+
+void test_security_lock__setting_the_switch_to_what_it_already_is_is_a_no_op(void) {
+  cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_set_enabled(false));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_set_enabled(true));
+}
+
+//! Clearing the PIN turns the feature off too -- it is the other way out, and
+//! it takes the credential with it.
+void test_security_lock__clearing_the_pin_turns_the_feature_off(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_pin());
+
+  cl_assert(!security_lock_is_enabled());
+  cl_assert_equal_i(0, security_lock_get_pin_len());
+  cl_assert_equal_i(E_INVALID_OPERATION, security_lock_set_enabled(true));
+}
+
 // PIN configuration
 ////////////////////////////////////
 

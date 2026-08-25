@@ -112,6 +112,17 @@ void command_security_set_pin(const char *digits) {
   prv_sectest_report(buf);
 }
 
+//! The master switch, so a test can reach the "feature off" cases without
+//! walking the Settings menu.
+void command_security_enable(const char *on_str) {
+  char buf[96];
+  const bool enable = (on_str[0] != '0');
+  const status_t rv = security_lock_set_enabled(enable);
+  snprintf(buf, sizeof(buf), "SECTEST enable on=%d rv=%" PRId32 " state=%d", (int)enable,
+           (int32_t)rv, (int)security_lock_get_state());
+  prv_sectest_report(buf);
+}
+
 void command_security_set_duress(const char *digits) {
   char buf[96];
   const size_t len = strlen(digits);

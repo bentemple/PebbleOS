@@ -96,14 +96,19 @@ static void prv_release_ui_lockout(void) {
 static void prv_engage(SecurityShredReason reason, bool shred) {
   PBL_ASSERT_TASK(PebbleTask_KernelMain);
 
+  // One of the two funnels the master switch is enforced at, so a trigger that
+  // forgets to ask is covered anyway. security_lock_shred() holds the other.
+  if (!security_lock_is_enabled()) {
+    PBL_LOG_WRN("Security lock is off; ignoring %s", security_lock_shred_reason_str(reason));
+    return;
+  }
+
   const uint8_t pin_len = security_lock_get_pin_len();
   if (pin_len < SECURITY_LOCK_PIN_MIN_LEN || pin_len > SECURITY_LOCK_PIN_MAX_LEN) {
-    if (!shred) {
-      PBL_LOG_WRN("No PIN configured; nothing to lock");
-      return;
-    }
-    PBL_LOG_WRN("No PIN configured; shredding without locking");
-    security_lock_shred(reason);
+    // Enabled with an unusable PIN is an inconsistent record, not a state any
+    // control produces. Erasing anyway would destroy the content of a watch
+    // that was never protected and leave it wide open afterwards.
+    PBL_LOG_ERR("Enabled with an unusable PIN length %" PRIu8 "; refusing to lock", pin_len);
     return;
   }
 

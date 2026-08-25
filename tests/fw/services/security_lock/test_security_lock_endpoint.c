@@ -1,8 +1,9 @@
 /* SPDX-FileCopyrightText: 2026 Core Devices LLC */
 /* SPDX-License-Identifier: Apache-2.0 */
 
-//! Tests for the disconnect countdown: when it arms, when it does not, and what
-//! happens once the watch has taken its own radio down.
+//! Tests for the endpoint: what the phone can ask for, and the disconnect
+//! countdown -- when it arms, when it does not, and what happens once the watch
+//! has taken its own radio down.
 //!
 //! Everything the endpoint drives is faked. The subject is which countdowns get
 //! armed and which timers get run, not what any of them go on to do.
@@ -34,6 +35,7 @@ static SecurityLockState s_state;
 static bool s_blackout;
 static time_t s_lock_deadline;
 static time_t s_shred_deadline;
+static uint8_t s_pin_len = 4;
 static uint32_t s_lock_delay_s = 60;
 static uint32_t s_shred_delay_s = 600;
 static time_t s_now = 1000;
@@ -48,6 +50,35 @@ static RegularTimerInfo *s_timer;
 
 SecurityLockState security_lock_get_state(void) {
   return s_state;
+}
+
+uint8_t security_lock_get_pin_len(void) {
+  return s_pin_len;
+}
+
+//! Mirrors the store's own rules, which are the reason the phone cannot use
+//! this to get past a lock screen or to arm a watch that has no PIN.
+status_t security_lock_set_enabled(bool enabled) {
+  if (enabled) {
+    if (s_state != SecurityLockStateDisabled) {
+      return S_NO_ACTION_REQUIRED;
+    }
+    if (s_pin_len == 0) {
+      return E_INVALID_OPERATION;
+    }
+    s_state = SecurityLockStateArmed;
+    return S_SUCCESS;
+  }
+  if (s_state == SecurityLockStateDisabled) {
+    return S_NO_ACTION_REQUIRED;
+  }
+  if (s_state == SecurityLockStateLocked) {
+    return E_INVALID_OPERATION;
+  }
+  s_state = SecurityLockStateDisabled;
+  s_lock_deadline = 0;
+  s_shred_deadline = 0;
+  return S_SUCCESS;
 }
 
 bool security_lock_is_locked(void) {
@@ -112,7 +143,13 @@ uint32_t security_lock_shred(SecurityShredReason reason) {
   return 0;
 }
 
+//! Stands in for lock.c, including its refusals -- the endpoint decides what to
+//! tell the phone from whether the watch actually ended up locked, so a fake
+//! that always locked would hide the case this exists for.
 void security_lock_engage(SecurityShredReason reason) {
+  if ((s_state == SecurityLockStateDisabled) || (s_pin_len < SECURITY_LOCK_PIN_MIN_LEN)) {
+    return;
+  }
   s_locks_engaged++;
   s_state = SecurityLockStateLocked;
 }
@@ -162,12 +199,21 @@ static int s_msgs_sent;
 static uint8_t s_last_msg[16];
 static size_t s_last_msg_len;
 
+//! The command byte of each, in order. A refusal is as much about what was not
+//! sent as about what was.
+#define MAX_SENT 8
+static uint8_t s_sent_cmds[MAX_SENT];
+static int s_sent_count;
+
 void comm_session_send_data(CommSession *session, uint16_t endpoint_id, const uint8_t *data,
                             size_t length, uint32_t timeout_ms) {
   cl_assert(length <= sizeof(s_last_msg));
   memcpy(s_last_msg, data, length);
   s_last_msg_len = length;
   s_msgs_sent++;
+  if (s_sent_count < MAX_SENT) {
+    s_sent_cmds[s_sent_count++] = data[0];
+  }
 }
 
 // Helpers
@@ -190,6 +236,42 @@ static bool prv_timer_running(void) {
 
 //! SHRED_COMPLETE: command, reason, then the bitmap big-endian.
 #define CMD_SHRED_COMPLETE 0x84
+#define CMD_LOCK_ACK 0x82
+#define CMD_STATE_CHANGED 0x85
+
+//! Inbound commands, as the phone spells them.
+#define CMD_CONFIGURE 0x01
+#define CMD_LOCK 0x02
+#define CMD_STATUS_REQUEST 0x03
+
+static void prv_phone_lock(uint8_t reason) {
+  const uint8_t msg[] = {CMD_LOCK, reason};
+  security_lock_protocol_msg_callback(NULL, msg, sizeof(msg));
+}
+
+//! CONFIGURE: command, enabled, then both delays big-endian. Zero delays mean
+//! "leave those alone", which is what makes this an enabled-only message.
+static void prv_phone_configure(bool enabled) {
+  const uint8_t msg[] = {CMD_CONFIGURE, (uint8_t)(enabled ? 1 : 0), 0, 0, 0, 0};
+  security_lock_protocol_msg_callback(NULL, msg, sizeof(msg));
+}
+
+static void prv_phone_status_request(void) {
+  const uint8_t msg[] = {CMD_STATUS_REQUEST};
+  security_lock_protocol_msg_callback(NULL, msg, sizeof(msg));
+}
+
+//! Every message the endpoint sent, so a test can say a LOCK_ACK never went out
+//! rather than only that the last message was something else.
+static int prv_count_sent(uint8_t cmd) {
+  int count = 0;
+  for (int i = 0; i < s_sent_count; ++i) {
+    if (s_sent_cmds[i] == cmd) {
+      count++;
+    }
+  }
+  return count;
+}
 
 static uint32_t prv_last_resync_bitmap(void) {
   cl_assert_equal_i(6, (int)s_last_msg_len);
@@ -209,6 +291,7 @@ void test_security_lock_endpoint__initialize(void) {
   s_blackout = false;
   s_lock_deadline = 0;
   s_shred_deadline = 0;
+  s_pin_len = 4;
   s_lock_delay_s = 60;
   s_shred_delay_s = 600;
   s_now = 1000;
@@ -229,9 +312,140 @@ void test_security_lock_endpoint__initialize(void) {
   s_shred_deadline = 0;
   s_msgs_sent = 0;
   s_last_msg_len = 0;
+  s_sent_count = 0;
 }
 
 void test_security_lock_endpoint__cleanup(void) {}
+
+// What the phone can ask for
+////////////////////////////////////
+
+void test_security_lock_endpoint__a_phone_lock_locks_and_is_acked(void) {
+  prv_phone_lock(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(1, s_locks_engaged);
+  cl_assert_equal_i(1, prv_count_sent(CMD_LOCK_ACK));
+  cl_assert_equal_i(SecurityShredReasonPhoneLockdown, s_last_msg[1]);
+}
+
+//! The defect this whole switch exists to dissolve. A watch with the feature
+//! off has nothing to protect and no PIN to open it again, so a phone LOCK must
+//! erase nothing -- and, just as importantly, must not come back saying it did.
+//! An ack is what makes the phone stop asking and treat its own copy as the
+//! only one left.
+void test_security_lock_endpoint__a_phone_lock_with_the_feature_off_does_nothing(void) {
+  s_state = SecurityLockStateDisabled;
+
+  prv_phone_lock(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(0, s_locks_engaged);
+  cl_assert_equal_i(0, s_shreds);
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+  cl_assert_equal_i(0, prv_count_sent(CMD_LOCK_ACK));
+}
+
+//! Silence would be indistinguishable from a watch that had gone away, so the
+//! refusal says which state refused it. STATE_CHANGED rather than a new failure
+//! code: the phone already parses it, and Disabled is the whole reason.
+void test_security_lock_endpoint__a_refused_lock_reports_the_state_instead(void) {
+  s_state = SecurityLockStateDisabled;
+
+  prv_phone_lock(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(1, prv_count_sent(CMD_STATE_CHANGED));
+  cl_assert_equal_i(2, (int)s_last_msg_len);
+  cl_assert_equal_i(SecurityLockStateDisabled, s_last_msg[1]);
+}
+
+//! The ack is keyed on the watch actually being locked, not on having asked, so
+//! every refusal inside engage() reaches the phone as one -- an unusable stored
+//! PIN length among them, which no control produces but a corrupt record does.
+void test_security_lock_endpoint__a_lock_that_does_not_take_is_not_acked(void) {
+  // Past the early refusal -- the feature is on -- but engage() declines,
+  // because there is no PIN the lock screen could prompt for.
+  s_state = SecurityLockStateArmed;
+  s_pin_len = 0;
+
+  prv_phone_lock(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(0, s_locks_engaged);
+  cl_assert_equal_i(0, prv_count_sent(CMD_LOCK_ACK));
+  cl_assert_equal_i(1, prv_count_sent(CMD_STATE_CHANGED));
+}
+
+// CONFIGURE
+////////////////////////////////////
+
+//! The enabled byte drives the same persisted switch Settings flips, rather
+//! than a second RAM-only notion that only the phone could see.
+void test_security_lock_endpoint__configure_turns_the_feature_off(void) {
+  prv_phone_configure(false);
+
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+}
+
+void test_security_lock_endpoint__configure_turns_the_feature_back_on(void) {
+  s_state = SecurityLockStateDisabled;
+
+  prv_phone_configure(true);
+
+  cl_assert_equal_i(SecurityLockStateArmed, s_state);
+}
+
+//! The phone can turn the feature off, which is inside the trust boundary --
+//! it can already LOCK. It cannot use that to get past a lock screen: only the
+//! PIN does.
+void test_security_lock_endpoint__configure_cannot_unlock_a_locked_watch(void) {
+  s_state = SecurityLockStateLocked;
+
+  prv_phone_configure(false);
+
+  cl_assert_equal_i(SecurityLockStateLocked, s_state);
+}
+
+//! Nor can it arm a watch that has no PIN, which would be a lock screen with
+//! nothing to prompt for.
+void test_security_lock_endpoint__configure_cannot_enable_without_a_pin(void) {
+  s_state = SecurityLockStateDisabled;
+  s_pin_len = 0;
+
+  prv_phone_configure(true);
+
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+}
+
+//! Turning the feature off retires any countdown with it, rather than leaving
+//! one armed for a check that will decline to act on it.
+void test_security_lock_endpoint__configure_off_retires_the_countdown(void) {
+  prv_session_event(false);
+  cl_assert(s_shred_deadline != 0);
+
+  prv_phone_configure(false);
+
+  cl_assert_equal_i(0, s_lock_deadline);
+  cl_assert_equal_i(0, s_shred_deadline);
+}
+
+//! STATUS answers "is there a PIN" from the PIN, not from the state. A PIN
+//! outlives the switch now, so the two are different questions.
+void test_security_lock_endpoint__status_reports_a_pin_kept_across_the_switch(void) {
+  s_state = SecurityLockStateDisabled;
+  s_pin_len = 4;
+
+  prv_phone_status_request();
+
+  cl_assert_equal_i(SecurityLockStateDisabled, s_last_msg[1]);
+  cl_assert_equal_i(1, s_last_msg[2]);
+}
+
+void test_security_lock_endpoint__status_reports_no_pin_when_there_is_none(void) {
+  s_state = SecurityLockStateDisabled;
+  s_pin_len = 0;
+
+  prv_phone_status_request();
+
+  cl_assert_equal_i(0, s_last_msg[2]);
+}
 
 // The ordinary countdown
 ////////////////////////////////////
@@ -268,6 +482,56 @@ void test_security_lock_endpoint__the_shred_deadline_shreds(void) {
   prv_tick();
 
   cl_assert_equal_i(1, s_shreds);
+  cl_assert(!prv_timer_running());
+}
+
+//! Off means no countdown is ever armed, rather than one armed and then
+//! declined at every tick. Nothing should be counting down on a watch that has
+//! said it does not want this.
+void test_security_lock_endpoint__losing_the_phone_arms_nothing_when_off(void) {
+  s_state = SecurityLockStateDisabled;
+
+  prv_session_event(false);
+
+  cl_assert_equal_i(0, s_lock_deadline);
+  cl_assert_equal_i(0, s_shred_deadline);
+  cl_assert(!prv_timer_running());
+}
+
+//! And a deadline left in the record from before the switch was thrown does not
+//! fire either: the tick refuses before it reads one.
+void test_security_lock_endpoint__a_stale_deadline_does_not_fire_when_off(void) {
+  prv_session_event(false);
+  cl_assert(prv_timer_running());
+
+  s_state = SecurityLockStateDisabled;
+  s_now += 600;
+  prv_tick();
+
+  cl_assert_equal_i(0, s_shreds);
+  cl_assert_equal_i(0, s_locks_engaged);
+}
+
+//! Nor does a rollback, which is the one tamper that outruns a deadline.
+void test_security_lock_endpoint__a_rollback_is_ignored_when_off(void) {
+  prv_session_event(false);
+
+  s_state = SecurityLockStateDisabled;
+  s_rolled_back = true;
+  prv_tick();
+
+  cl_assert_equal_i(0, s_shreds);
+}
+
+//! A stale deadline is retired at boot rather than resumed: nothing arms one
+//! while off, so it is a record from before the switch was thrown.
+void test_security_lock_endpoint__init_retires_a_stale_deadline_when_off(void) {
+  s_state = SecurityLockStateDisabled;
+  s_shred_deadline = 5000;
+
+  security_lock_endpoint_init();
+
+  cl_assert_equal_i(0, s_shred_deadline);
   cl_assert(!prv_timer_running());
 }
 

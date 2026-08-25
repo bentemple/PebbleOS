@@ -18,16 +18,18 @@
 //! Blocks for the duration of the shred, which is seconds. KernelMain only.
 //! Safe to call when already locked, in which case it re-shreds.
 //!
-//! Shreds but does not lock if no PIN is configured: there would be no way back
-//! out of the lock screen, and destroying the data is the half of this that
-//! protects anything.
+//! Does nothing at all when the feature is off, or when it is on with a PIN
+//! length the lock screen could not prompt for. Erasing without locking would
+//! destroy the content of a watch that was never protected and leave it open
+//! afterwards, which is neither half of what this is for.
+//!
+//! Callers must not assume it took: check security_lock_is_locked().
 void security_lock_engage(SecurityShredReason reason);
 
 //! Enter the locked state without shredding. KernelMain only.
 //!
 //! For the disconnect lock deadline, where the separate shred deadline decides
-//! when -- or whether -- the content goes. Does nothing if no PIN is configured;
-//! there is nothing to lock and the caller did not ask for an erase.
+//! when -- or whether -- the content goes. Same refusals as above.
 void security_lock_engage_lock_only(SecurityShredReason reason);
 
 //! Leave the locked state after a correct PIN. KernelMain only.

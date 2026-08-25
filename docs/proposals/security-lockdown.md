@@ -77,11 +77,11 @@ an oversight.
 ### State machine
 
 ```
-        configure PIN
+        configure PIN / turn on
 Disabled ──────────────> Armed ──────────────────> Locked
    ^                       ^   phone LOCK cmd        │
    │                       │   manual panic          │  correct PIN
-   │  disable + PIN        │   disconnect grace      │
+   │  turn off / clear PIN │   disconnect grace      │
    └───────────────────────┴─────────────────────────┘
                                    ^                 │
                                    │                 v
@@ -89,6 +89,26 @@ Disabled ──────────────> Armed ───────
                           (re-shred + stay locked on
                            reboot / 30min / 3 bad PINs)
 ```
+
+`Disabled` is the master switch for the whole feature, and it is where the watch
+ships. It is not a second notion of "on" beside the PIN: there is exactly one,
+so nothing can consult the wrong one. Off means no trigger fires — not the
+phone's `LOCK`, not Lock Now, not the console, not a disconnect deadline (none
+is armed in the first place), not a clock rollback. It is enforced at the two
+funnels every trigger goes through, `security_lock_engage()` and
+`security_lock_shred()`, rather than at each caller, so a trigger added later is
+gated without knowing about it.
+
+A PIN outlives the switch, so turning the lock back on does not cost the user
+another one. Two refusals keep that from being a weakness: it cannot be turned
+on without a PIN, which would be a lock screen with nothing to prompt for, and
+it cannot be turned off while `Locked`, which would be an unlock without the
+PIN. Only the PIN clears a lock.
+
+The one thing the switch does not gate is finishing a wipe that was interrupted
+by power loss (`shred_pending`). The content is already half destroyed by then,
+and a half-wiped filesystem passes for an untouched one, so that runs at the
+next boot whatever the switch says — but it locks nothing.
 
 There is **one shred scope**. Every trigger runs the same wipe; escalation
 triggers differ only in that they re-run it and keep the watch locked. This is
@@ -326,6 +346,26 @@ watch locking when the phone is seized.
 Reason codes: `0x00` unknown, `0x01` phone lockdown, `0x02` manual panic,
 `0x03` disconnect timeout, `0x04` reboot while locked, `0x05` PIN attempts
 exhausted, `0x06` clock rollback.
+
+`CONFIGURE`'s `enabled` byte drives the same persisted master switch the watch's
+own Settings menu flips, rather than a RAM-only flag only the phone can see. The
+phone can therefore turn the feature off remotely, which is inside the trust
+boundary it already has — it can send `LOCK` — and it cannot use that to reach
+the data: turning off is refused while `Locked`, and turning on is refused
+without a PIN.
+
+`LOCK` is refused outright while the feature is off, and the watch replies with
+`STATE_CHANGED(Disabled)` rather than `LOCK_ACK`. `LOCK_ACK` carries only a
+reason echo and has no failure encoding; `STATE_CHANGED` is a message the phone
+already parses, and `Disabled` is the whole reason for the refusal, so this says
+no without needing a phone that understands a new code. What must not happen is
+an ack: the phone reads that as "locked and erased" and stops asking. The same
+rule covers every other way a lock can fail to take — the ack is keyed on the
+watch actually being locked afterwards, not on having asked.
+
+`STATUS_RESPONSE`'s `pin_configured` is answered from the stored PIN rather than
+from the state, because a PIN now outlives the switch and `Disabled` no longer
+implies there is none.
 
 Both delays in `CONFIGURE` are counted **from the disconnect**, not from each
 other, so the defaults lock at five minutes and erase at thirty — twenty-five

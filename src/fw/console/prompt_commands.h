@@ -51,6 +51,7 @@ extern void command_security_status(void);
 // only place any of this lives. Never built into a shipping firmware.
 #if defined(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS)
 extern void command_security_ui(void);
+extern void command_security_enable(const char*);
 extern void command_security_set_pin(const char*);
 extern void command_security_set_duress(const char*);
 extern void command_security_clear_pin(void);
@@ -349,6 +350,7 @@ static const Command s_prompt_commands[] = {
   // set up a state. Commands are matched by prefix in table order, so none of
   // these may be a prefix of another.
   { "security ui", command_security_ui, 0 },
+  { "security enable", command_security_enable, 1 },
   { "security set pin", command_security_set_pin, 1 },
   { "security set duress", command_security_set_duress, 1 },
   { "security clear pin", command_security_clear_pin, 0 },

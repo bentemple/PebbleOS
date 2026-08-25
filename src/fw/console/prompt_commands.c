@@ -833,16 +833,16 @@ void command_factory_reset(void) {
 //! Deliberately reports no duress state: the console is reachable from a seized
 //! watch, and whether a duress PIN exists is exactly the secret.
 void command_security_status(void) {
-  char buf[160];
+  char buf[176];
   const time_t now = rtc_get_time();
   const time_t lock_deadline = security_lock_get_lock_deadline();
   const time_t shred_deadline = security_lock_get_shred_deadline();
 
   snprintf(buf, sizeof(buf),
-           "state=%d pin_len=%u attempts=%u shred_pending=%d lock_in=%d shred_in=%d "
+           "enabled=%d state=%d pin_len=%u attempts=%u shred_pending=%d lock_in=%d shred_in=%d "
            "lock_delay=%u shred_delay=%u",
-           (int)security_lock_get_state(), (unsigned)security_lock_get_pin_len(),
-           (unsigned)security_lock_get_failed_attempts(),
+           (int)security_lock_is_enabled(), (int)security_lock_get_state(),
+           (unsigned)security_lock_get_pin_len(), (unsigned)security_lock_get_failed_attempts(),
            (int)security_lock_is_shred_pending(),
            (lock_deadline == 0) ? -1 : (int)(lock_deadline - now),
            (shred_deadline == 0) ? -1 : (int)(shred_deadline - now),

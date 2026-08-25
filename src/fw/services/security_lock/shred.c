@@ -361,6 +361,16 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
 }
 
 uint32_t security_lock_shred(SecurityShredReason reason) {
+  // The master switch, enforced here rather than at each trigger so a future
+  // one is covered by construction. security_lock_engage() holds the other
+  // funnel; between them nothing locks and nothing erases while the feature is
+  // off. security_lock_handle_boot() deliberately does not come through here.
+  if (!security_lock_is_enabled()) {
+    PBL_LOG_WRN("Security lock is off; not shredding (%s)",
+                security_lock_shred_reason_str(reason));
+    return 0;
+  }
+
   // A wipe arriving while one is running has no correct behaviour other than
   // "don't": the teardown closes and reopens databases whose re-init is
   // asynchronous, so a second run walks into half-built state.
@@ -433,13 +443,23 @@ void security_lock_handle_boot(void) {
 
   SecurityShredReason reason;
   if (security_lock_is_shred_pending()) {
-    // A previous shred did not finish. Whatever it was, redo it.
+    // A previous shred did not finish. Whatever it was, redo it -- including
+    // when the feature has since been turned off. The content is already
+    // half destroyed, and a half-wiped filesystem passes for an untouched one:
+    // finishing costs nothing that is not already gone, while stopping here
+    // leaves recoverable fragments behind for good.
     reason = SecurityShredReasonUnknown;
+  } else if (!security_lock_is_enabled()) {
+    // The master switch. Below this point every branch is a trigger, and none
+    // of them may fire while the feature is off. Note the high-water mark was
+    // still advanced above: leaving it stale would make turning the feature
+    // back on read an old, legitimate timestamp as a rollback.
+    PBL_LOG_INFO("SECBOOT handle_boot leave owed=0 disabled=1");
+    return;
   } else if (security_lock_shred_deadline_expired(now)) {
     reason = SecurityShredReasonDisconnectTimeout;
-  } else if (rolled_back && (security_lock_get_state() != SecurityLockStateDisabled)) {
-    // Winding the clock back is how a deadline gets outrun. Gated on the
-    // feature being in use, exactly as the running deadline check is.
+  } else if (rolled_back) {
+    // Winding the clock back is how a deadline gets outrun.
     reason = SecurityShredReasonClockRollback;
   } else if (was_armed) {
     reason = SecurityShredReasonRebootWhileLocked;
@@ -451,7 +471,12 @@ void security_lock_handle_boot(void) {
   // A watch that was still counting down never reached the lock screen, and the
   // reboot has just destroyed its content anyway. Lock it, so a shred is not
   // followed by a watch that opens straight up.
-  if (!security_lock_is_locked() && (security_lock_get_pin_len() != 0)) {
+  //
+  // Not when the feature is off: the only way to get here with it off is
+  // finishing an interrupted wipe, and locking would turn the feature back on
+  // as a side effect of cleanup.
+  if (security_lock_is_enabled() && !security_lock_is_locked() &&
+      (security_lock_get_pin_len() != 0)) {
     security_lock_set_state(SecurityLockStateLocked);
   }
 

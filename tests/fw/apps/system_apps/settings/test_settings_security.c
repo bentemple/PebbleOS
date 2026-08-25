@@ -33,6 +33,7 @@ static char s_stored_pin[SECURITY_LOCK_PIN_MAX_LEN];
 static uint8_t s_stored_pin_len;
 static char s_stored_duress[SECURITY_LOCK_PIN_MAX_LEN];
 static uint8_t s_stored_duress_len;
+static SecurityLockState s_state;
 static uint8_t s_failed_attempts;
 static int s_reset_attempts_calls;
 static int s_engage_calls;
@@ -44,6 +45,30 @@ uint8_t security_lock_get_pin_len(void) {
   return s_stored_pin_len;
 }
 
+SecurityLockState security_lock_get_state(void) {
+  return s_state;
+}
+
+//! Mirrors the store's own rules. The two that matter here are that a PIN
+//! outlives the switch, and that turning the switch on without one is refused.
+status_t security_lock_set_enabled(bool enabled) {
+  if (enabled) {
+    if (s_state != SecurityLockStateDisabled) {
+      return S_NO_ACTION_REQUIRED;
+    }
+    if (s_stored_pin_len == 0) {
+      return E_INVALID_OPERATION;
+    }
+    s_state = SecurityLockStateArmed;
+    return S_SUCCESS;
+  }
+  if (s_state == SecurityLockStateDisabled) {
+    return S_NO_ACTION_REQUIRED;
+  }
+  s_state = SecurityLockStateDisabled;
+  return S_SUCCESS;
+}
+
 status_t security_lock_set_pin(const char *digits, uint8_t len) {
   if (len < SECURITY_LOCK_PIN_MIN_LEN || len > SECURITY_LOCK_PIN_MAX_LEN) {
     return E_INVALID_ARGUMENT;
@@ -51,6 +76,9 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   memcpy(s_stored_pin, digits, len);
   s_stored_pin_len = len;
   s_failed_attempts = 0;
+  // Setting a PIN is what turns the feature on; there is nothing else to opt
+  // in with.
+  s_state = SecurityLockStateArmed;
   return S_SUCCESS;
 }
 
@@ -81,6 +109,7 @@ status_t security_lock_clear_pin(void) {
   // to remove one, and the reason the menu needs no row for it.
   memset(s_stored_duress, 0, sizeof(s_stored_duress));
   s_stored_duress_len = 0;
+  s_state = SecurityLockStateDisabled;
   return S_SUCCESS;
 }
 
@@ -303,22 +332,32 @@ void i18n_free_all(const void *owner) {}
 // Helpers
 ////////////////////////////////////
 
+//! The master switch is first on every row set, because everything below it is
+//! inert while it is off.
+#define ROW_ENABLED 0
+
 //! Row order when no PIN is configured. Everything that needs one to mean
 //! anything is gone, Show in Launcher included: the Lockdown app is itself
 //! hidden without a PIN, so the row would toggle nothing that exists.
-#define ROW_SET_PIN 0
-#define ROW_PIN_LENGTH_UNSET 1
-#define ROWS_WITHOUT_PIN 2
-//! Row order once one is.
-#define ROW_CHANGE_PIN 0
-#define ROW_PIN_LENGTH_SET 1
-#define ROW_LOCK_AFTER 2
-#define ROW_ERASE_AFTER 3
-#define ROW_DURESS_PIN 4
-#define ROW_CLEAR_PIN 5
-#define ROW_LOCK_NOW 6
-#define ROW_SHOW_IN_LAUNCHER_SET 7
-#define ROWS_WITH_PIN 8
+#define ROW_SET_PIN 1
+#define ROW_PIN_LENGTH_UNSET 2
+#define ROWS_WITHOUT_PIN 3
+//! Row order once one is and the feature is on.
+#define ROW_CHANGE_PIN 1
+#define ROW_PIN_LENGTH_SET 2
+#define ROW_LOCK_AFTER 3
+#define ROW_ERASE_AFTER 4
+#define ROW_DURESS_PIN 5
+#define ROW_CLEAR_PIN 6
+#define ROW_LOCK_NOW 7
+#define ROW_SHOW_IN_LAUNCHER_SET 8
+#define ROWS_WITH_PIN 9
+//! And with a PIN kept across a switch-off: the switch, the two PIN rows and
+//! Clear PIN. Those configure the feature rather than being things it does, and
+//! a PIN that could not be got rid of without turning the lock back on first
+//! would be a trap.
+#define ROW_CLEAR_PIN_OFF 3
+#define ROWS_WITH_PIN_OFF 4
 
 static void prv_open_settings(void) {
   settings_security_get_info()->init();
@@ -354,6 +393,7 @@ void test_settings_security__initialize(void) {
   s_stored_pin_len = 0;
   memset(s_stored_duress, 0, sizeof(s_stored_duress));
   s_stored_duress_len = 0;
+  s_state = SecurityLockStateDisabled;
   s_failed_attempts = 0;
   s_reset_attempts_calls = 0;
   s_engage_calls = 0;
@@ -384,6 +424,189 @@ void test_settings_security__cleanup(void) {
     s_module->deinit(s_module);
     s_module = NULL;
   }
+}
+
+// The master switch
+////////////////////////////////////
+//
+// First row on every row set, because everything below it does nothing while it
+// is off -- and a row that does nothing is worse than no row: it reads as a
+// control.
+
+void test_settings_security__the_switch_is_the_first_row(void) {
+  prv_open_settings();
+
+  prv_draw(ROW_ENABLED);
+  cl_assert_equal_s("Security Lock", s_drawn_title);
+}
+
+void test_settings_security__the_switch_is_the_first_row_with_a_pin_too(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_draw(ROW_ENABLED);
+  cl_assert_equal_s("Security Lock", s_drawn_title);
+}
+
+void test_settings_security__the_switch_reads_off_out_of_the_box(void) {
+  prv_open_settings();
+
+  prv_draw(ROW_ENABLED);
+  // The context prefix the fake i18n leaves in place -- the plain "Off" is
+  // shared with unrelated rows and needs disambiguating for translators.
+  cl_assert(strstr(s_drawn_subtitle, "Off") != NULL);
+  cl_assert(strstr(s_drawn_subtitle, "PIN") == NULL);
+}
+
+//! Setting a PIN is what turns it on; there is nothing else to opt in with.
+void test_settings_security__setting_a_pin_turns_the_switch_on(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_draw(ROW_ENABLED);
+  cl_assert_equal_s("On", s_drawn_subtitle);
+}
+
+//! On and Off belong to the master switch alone now. A PIN row that also said
+//! "On" would sit under "Security Lock: Off" and read as a contradiction.
+void test_settings_security__the_pin_row_does_not_say_on_or_off(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_draw(ROW_CHANGE_PIN);
+  cl_assert(strstr(s_drawn_subtitle, "4") != NULL);
+  cl_assert(strstr(s_drawn_subtitle, "On") == NULL);
+
+  prv_select(ROW_ENABLED);
+  prv_draw(ROW_CHANGE_PIN);
+  cl_assert(strstr(s_drawn_subtitle, "On") == NULL);
+}
+
+//! With no PIN there is nothing to unlock with, so turning it on is the Set PIN
+//! flow rather than a refusal the user has to decode.
+void test_settings_security__turning_it_on_without_a_pin_asks_for_one(void) {
+  prv_open_settings();
+
+  prv_select(ROW_ENABLED);
+
+  cl_assert(s_prompt != NULL);
+  prv_submit("1234");
+  prv_submit("1234");
+  cl_assert_equal_i(4, s_stored_pin_len);
+
+  s_module->appear(s_module);
+  prv_draw(ROW_ENABLED);
+  cl_assert_equal_s("On", s_drawn_subtitle);
+}
+
+//! The whole point of the switch: off without losing the PIN, so turning it
+//! back on does not mean typing a new one.
+void test_settings_security__turning_it_off_keeps_the_pin(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_ENABLED);
+
+  cl_assert_equal_i(4, s_stored_pin_len);
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+  // No prompt: turning the feature off is not a change that needs authorising
+  // by the PIN it is keeping.
+  cl_assert(s_prompt == NULL);
+}
+
+void test_settings_security__turning_it_back_on_needs_no_new_pin(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_ENABLED);
+  prv_select(ROW_ENABLED);
+
+  cl_assert_equal_i(SecurityLockStateArmed, s_state);
+  cl_assert(s_prompt == NULL);
+  prv_draw(ROW_ENABLED);
+  cl_assert_equal_s("On", s_drawn_subtitle);
+}
+
+//! The subtitle has to say the PIN survived, or the user has no way to tell
+//! this apart from having cleared it.
+void test_settings_security__off_with_a_pin_says_the_pin_is_kept(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_ENABLED);
+
+  prv_draw(ROW_ENABLED);
+  cl_assert_equal_s("Off, PIN kept", s_drawn_subtitle);
+}
+
+//! Everything the feature does is hidden while it is off, the way it is hidden
+//! without a PIN. What stays is the switch, the two PIN rows and Clear PIN --
+//! configuration rather than triggers.
+void test_settings_security__the_rows_below_hide_while_it_is_off(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
+
+  prv_select(ROW_ENABLED);
+
+  cl_assert_equal_i(ROWS_WITH_PIN_OFF, prv_num_rows());
+}
+
+void test_settings_security__the_rows_come_back_when_it_is_turned_on(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_ENABLED);
+  prv_select(ROW_ENABLED);
+
+  cl_assert_equal_i(ROWS_WITH_PIN, prv_num_rows());
+}
+
+//! Lock Now is the one row whose absence matters most: it is the manual erase,
+//! and offering it while nothing can lock would be a button that wipes the
+//! watch and leaves it open.
+void test_settings_security__lock_now_is_gone_while_it_is_off(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_select(ROW_ENABLED);
+
+  for (uint16_t row = 0; row < prv_num_rows(); row++) {
+    prv_draw(row);
+    cl_assert(strcmp(s_drawn_title, "Lock Now") != 0);
+    cl_assert(strcmp(s_drawn_title, "Lock After") != 0);
+    cl_assert(strcmp(s_drawn_title, "Erase After") != 0);
+    cl_assert(strcmp(s_drawn_title, "Duress PIN") != 0);
+  }
+}
+
+//! Clear PIN stays, or a PIN kept across a switch-off could only be got rid of
+//! by turning the lock back on first.
+void test_settings_security__clear_pin_stays_reachable_while_it_is_off(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_select(ROW_ENABLED);
+
+  prv_draw(ROW_CLEAR_PIN_OFF);
+  cl_assert_equal_s("Clear PIN", s_drawn_title);
+
+  prv_select(ROW_CLEAR_PIN_OFF);
+  prv_submit("1234");
+  cl_assert_equal_i(0, s_stored_pin_len);
+}
+
+//! Rows appear and disappear underneath the selection, so the mapping from row
+//! index to action has to keep up across the switch too. Getting it wrong means
+//! aiming at Clear PIN and erasing the watch instead.
+void test_settings_security__rows_follow_the_switch(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_select(ROW_ENABLED);
+  cl_assert_equal_i(ROWS_WITH_PIN_OFF, prv_num_rows());
+
+  prv_draw(ROW_CHANGE_PIN);
+  cl_assert_equal_s("Change PIN", s_drawn_title);
+  prv_draw(ROW_PIN_LENGTH_SET);
+  cl_assert_equal_s("PIN Length", s_drawn_title);
 }
 
 // Rows

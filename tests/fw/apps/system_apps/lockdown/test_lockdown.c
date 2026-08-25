@@ -27,6 +27,7 @@
 
 static bool s_in_launcher;
 static uint8_t s_pin_len;
+static SecurityLockState s_state;
 static int s_engage_calls;
 static SecurityShredReason s_engage_reason;
 static void (*s_deferred_callback)(void *);
@@ -57,6 +58,10 @@ void shell_prefs_set_lockdown_app_in_launcher(bool enable) {
 
 uint8_t security_lock_get_pin_len(void) {
   return s_pin_len;
+}
+
+SecurityLockState security_lock_get_state(void) {
+  return s_state;
 }
 
 void security_lock_engage(SecurityShredReason reason) {
@@ -146,9 +151,10 @@ static void prv_run_app(void) {
 
 void test_lockdown__initialize(void) {
   s_in_launcher = true;
-  // A configured PIN is the ordinary case; the app only exists to lock behind
-  // one. The no-PIN tests clear this.
+  // A configured PIN with the feature on is the ordinary case; the app only
+  // exists to lock behind one. The refusal tests take one or the other away.
   s_pin_len = 4;
+  s_state = SecurityLockStateArmed;
   s_engage_calls = 0;
   s_engage_reason = SecurityShredReasonManualPanic;
   s_deferred_callback = NULL;
@@ -314,13 +320,54 @@ void test_lockdown__does_not_shred_without_a_pin(void) {
 
 // Says why rather than doing nothing: the user pressed a chord that used to
 // work and is owed the reason it stopped.
-void test_lockdown__says_a_pin_is_required(void) {
+void test_lockdown__says_the_lock_must_be_turned_on(void) {
   s_pin_len = 0;
   prv_run_app();
 
   cl_assert_equal_i(1, s_dialog_pushes);
-  cl_assert(strstr(s_dialog_text, "PIN") != NULL);
+  cl_assert(strstr(s_dialog_text, "Settings") != NULL);
   cl_assert_equal_i(RESOURCE_ID_GENERIC_WARNING_LARGE, s_dialog_icon);
+}
+
+// The master switch
+////////////////////////////////////
+//
+// A PIN kept across a switch-off is not a working lock. engage() refuses while
+// the feature is off, so an app that ignored the switch would be a panic button
+// that silently did nothing.
+
+void test_lockdown__is_hidden_everywhere_while_the_feature_is_off(void) {
+  s_state = SecurityLockStateDisabled;
+  cl_assert_equal_i(ProcessVisibilityHidden, prv_md()->common.visibility);
+}
+
+//! Hiding is not enough: a Quick Launch binding is an install id in prefs, and
+//! the switch does not touch it.
+void test_lockdown__does_not_shred_while_the_feature_is_off(void) {
+  s_state = SecurityLockStateDisabled;
+  prv_run_app();
+
+  cl_assert_equal_i(0, s_engage_calls);
+  cl_assert(s_deferred_callback == NULL);
+  cl_assert_equal_i(1, s_dialog_pushes);
+}
+
+//! A stored PIN is exactly the case that makes this hazardous: everything looks
+//! configured, and only the switch says otherwise.
+void test_lockdown__a_kept_pin_does_not_make_the_app_usable(void) {
+  s_state = SecurityLockStateDisabled;
+  s_pin_len = 6;
+
+  cl_assert_equal_i(ProcessVisibilityHidden, prv_md()->common.visibility);
+  prv_run_app();
+  cl_assert_equal_i(0, s_engage_calls);
+}
+
+void test_lockdown__comes_back_when_the_feature_is_turned_on(void) {
+  s_state = SecurityLockStateDisabled;
+  cl_assert_equal_i(ProcessVisibilityHidden, prv_md()->common.visibility);
+  s_state = SecurityLockStateArmed;
+  cl_assert_equal_i(ProcessVisibilityShown, prv_md()->common.visibility);
 }
 
 // The message times out on its own. Popping the last window is what ends the

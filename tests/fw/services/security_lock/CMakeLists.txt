@@ -48,3 +48,12 @@ pbl_clar_test(test_security_lock_endpoint
     src/fw/services/security_lock/endpoint.c
   OVERRIDES dummy_board
 )
+
+# The lock funnel, where the master switch is enforced for everything that
+# locks. Everything it drives is faked: the subject is which of set_state, the
+# UI lockout and the wipe run for a given state.
+pbl_clar_test(test_security_lock_engage
+  SOURCES
+    src/fw/services/security_lock/lock.c
+  OVERRIDES dummy_board
+)

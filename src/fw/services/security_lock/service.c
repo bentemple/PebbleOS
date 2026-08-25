@@ -173,6 +173,11 @@ void security_lock_init(void) {
     // watching -- every trigger is gated on the state -- which is an upgrade
     // that silently disarms the lock.
     //
+    // This does mean an upgrade re-enables a feature the user had turned off,
+    // because the master switch lives in the record that just went. A separate
+    // flag would live there too and lose the same way; coming back on is the
+    // safer of the two guesses, and the user turned a PIN on at some point.
+    //
     // Armed rather than Locked: a firmware upgrade is a deliberate act by
     // someone who already had the watch open, and locking them out of it is the
     // worse failure. Only reached on the fallback path, so the extra read costs
@@ -299,6 +304,41 @@ status_t security_lock_set_state(SecurityLockState state) {
     prv_report_refused_writes();
   }
   return rv;
+}
+
+status_t security_lock_set_enabled(bool enabled) {
+  if (!s_initialized) {
+    return E_INVALID_OPERATION;
+  }
+  const SecurityLockState state = security_lock_get_state();
+
+  if (enabled) {
+    if (state != SecurityLockStateDisabled) {
+      return S_NO_ACTION_REQUIRED;
+    }
+    // Nothing to unlock with means nothing to turn on: the lock screen would
+    // have no PIN to prompt for and no way to let the user back in.
+    if (security_lock_get_pin_len() == 0) {
+      PBL_LOG_WRN("Refusing to enable the security lock with no PIN");
+      return E_INVALID_OPERATION;
+    }
+    PBL_LOG_INFO("Security lock enabled");
+    return security_lock_set_state(SecurityLockStateArmed);
+  }
+
+  if (state == SecurityLockStateDisabled) {
+    return S_NO_ACTION_REQUIRED;
+  }
+  // Turning the feature off is not a way past the lock screen. The phone can
+  // send this, so a watch it locked a moment ago must not open to a second
+  // message. Only the PIN clears a lock.
+  if (state == SecurityLockStateLocked) {
+    PBL_LOG_WRN("Refusing to disable the security lock while locked");
+    return E_INVALID_OPERATION;
+  }
+  PBL_LOG_INFO("Security lock disabled; the PIN is kept");
+  // Retires any armed deadline along with it -- see security_lock_set_state().
+  return security_lock_set_state(SecurityLockStateDisabled);
 }
 
 void security_lock_radio_blackout_engage(void) {
