@@ -335,7 +335,6 @@ watch locking when the phone is seized.
 
 | Cmd | Msg | Direction | Payload |
 |---|---|---|---|
-| `0x01` | `CONFIGURE` | phone → watch | `uint8 enabled`, `uint16 lock_delay_s`, `uint16 shred_delay_s` |
 | `0x02` | `LOCK` | phone → watch | `uint8 reason` |
 | `0x03` | `STATUS_REQUEST` | phone → watch | — |
 | `0x82` | `LOCK_ACK` | watch → phone | `uint8 reason` |
@@ -347,12 +346,21 @@ Reason codes: `0x00` unknown, `0x01` phone lockdown, `0x02` manual panic,
 `0x03` disconnect timeout, `0x04` reboot while locked, `0x05` PIN attempts
 exhausted, `0x06` clock rollback.
 
-`CONFIGURE`'s `enabled` byte drives the same persisted master switch the watch's
-own Settings menu flips, rather than a RAM-only flag only the phone can see. The
-phone can therefore turn the feature off remotely, which is inside the trust
-boundary it already has — it can send `LOCK` — and it cannot use that to reach
-the data: turning off is refused while `Locked`, and turning on is refused
-without a PIN.
+**The watch owns its own security configuration.** There is no command that sets
+the master switch or either delay: those live in Settings > Security and nowhere
+else. The phone can *act* on the watch — `LOCK` — and *ask* about it —
+`STATUS_REQUEST` — but it cannot change the watch's security posture.
+
+That split is deliberate rather than an omission. A phone that can disarm the
+watch is a phone that can be compelled to disarm the watch, and the phone being
+taken is the situation this whole feature exists for. It also settles a smaller
+argument: a companion app that re-sent its own idea of the settings on every
+connection would silently overwrite whatever the user had chosen on the wrist,
+every time the two reconnected.
+
+`0x01` was `CONFIGURE`, which carried `enabled` and both delays. It is retired.
+A phone built against the older protocol still sending it is ignored on the
+unknown-command path — logged and dropped, with no reply and no side effect.
 
 `LOCK` is refused outright while the feature is off, and the watch replies with
 `STATE_CHANGED(Disabled)` rather than `LOCK_ACK`. `LOCK_ACK` carries only a
@@ -367,20 +375,12 @@ watch actually being locked afterwards, not on having asked.
 from the state, because a PIN now outlives the switch and `Disabled` no longer
 implies there is none.
 
-Both delays in `CONFIGURE` are counted **from the disconnect**, not from each
-other, so the defaults lock at five minutes and erase at thirty — twenty-five
-minutes after locking, not thirty. A zero in either field means "leave that
-delay alone" rather than "set it to zero", so a phone that does not care about
-the timings can send zeroes and change nothing.
-
-That encoding has a consequence worth stating: `SECURITY_LOCK_SHRED_DELAY_NEVER`
-is also zero, so **"never erase" cannot currently be expressed over the wire** —
-it is reachable only from the watch's own Settings menu. Fixing that means
-either swapping the sentinels (`0xffff` for "leave alone", freeing zero for its
-natural meaning) or appending a flags byte, which would also require relaxing
-the handler's length check so existing six-byte messages keep working.
-`STATUS_RESPONSE.deadline_remaining_s` has the same ambiguity: zero means both
-"never" and "no countdown running".
+Both delays are counted **from the disconnect**, not from each other, so the
+defaults lock at five minutes and erase at thirty — twenty-five minutes after
+locking, not thirty. `SECURITY_LOCK_SHRED_DELAY_NEVER` is zero and simply leaves
+the shred deadline unarmed, which is how "nothing pending" is already spelled
+everywhere else; `STATUS_RESPONSE.deadline_remaining_s` reports zero for it,
+which is accurate, because there is no countdown to report.
 
 State values match `SecurityLockState`: `0` disabled, `1` armed, `2` locked.
 

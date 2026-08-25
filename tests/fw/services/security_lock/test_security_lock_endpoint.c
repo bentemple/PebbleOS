@@ -56,31 +56,6 @@ uint8_t security_lock_get_pin_len(void) {
   return s_pin_len;
 }
 
-//! Mirrors the store's own rules, which are the reason the phone cannot use
-//! this to get past a lock screen or to arm a watch that has no PIN.
-status_t security_lock_set_enabled(bool enabled) {
-  if (enabled) {
-    if (s_state != SecurityLockStateDisabled) {
-      return S_NO_ACTION_REQUIRED;
-    }
-    if (s_pin_len == 0) {
-      return E_INVALID_OPERATION;
-    }
-    s_state = SecurityLockStateArmed;
-    return S_SUCCESS;
-  }
-  if (s_state == SecurityLockStateDisabled) {
-    return S_NO_ACTION_REQUIRED;
-  }
-  if (s_state == SecurityLockStateLocked) {
-    return E_INVALID_OPERATION;
-  }
-  s_state = SecurityLockStateDisabled;
-  s_lock_deadline = 0;
-  s_shred_deadline = 0;
-  return S_SUCCESS;
-}
-
 bool security_lock_is_locked(void) {
   return s_state == SecurityLockStateLocked;
 }
@@ -130,12 +105,6 @@ bool security_lock_shred_deadline_expired(time_t now) {
 
 bool security_lock_note_time(time_t now) {
   return s_rolled_back;
-}
-
-status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s) {
-  s_lock_delay_s = lock_delay_s;
-  s_shred_delay_s = shred_delay_s;
-  return S_SUCCESS;
 }
 
 uint32_t security_lock_shred(SecurityShredReason reason) {
@@ -240,19 +209,23 @@ static bool prv_timer_running(void) {
 #define CMD_STATE_CHANGED 0x85
 
 //! Inbound commands, as the phone spells them.
-#define CMD_CONFIGURE 0x01
 #define CMD_LOCK 0x02
 #define CMD_STATUS_REQUEST 0x03
+
+//! The retired CONFIGURE, still spoken by a phone built against the old
+//! protocol: command, enabled, then both delays big-endian.
+#define CMD_RETIRED_CONFIGURE 0x01
 
 static void prv_phone_lock(uint8_t reason) {
   const uint8_t msg[] = {CMD_LOCK, reason};
   security_lock_protocol_msg_callback(NULL, msg, sizeof(msg));
 }
 
-//! CONFIGURE: command, enabled, then both delays big-endian. Zero delays mean
-//! "leave those alone", which is what makes this an enabled-only message.
-static void prv_phone_configure(bool enabled) {
-  const uint8_t msg[] = {CMD_CONFIGURE, (uint8_t)(enabled ? 1 : 0), 0, 0, 0, 0};
+static void prv_phone_retired_configure(bool enabled, uint16_t lock_delay_s,
+                                        uint16_t shred_delay_s) {
+  const uint8_t msg[] = {CMD_RETIRED_CONFIGURE,         (uint8_t)(enabled ? 1 : 0),
+                         (uint8_t)(lock_delay_s >> 8),  (uint8_t)lock_delay_s,
+                         (uint8_t)(shred_delay_s >> 8), (uint8_t)shred_delay_s};
   security_lock_protocol_msg_callback(NULL, msg, sizeof(msg));
 }
 
@@ -373,57 +346,52 @@ void test_security_lock_endpoint__a_lock_that_does_not_take_is_not_acked(void) {
   cl_assert_equal_i(1, prv_count_sent(CMD_STATE_CHANGED));
 }
 
-// CONFIGURE
+// The retired CONFIGURE
 ////////////////////////////////////
 
-//! The enabled byte drives the same persisted switch Settings flips, rather
-//! than a second RAM-only notion that only the phone could see.
-void test_security_lock_endpoint__configure_turns_the_feature_off(void) {
-  prv_phone_configure(false);
-
-  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
-}
-
-void test_security_lock_endpoint__configure_turns_the_feature_back_on(void) {
-  s_state = SecurityLockStateDisabled;
-
-  prv_phone_configure(true);
+//! The master switch and both delays are the watch's own, so the command that
+//! set them is gone. A phone built against the old protocol still sends it on
+//! every connection, and every one of those must change nothing -- otherwise
+//! reconnecting quietly overwrites whatever the user chose on the wrist.
+void test_security_lock_endpoint__the_retired_configure_cannot_turn_the_feature_off(void) {
+  prv_phone_retired_configure(false, 0, 0);
 
   cl_assert_equal_i(SecurityLockStateArmed, s_state);
+  cl_assert_equal_i(0, s_msgs_sent);
 }
 
-//! The phone can turn the feature off, which is inside the trust boundary --
-//! it can already LOCK. It cannot use that to get past a lock screen: only the
-//! PIN does.
-void test_security_lock_endpoint__configure_cannot_unlock_a_locked_watch(void) {
-  s_state = SecurityLockStateLocked;
-
-  prv_phone_configure(false);
-
-  cl_assert_equal_i(SecurityLockStateLocked, s_state);
-}
-
-//! Nor can it arm a watch that has no PIN, which would be a lock screen with
-//! nothing to prompt for.
-void test_security_lock_endpoint__configure_cannot_enable_without_a_pin(void) {
+//! The direction that motivated the removal: a companion app that sends
+//! enabled=1 unconditionally must not re-arm a watch the user turned off.
+void test_security_lock_endpoint__the_retired_configure_cannot_turn_the_feature_on(void) {
   s_state = SecurityLockStateDisabled;
-  s_pin_len = 0;
 
-  prv_phone_configure(true);
+  prv_phone_retired_configure(true, 0, 0);
 
   cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+  cl_assert_equal_i(0, s_msgs_sent);
 }
 
-//! Turning the feature off retires any countdown with it, rather than leaving
-//! one armed for a check that will decline to act on it.
-void test_security_lock_endpoint__configure_off_retires_the_countdown(void) {
+//! Nor can it reach the delays, which is what made "never erase" inexpressible
+//! over the wire in the first place.
+void test_security_lock_endpoint__the_retired_configure_cannot_reach_the_delays(void) {
+  prv_phone_retired_configure(true, 30, 90);
+
+  cl_assert_equal_i(60, (int)s_lock_delay_s);
+  cl_assert_equal_i(600, (int)s_shred_delay_s);
+}
+
+//! Retiring it left no countdown behind either: an old phone's CONFIGURE is a
+//! no-op in full, not one with a side effect on the disconnect deadlines.
+void test_security_lock_endpoint__the_retired_configure_leaves_the_countdown_alone(void) {
   prv_session_event(false);
-  cl_assert(s_shred_deadline != 0);
+  const time_t lock_deadline = s_lock_deadline;
+  const time_t shred_deadline = s_shred_deadline;
+  cl_assert(shred_deadline != 0);
 
-  prv_phone_configure(false);
+  prv_phone_retired_configure(false, 0, 0);
 
-  cl_assert_equal_i(0, s_lock_deadline);
-  cl_assert_equal_i(0, s_shred_deadline);
+  cl_assert_equal_i((int)lock_deadline, (int)s_lock_deadline);
+  cl_assert_equal_i((int)shred_deadline, (int)s_shred_deadline);
 }
 
 //! STATUS answers "is there a PIN" from the PIN, not from the state. A PIN

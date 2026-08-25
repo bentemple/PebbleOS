@@ -41,8 +41,7 @@
 //!
 //! Zero rather than a large sentinel because an unarmed deadline is already 0
 //! everywhere, so this needs no special case beyond the ordering check in
-//! security_lock_set_delays(). Note the phone cannot select it: CONFIGURE reads
-//! a zero delay field as "leave this one alone".
+//! security_lock_set_delays().
 #define SECURITY_LOCK_SHRED_DELAY_NEVER 0
 
 //! Slack allowed when comparing against the persisted time high-water mark.

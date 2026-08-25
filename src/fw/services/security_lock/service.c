@@ -329,9 +329,9 @@ status_t security_lock_set_enabled(bool enabled) {
   if (state == SecurityLockStateDisabled) {
     return S_NO_ACTION_REQUIRED;
   }
-  // Turning the feature off is not a way past the lock screen. The phone can
-  // send this, so a watch it locked a moment ago must not open to a second
-  // message. Only the PIN clears a lock.
+  // Turning the feature off is not a way past the lock screen. Nothing on the
+  // wire reaches this any more, but keeping the rule here is what makes that
+  // true of every caller rather than of the endpoint alone.
   if (state == SecurityLockStateLocked) {
     PBL_LOG_WRN("Refusing to disable the security lock while locked");
     return E_INVALID_OPERATION;

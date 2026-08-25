@@ -24,8 +24,10 @@ PBL_LOG_MODULE_DECLARE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_L
 //! Response commands carry the high bit, matching the BlobDB endpoint.
 #define RESPONSE_MASK (1 << 7)
 
+//! 0x01 was CONFIGURE. The watch owns its own security configuration now, so
+//! there is nothing for the phone to set; an old phone still sending it falls
+//! through to the unknown-command path.
 typedef enum PACKED {
-  SecurityLockCmdConfigure = 0x01,
   SecurityLockCmdLock = 0x02,
   SecurityLockCmdStatusRequest = 0x03,
 
@@ -34,13 +36,6 @@ typedef enum PACKED {
   SecurityLockCmdShredComplete = 0x04 | RESPONSE_MASK,
   SecurityLockCmdStateChanged = 0x05 | RESPONSE_MASK,
 } SecurityLockCmd;
-
-typedef struct PACKED {
-  uint8_t cmd;
-  uint8_t enabled;
-  net16 lock_delay_s;
-  net16 shred_delay_s;
-} SecurityLockConfigureMsg;
 
 typedef struct PACKED {
   uint8_t cmd;
@@ -210,44 +205,6 @@ static void prv_handle_lock(const uint8_t *msg, size_t len) {
   launcher_task_add_callback(prv_lock_callback, (void *)(uintptr_t)lock_msg->reason);
 }
 
-static void prv_handle_configure(const uint8_t *msg, size_t len) {
-  if (len < sizeof(SecurityLockConfigureMsg)) {
-    PBL_LOG_ERR("Short CONFIGURE message: %u", (unsigned)len);
-    return;
-  }
-  const SecurityLockConfigureMsg *cfg = (const SecurityLockConfigureMsg *)msg;
-
-  // The same persisted switch Settings flips. There is one notion of "on", so
-  // the two cannot disagree and a reboot keeps whichever set it last. The phone
-  // can therefore turn the feature off remotely -- it can already LOCK, so it
-  // is inside the trust boundary either way -- but it cannot unlock: turning
-  // off is refused while Locked, and turning on is refused without a PIN.
-  const bool want_enabled = (cfg->enabled != 0);
-  const status_t enable_rv = security_lock_set_enabled(want_enabled);
-  if ((enable_rv != S_SUCCESS) && (enable_rv != S_NO_ACTION_REQUIRED)) {
-    PBL_LOG_WRN("Refused the phone's enabled=%d (%" PRId32 ")", (int)want_enabled,
-                (int32_t)enable_rv);
-  }
-
-  // Zero means "leave it alone" rather than "act immediately", so a phone that
-  // does not care about the timings cannot accidentally set them to nothing.
-  const uint16_t lock_delay = ntoh16(cfg->lock_delay_s);
-  const uint16_t shred_delay = ntoh16(cfg->shred_delay_s);
-  if ((lock_delay != 0) || (shred_delay != 0)) {
-    const uint32_t new_lock =
-        (lock_delay != 0) ? lock_delay : security_lock_get_lock_delay_s();
-    const uint32_t new_shred =
-        (shred_delay != 0) ? shred_delay : security_lock_get_shred_delay_s();
-    if (security_lock_set_delays(new_lock, new_shred) != S_SUCCESS) {
-      PBL_LOG_WRN("Rejected delays: lock=%" PRIu32 "s shred=%" PRIu32 "s", new_lock, new_shred);
-    }
-  }
-
-  PBL_LOG_DBG("Configured: enabled=%d lock=%" PRIu32 "s shred=%" PRIu32 "s",
-              (int)security_lock_is_enabled(), security_lock_get_lock_delay_s(),
-              security_lock_get_shred_delay_s());
-}
-
 void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *msg, size_t len) {
   if (len < 1) {
     PBL_LOG_ERR("Empty message");
@@ -255,9 +212,6 @@ void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *ms
   }
 
   switch (msg[0]) {
-    case SecurityLockCmdConfigure:
-      prv_handle_configure(msg, len);
-      break;
     case SecurityLockCmdLock:
       prv_handle_lock(msg, len);
       break;
