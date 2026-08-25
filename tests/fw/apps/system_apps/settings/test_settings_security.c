@@ -41,6 +41,21 @@ static uint32_t s_lock_delay_s;
 static uint32_t s_shred_delay_s;
 static int s_rejected_delays;
 
+//! Wipes asked for with the duress reason, and wipes refused because the
+//! feature had already been turned off.
+static int s_duress_shreds;
+static int s_refused_shreds;
+//! What a wipe reports destroying. Zero models the dirty-since-shred early-out,
+//! where there was nothing new to erase.
+static uint32_t s_shred_wiped;
+
+//! When each half of a duress disable happened. A sequence rather than a pair
+//! of counters: which came first is the whole property under test, and an
+//! end-state check passes against an implementation that raced.
+static int s_next_seq;
+static int s_duress_shred_seq;
+static int s_disable_seq;
+
 uint8_t security_lock_get_pin_len(void) {
   return s_stored_pin_len;
 }
@@ -106,6 +121,7 @@ static status_t prv_clear_pin(void) {
   s_state = SecurityLockStateDisabled;
   s_lock_delay_s = SECURITY_LOCK_DEFAULT_LOCK_DELAY_S;
   s_shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S;
+  s_disable_seq = ++s_next_seq;
   return S_SUCCESS;
 }
 
@@ -117,23 +133,35 @@ status_t security_lock_clear_pin(void) {
   return E_INTERNAL;
 }
 
-//! Wipes the real store would have queued because a duress PIN was accepted.
-static int s_duress_shreds;
+//! Mirrors the master switch security_lock_shred() enforces: once the feature
+//! is off there is nothing left to erase and the wipe is refused. That refusal
+//! is what makes the ordering load-bearing rather than cosmetic.
+uint32_t security_lock_shred(SecurityShredReason reason) {
+  if (s_state == SecurityLockStateDisabled) {
+    s_refused_shreds++;
+    return 0;
+  }
+  if (reason == SecurityShredReasonDuressPin) {
+    s_duress_shreds++;
+    s_duress_shred_seq = ++s_next_seq;
+  }
+  return s_shred_wiped;
+}
 
-static bool prv_verify(const char *digits, uint8_t len, uint8_t *attempts_remaining_out,
-                       bool allow_duress) {
+static SecurityPinVerdict prv_verify(const char *digits, uint8_t len,
+                                     uint8_t *attempts_remaining_out) {
   if (s_failed_attempts < UINT8_MAX) {
     s_failed_attempts++;
   }
-  bool matched = (len == s_stored_pin_len) && (memcmp(digits, s_stored_pin, len) == 0);
-  if (!matched && allow_duress && (s_stored_duress_len != 0) && (len == s_stored_duress_len) &&
-      (memcmp(digits, s_stored_duress, len) == 0)) {
-    // Reported as an ordinary success, exactly as the real one does, and the
-    // wipe it queues is the thing that must not be lost to a switch-off.
-    matched = true;
-    s_duress_shreds++;
+  SecurityPinVerdict verdict = SecurityPinVerdictWrong;
+  if ((len == s_stored_pin_len) && (memcmp(digits, s_stored_pin, len) == 0)) {
+    verdict = SecurityPinVerdictReal;
+  } else if ((s_stored_duress_len != 0) && (len == s_stored_duress_len) &&
+             (memcmp(digits, s_stored_duress, len) == 0)) {
+    verdict = SecurityPinVerdictDuress;
   }
-  if (matched) {
+  // A duress match is a success, not a failed attempt.
+  if (verdict != SecurityPinVerdictWrong) {
     s_failed_attempts = 0;
   }
   if (attempts_remaining_out) {
@@ -141,15 +169,23 @@ static bool prv_verify(const char *digits, uint8_t len, uint8_t *attempts_remain
                                   ? 0
                                   : SECURITY_LOCK_MAX_PIN_ATTEMPTS - s_failed_attempts;
   }
-  return matched;
+  return verdict;
 }
 
 bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out) {
-  return prv_verify(digits, len, attempts_remaining_out, true /* allow_duress */);
+  const SecurityPinVerdict verdict = prv_verify(digits, len, attempts_remaining_out);
+  if (verdict == SecurityPinVerdictDuress) {
+    // Reported as an ordinary success, exactly as the real one does, and the
+    // wipe it takes with it is the thing that must not be lost.
+    security_lock_shred(SecurityShredReasonDuressPin);
+  }
+  return verdict != SecurityPinVerdictWrong;
 }
 
-bool security_lock_verify_real_pin(const char *digits, uint8_t len) {
-  return prv_verify(digits, len, NULL, false /* allow_duress */);
+SecurityPinVerdict security_lock_verify_pin_verdict(const char *digits, uint8_t len) {
+  // Deliberately schedules nothing: ordering the wipe against the switch-off is
+  // the caller's job, which is the whole reason this variant exists.
+  return prv_verify(digits, len, NULL);
 }
 
 uint8_t security_lock_get_failed_attempts(void) {
@@ -318,11 +354,20 @@ void expandable_dialog_pop(ExpandableDialog *e_dialog) {
 }
 
 // Lock Now must not call engage() inline: it asserts KernelMain and this runs
-// on the app task.
+// on the app task. Neither may a duress disable, which is why the wipe and the
+// switch-off can be ordered against each other at all.
 static void (*s_deferred_callback)(void *);
 
 void launcher_task_add_callback(void (*callback)(void *data), void *data) {
   s_deferred_callback = callback;
+}
+
+//! Stand in for the launcher task draining its queue.
+static void prv_run_deferred(void) {
+  cl_assert(s_deferred_callback != NULL);
+  void (*callback)(void *) = s_deferred_callback;
+  s_deferred_callback = NULL;
+  callback(NULL);
 }
 
 // What the last drawn row put on screen. The subtitles are the only place the
@@ -431,6 +476,12 @@ void test_settings_security__initialize(void) {
   s_failed_attempts = 0;
   s_reset_attempts_calls = 0;
   s_duress_shreds = 0;
+  s_refused_shreds = 0;
+  // Something to destroy, unless a test says otherwise.
+  s_shred_wiped = 0x1;
+  s_next_seq = 0;
+  s_duress_shred_seq = 0;
+  s_disable_seq = 0;
   s_engage_calls = 0;
   s_lock_delay_s = SECURITY_LOCK_DEFAULT_LOCK_DELAY_S;
   s_shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S;
@@ -805,51 +856,142 @@ void test_settings_security__duress_pin_must_differ_from_the_real_one(void) {
   cl_assert_equal_s("Must differ from your PIN", s_prompt_message);
 }
 
-// A duress PIN unlocks normally and wipes in the background. The disable prompt
-// cannot honour that: the wipe is queued onto a higher-priority task than the
-// one that then turns the feature off, and turning it off is exactly what makes
-// the queued wipe decline to run. So the two race, and one of the two outcomes
-// is a lock disarmed with nothing erased.
+// The duress PIN at the disable prompt
+////////////////////////////////////
 //
-// Until there is a decision about what it should do there, it must not be the
-// worse answer. Refused, like any other wrong PIN.
-void test_settings_security__a_duress_pin_will_not_turn_the_feature_off(void) {
-  prv_install_pin("1234");
-  prv_open_settings();
+// It acts like the real PIN, but wipes first. Being made to switch the
+// protection off is close to the case the duress PIN exists for, so refusing it
+// there would cost the user the behaviour they expected at exactly the wrong
+// moment.
+//
+// The order is the whole of it: security_lock_shred() refuses once the feature
+// is off, so a switch-off that landed first would disarm the lock and erase
+// nothing. Both halves therefore run in one callback on the launcher task,
+// rather than the wipe being queued there while this task carries on to
+// disable -- which is a race the scheduler decides.
 
+//! Set a duress PIN through the menu, the way a user would, and clear the
+//! bookkeeping the setup itself produced.
+static void prv_install_duress_pin(const char *current, const char *duress) {
   prv_select(ROW_DURESS_PIN);
-  prv_submit("1234");
-  prv_submit("5678");
-  prv_submit("5678");
-  cl_assert_equal_i(4, s_stored_duress_len);
+  prv_submit(current);
+  prv_submit(duress);
+  prv_submit(duress);
+  cl_assert_equal_i(strlen(duress), s_stored_duress_len);
   s_module->appear(s_module);
   s_duress_shreds = 0;
+  s_next_seq = 0;
+  s_duress_shred_seq = 0;
+  s_disable_seq = 0;
+}
+
+void test_settings_security__a_duress_pin_wipes_then_turns_the_feature_off(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_install_duress_pin("1234", "5678");
 
   prv_select(ROW_ENABLED);
   prv_submit("5678");
 
-  // Neither disabled nor wiped, and still sitting on the prompt like any other
-  // wrong entry.
-  cl_assert_equal_i(SecurityLockStateArmed, s_state);
-  cl_assert_equal_i(4, s_stored_pin_len);
+  // Accepted: the prompt closes exactly as it does for the real PIN, and it is
+  // not treated as a wrong entry.
+  cl_assert(s_prompt == NULL);
+  cl_assert(strstr(s_prompt_message, "Wrong") == NULL);
+
+  // Nothing has happened on this task. Both halves belong to the launcher.
   cl_assert_equal_i(0, s_duress_shreds);
+  cl_assert_equal_i(SecurityLockStateArmed, s_state);
+
+  prv_run_deferred();
+
+  // Wiped, and then off -- with the PIN and the duress PIN gone with it, which
+  // is what a real disable does.
+  cl_assert_equal_i(1, s_duress_shreds);
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+  cl_assert_equal_i(0, s_stored_pin_len);
+  cl_assert_equal_i(0, s_stored_duress_len);
+
+  // The load-bearing assertion. Both outcomes hold whichever way round they
+  // ran; only the order distinguishes this from the version that raced.
+  cl_assert(s_duress_shred_seq != 0);
+  cl_assert(s_disable_seq != 0);
+  cl_assert(s_duress_shred_seq < s_disable_seq);
+  // And the wipe was never handed a switched-off feature to refuse.
+  cl_assert_equal_i(0, s_refused_shreds);
+}
+
+//! The wipe may legitimately destroy nothing: the dirty-since-shred early-out
+//! skips the file zeroing when nothing has been written since the last one.
+//! The switch-off must not be conditional on the wipe having done work.
+void test_settings_security__a_duress_pin_disables_even_when_the_wipe_erased_nothing(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_install_duress_pin("1234", "5678");
+  s_shred_wiped = 0;
+
+  prv_select(ROW_ENABLED);
+  prv_submit("5678");
+  prv_run_deferred();
+
+  cl_assert_equal_i(1, s_duress_shreds);
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+  cl_assert_equal_i(0, s_stored_pin_len);
+  cl_assert(s_duress_shred_seq < s_disable_seq);
+}
+
+//! A duress match is a success, not a failed attempt -- so the prompt does not
+//! spend one of its three tries on it.
+void test_settings_security__a_duress_pin_at_the_disable_prompt_is_not_a_wrong_entry(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_install_duress_pin("1234", "5678");
+
+  prv_select(ROW_ENABLED);
+  prv_submit("5678");
+
+  cl_assert_equal_i(0, s_failed_attempts);
+  cl_assert(strstr(s_prompt_message, "Wrong") == NULL);
+}
+
+//! The real PIN is untouched by any of this: it still turns the feature off
+//! then and there, with no wipe and nothing deferred.
+void test_settings_security__the_real_pin_turns_it_off_without_a_wipe(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_install_duress_pin("1234", "5678");
+
+  prv_select(ROW_ENABLED);
+  prv_submit("1234");
+
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+  cl_assert_equal_i(0, s_duress_shreds);
+  cl_assert(s_deferred_callback == NULL);
+  cl_assert(s_prompt == NULL);
+}
+
+//! And a wrong PIN is still a wrong PIN: nothing wiped, nothing disabled.
+void test_settings_security__a_wrong_pin_at_the_disable_prompt_wipes_nothing(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_install_duress_pin("1234", "5678");
+
+  prv_select(ROW_ENABLED);
+  prv_submit("9999");
+
+  cl_assert_equal_i(SecurityLockStateArmed, s_state);
+  cl_assert_equal_i(0, s_duress_shreds);
+  cl_assert(s_deferred_callback == NULL);
   cl_assert(s_prompt != NULL);
 }
 
-// The other prompts are unchanged: a duress PIN authorises them and takes its
-// wipe with it, because nothing there turns the feature off underneath it.
-// Pinned so that settling the question above is a deliberate change rather than
-// a side effect.
+// The other prompts keep the ordinary duress semantics: the wipe is queued by
+// the store as the entry is accepted, and nothing in those flows turns the
+// feature off underneath it. Only the disable prompt has to order the two by
+// hand, and only it is told which PIN matched.
 void test_settings_security__a_duress_pin_still_authorises_a_pin_change(void) {
   prv_install_pin("1234");
   prv_open_settings();
-
-  prv_select(ROW_DURESS_PIN);
-  prv_submit("1234");
-  prv_submit("5678");
-  prv_submit("5678");
-  s_module->appear(s_module);
-  s_duress_shreds = 0;
+  prv_install_duress_pin("1234", "5678");
 
   prv_select(ROW_CHANGE_PIN);
   prv_submit("5678");

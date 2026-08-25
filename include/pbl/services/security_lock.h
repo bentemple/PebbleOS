@@ -133,26 +133,44 @@ uint8_t security_lock_get_pin_len(void);
 //! comparison is performed, so yanking power mid-verification counts as a
 //! failure rather than resetting the count. On success the counter is reset.
 //!
+//! A duress PIN is reported as an ordinary success and the wipe it carries is
+//! queued onto the launcher task from in here, so no caller has to know about
+//! it -- and nothing above this layer can leak it into the UI.
+//!
 //! @param[out] attempts_remaining_out may be NULL. Set to the number of
 //!             attempts left before escalation.
 //! @return true if the PIN matched.
 bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out);
 
-//! Verify against the real PIN alone. A duress PIN is a mismatch here, and
-//! nothing is triggered by it.
+//! Which PIN an attempt matched. See security_lock_verify_pin_verdict().
+typedef enum {
+  //! No match. A duress PIN that is not configured, or one of the wrong
+  //! length, lands here exactly as any other wrong entry does.
+  SecurityPinVerdictWrong = 0,
+  SecurityPinVerdictReal,
+  SecurityPinVerdictDuress,
+} SecurityPinVerdict;
+
+//! Verify a PIN and report which one it was, scheduling nothing.
 //!
-//! For the one caller that cannot honour duress semantics. A duress unlock
-//! wipes in the background while the watch behaves normally, but turning the
-//! feature off is exactly what stops a background wipe from running -- and the
-//! two race, because the wipe is queued onto a higher-priority task than the
-//! one asking. Accepting a duress PIN there would sometimes disable the lock
-//! and silently skip the wipe, which is the opposite of what it is for.
+//! For the caller that has to order the duress wipe against work of its own:
+//! Settings' turn-it-off prompt, which must wipe and then disable. Those cannot
+//! be a queued wipe plus a caller that carries on, because the wipe would land
+//! on the launcher task while the caller runs on the app task -- so which went
+//! first would be the scheduler's decision, and one of the two answers is a
+//! lock disarmed with nothing erased. Handed the verdict, the caller can put
+//! both halves in one callback in a fixed order.
 //!
-//! Not a way to find out whether a duress PIN exists: it answers false for one
-//! exactly as it does for any other wrong PIN.
+//! The only place duress is visible above this file, and it stays safe because
+//! of what that one caller does with it: the two verdicts are indistinguishable
+//! on screen, and what differs is the wipe rather than anything shown. A new
+//! caller that branches into the UI on this would be the bug.
 //!
-//! Burns an attempt in the same before-the-comparison order as above.
-bool security_lock_verify_real_pin(const char *digits, uint8_t len);
+//! Not a way to ask whether a duress PIN exists -- only an entry that actually
+//! matches one is ever reported as duress, which means whoever typed it already
+//! knew. Burns an attempt in the same before-the-comparison order as above, and
+//! a duress match resets the counter exactly as a real one does.
+SecurityPinVerdict security_lock_verify_pin_verdict(const char *digits, uint8_t len);
 
 uint8_t security_lock_get_failed_attempts(void);
 status_t security_lock_reset_failed_attempts(void);

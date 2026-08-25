@@ -608,13 +608,16 @@ static void prv_duress_shred_callback(void *unused) {
   security_lock_shred(SecurityShredReasonDuressPin);
 }
 
-static bool prv_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out,
-                           bool allow_duress) {
+//! The comparison itself, which triggers nothing. What a duress match is worth
+//! doing about is the caller's decision, and the two public entry points below
+//! make it differently.
+static SecurityPinVerdict prv_verify_pin(const char *digits, uint8_t len,
+                                         uint8_t *attempts_remaining_out) {
   if (attempts_remaining_out) {
     *attempts_remaining_out = 0;
   }
   if (!s_initialized || digits == NULL) {
-    return false;
+    return SecurityPinVerdictWrong;
   }
 
   mutex_lock(s_mutex);
@@ -631,30 +634,30 @@ static bool prv_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_re
     // than allow unlimited free tries.
     PBL_LOG_ERR("Failed to persist PIN attempt (%" PRId32 "); rejecting", (int32_t)flush_rv);
     mutex_unlock(s_mutex);
-    return false;
+    return SecurityPinVerdictWrong;
   }
 
   SecurityLockConfig cfg;
-  bool matched = false;
-  bool duress = false;
+  SecurityPinVerdict verdict = SecurityPinVerdictWrong;
   if (prv_read_config(&cfg) == S_SUCCESS) {
     uint8_t attempt_hash[SECURITY_LOCK_HASH_LEN];
     if ((cfg.pin_len == len) &&
-        security_lock_pin_hash(digits, len, cfg.salt, attempt_hash) == S_SUCCESS) {
-      matched = security_lock_hash_equal(attempt_hash, cfg.pin_hash);
+        security_lock_pin_hash(digits, len, cfg.salt, attempt_hash) == S_SUCCESS &&
+        security_lock_hash_equal(attempt_hash, cfg.pin_hash)) {
+      verdict = SecurityPinVerdictReal;
     }
-    if (!matched && allow_duress && cfg.has_duress_pin && (cfg.duress_len == len) &&
-        security_lock_pin_hash(digits, len, cfg.duress_salt, attempt_hash) == S_SUCCESS) {
-      // Reported to the caller as an ordinary success. Nothing above this layer
-      // is told the difference, so nothing can leak it into the UI.
-      duress = security_lock_hash_equal(attempt_hash, cfg.duress_hash);
-      matched = duress;
+    if ((verdict == SecurityPinVerdictWrong) && cfg.has_duress_pin && (cfg.duress_len == len) &&
+        security_lock_pin_hash(digits, len, cfg.duress_salt, attempt_hash) == S_SUCCESS &&
+        security_lock_hash_equal(attempt_hash, cfg.duress_hash)) {
+      verdict = SecurityPinVerdictDuress;
     }
     memset(attempt_hash, 0, sizeof(attempt_hash));
   }
   memset(&cfg, 0, sizeof(cfg));
 
-  if (matched) {
+  // A match is a match whichever PIN it was: a duress entry is a success, not a
+  // guess that failed.
+  if (verdict != SecurityPinVerdictWrong) {
     s_runtime_cache.failed_attempts = 0;
     prv_flush_runtime();
   }
@@ -666,23 +669,30 @@ static bool prv_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_re
   }
 
   mutex_unlock(s_mutex);
-
-  if (duress) {
-    // Deferred so the unlock completes first and the watch looks ordinary,
-    // but onto KernelMain: the wipe closes and reopens databases and
-    // deadlocks if driven from KernelBG.
-    launcher_task_add_callback(prv_duress_shred_callback, NULL);
-  }
-
-  return matched;
+  return verdict;
 }
 
 bool security_lock_verify_pin(const char *digits, uint8_t len, uint8_t *attempts_remaining_out) {
-  return prv_verify_pin(digits, len, attempts_remaining_out, true /* allow_duress */);
+  const SecurityPinVerdict verdict = prv_verify_pin(digits, len, attempts_remaining_out);
+
+  if (verdict == SecurityPinVerdictDuress) {
+    // Deferred so the unlock completes first and the watch looks ordinary,
+    // but onto KernelMain: the wipe closes and reopens databases and
+    // deadlocks if driven from KernelBG.
+    //
+    // Queued here rather than inside the comparison so that the variant below
+    // can decline it: a caller whose own next step would stop the wipe from
+    // running has to be the one that orders the two.
+    launcher_task_add_callback(prv_duress_shred_callback, NULL);
+  }
+
+  // Reported as an ordinary success. Nothing above this layer is told the
+  // difference, so nothing can leak it into the UI.
+  return verdict != SecurityPinVerdictWrong;
 }
 
-bool security_lock_verify_real_pin(const char *digits, uint8_t len) {
-  return prv_verify_pin(digits, len, NULL, false /* allow_duress */);
+SecurityPinVerdict security_lock_verify_pin_verdict(const char *digits, uint8_t len) {
+  return prv_verify_pin(digits, len, NULL);
 }
 
 uint8_t security_lock_get_failed_attempts(void) {

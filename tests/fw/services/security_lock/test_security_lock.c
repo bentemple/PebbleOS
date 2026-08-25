@@ -791,39 +791,72 @@ void test_security_lock__wrong_pin_does_not_shred(void) {
   cl_assert_equal_i(0, s_duress_shreds);
 }
 
-//! For the caller that cannot honour duress semantics: a duress PIN is simply
-//! a wrong PIN, and nothing is scheduled by it. Turning the feature off is what
-//! stops a queued wipe from running, so accepting one there would sometimes
-//! disarm the lock and erase nothing.
-void test_security_lock__real_pin_verify_refuses_a_duress_pin(void) {
+//! For the caller that has to order the wipe against work of its own: it is
+//! told which PIN matched, and nothing is scheduled on its behalf.
+void test_security_lock__verdict_reports_a_duress_pin_as_duress(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
 
-  cl_assert(!security_lock_verify_real_pin(DURESS, strlen(DURESS)));
+  cl_assert_equal_i(SecurityPinVerdictDuress,
+                    security_lock_verify_pin_verdict(DURESS, strlen(DURESS)));
+  // Nothing queued: the wipe is the caller's to run, in an order of its
+  // choosing. A queued one would race whatever the caller does next.
   prv_run_pending_callback();
   cl_assert_equal_i(0, s_duress_shreds);
 }
 
-void test_security_lock__real_pin_verify_accepts_the_real_pin(void) {
+//! A match is a success whichever PIN it was, so it clears the counter rather
+//! than spending an attempt.
+void test_security_lock__verdict_treats_a_duress_match_as_a_success(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
 
-  cl_assert(security_lock_verify_real_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(SecurityPinVerdictWrong, security_lock_verify_pin_verdict("9999", 4));
+  cl_assert_equal_i(1, security_lock_get_failed_attempts());
+
+  cl_assert_equal_i(SecurityPinVerdictDuress,
+                    security_lock_verify_pin_verdict(DURESS, strlen(DURESS)));
+  cl_assert_equal_i(0, security_lock_get_failed_attempts());
+}
+
+void test_security_lock__verdict_reports_the_real_pin_as_real(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
+
+  cl_assert_equal_i(SecurityPinVerdictReal, security_lock_verify_pin_verdict(PIN, strlen(PIN)));
   cl_assert_equal_i(0, security_lock_get_failed_attempts());
   prv_run_pending_callback();
   cl_assert_equal_i(0, s_duress_shreds);
 }
 
-//! It counts against the same budget as any other guess, so it cannot be used
-//! as a free oracle for whether an entry is the duress PIN.
-void test_security_lock__real_pin_verify_burns_an_attempt(void) {
+void test_security_lock__verdict_reports_a_wrong_pin_as_wrong(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
 
-  cl_assert(!security_lock_verify_real_pin(DURESS, strlen(DURESS)));
+  cl_assert_equal_i(SecurityPinVerdictWrong, security_lock_verify_pin_verdict("9999", 4));
+  prv_run_pending_callback();
+  cl_assert_equal_i(0, s_duress_shreds);
+}
+
+//! A wrong guess counts against the same budget as any other, so this cannot be
+//! used as a free oracle.
+void test_security_lock__verdict_burns_an_attempt(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
+
+  cl_assert_equal_i(SecurityPinVerdictWrong, security_lock_verify_pin_verdict("9999", 4));
   cl_assert_equal_i(1, security_lock_get_failed_attempts());
-  cl_assert(!security_lock_verify_real_pin("9999", 4));
+  cl_assert_equal_i(SecurityPinVerdictWrong, security_lock_verify_pin_verdict("9998", 4));
   cl_assert_equal_i(2, security_lock_get_failed_attempts());
+}
+
+//! No verdict without a match: an unknown PIN of the duress PIN's length reads
+//! exactly as any other wrong one, so the answer never says a duress PIN exists.
+void test_security_lock__verdict_says_nothing_when_there_is_no_duress_pin(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+
+  cl_assert_equal_i(SecurityPinVerdictWrong,
+                    security_lock_verify_pin_verdict(DURESS, strlen(DURESS)));
 }
 
 void test_security_lock__duress_pin_survives_reboot(void) {

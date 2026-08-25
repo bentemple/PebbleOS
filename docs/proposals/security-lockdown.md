@@ -734,8 +734,10 @@ watch by a forgotten four-digit PIN with three attempts.
   PIN" and cannot be got past without knowing it. A user who genuinely wanted a
   pause has to set the PIN again afterwards, which is the price of the switch
   being as protected as the lock screen.
-- **What a duress PIN should do at the disable prompt is undecided.** Today it
-  is simply not accepted there — see "Duress at the disable prompt" below.
+- **A duress PIN at the disable prompt wipes and then disables, and the watch
+  ends up on the watchface rather than back on the Security menu.** The wipe
+  closes the running app, which a real disable does not. See "Duress at the
+  disable prompt" below for why that is left as-is.
 - **Nothing has run on hardware yet.** It has now been driven extensively under
   QEMU (`tools/pebble_harness.py`, `tools/security_lock_stress.py`), which is
   where most of the bugs below were found — but no claim here has been checked
@@ -749,52 +751,102 @@ watch by a forgotten four-digit PIN with three attempts.
 
 ### Duress at the disable prompt
 
-Turning the feature off now asks for the PIN, which raises a question the duress
-PIN did not have to answer before: what should happen if the *duress* PIN is
-typed there?
+Turning the feature off asks for the PIN, which raises a question the duress PIN
+did not have to answer before: what happens if the *duress* PIN is typed there?
 
-Consistent duress semantics say it should appear to succeed while wiping. Being
-made to switch the protection off is close to the case the duress PIN exists
-for. **This is undecided and deliberately not implemented.**
+**It acts like the real PIN, but wipes first.** The wipe runs with
+`SecurityShredReasonDuressPin`, and then the feature is turned off exactly as the
+real PIN turns it off — PIN cleared, duress PIN cleared, delays and deadlines
+back at their defaults. Being made to switch the protection off is close to the
+case the duress PIN exists for, and refusing it there would cost the user the
+behaviour they were relying on at precisely the wrong moment.
 
-What is implemented is the refusal to be the strictly worse answer. A duress PIN
-at that prompt is treated as a wrong PIN — `security_lock_verify_real_pin()`,
-which skips the duress branch and schedules nothing.
+#### The order is the whole of it
 
-The reason it cannot simply be left to work is an ordering problem rather than a
-policy one:
+`security_lock_shred()` refuses once the feature is off. So a switch-off that
+landed first would leave the lock disarmed with nothing erased — the worst
+available outcome, on a compelled entry.
 
-- `security_lock_verify_pin()` reports a duress match to its caller as an
-  ordinary success and queues the wipe onto KernelMain (`tskIDLE_PRIORITY + 3`).
-- Settings runs on the app task (`tskIDLE_PRIORITY + 2`), and carries straight
-  on to turn the feature off.
-- `security_lock_shred()` refuses while the feature is off.
+That ordering cannot be left to task priorities, which is what the first attempt
+did:
 
-So the higher-priority wipe usually preempts and runs first, and then the app
-task resumes and disables — but not reliably: the wipe also quiesces the UI,
-which kills the app mid-flow, and if the disable lands first the wipe finds the
-feature off and erases nothing. One of the two outcomes is *a lock disarmed with
-nothing erased on a compelled duress entry*, which is worse than refusing.
+- `security_lock_verify_pin()` reports a duress match as an ordinary success and
+  queues the wipe onto the launcher task (`tskIDLE_PRIORITY + 3`).
+- Settings runs on the app task (`tskIDLE_PRIORITY + 2`) and carries straight on
+  to turn the feature off.
+- The higher-priority wipe usually preempts and wins — but "usually" is the
+  problem, and the wipe also quiesces the UI, which kills the app mid-flow.
 
-Whichever way this is settled, it has to be settled in an order that does not
-depend on task priorities. The options look like:
+So the two halves are not split across two tasks at all. The prompt queues **one
+callback on the launcher task**, which shreds and then disables, in that order,
+in one function body. Nothing can interleave between them, and the order is
+written down rather than inferred:
 
-1. **Refuse, as now.** Cheapest. Costs the user under coercion the duress
-   behaviour they expected at that one prompt, silently.
-2. **Wipe, then disable, synchronously**, rather than queueing. Needs the shred
-   driven from a task that may block for seconds — which the app task may not —
-   so realistically it means deferring the *disable* onto KernelMain behind the
-   wipe rather than deferring the wipe.
-3. **Wipe and leave the feature on**, showing whatever a successful disable
-   shows. Best duress story: the attacker sees the switch go off, the watch is
-   wiped, and the lock is still armed. Also the most machinery, and the menu
-   would then be lying about its own state, which nothing else here does.
+```c
+static void prv_duress_disable_cb(void *unused) {
+  security_lock_shred(SecurityShredReasonDuressPin);
+  security_lock_disable();
+}
+```
 
-The other Settings prompts are unaffected and unchanged: a duress PIN
-authorises Change PIN and Duress PIN and takes its wipe with it, because nothing
-in those flows turns the feature off underneath the queued shred. That is pinned
-by a test so settling the question above is a deliberate change rather than a
-side effect.
+#### Telling the caller which PIN it was
+
+`security_lock_verify_pin()` deliberately hides duress from everything above it,
+so that no UI can branch on it and leak it. That has to be relaxed for exactly
+this call site, because ordering the wipe against its own next step is something
+only the caller can do.
+
+`security_lock_verify_pin_verdict()` reports `Wrong`, `Real` or `Duress` and
+**schedules nothing** — the wipe is the caller's to run. `verify_pin()` keeps its
+bool contract and keeps queueing the wipe for everyone else. The verdict variant
+replaces `security_lock_verify_real_pin()`, which existed only to refuse duress
+here and now has no caller.
+
+What keeps the verdict safe is what the one caller does with it: both accepted
+verdicts dismiss the prompt identically, and the difference between them is a
+wipe rather than anything drawn. A future caller that branched into the *UI* on
+the verdict would be the bug. It is also not an oracle — only an entry that
+actually matches a configured duress PIN is ever reported as duress, so the only
+person it tells is the one who just typed it.
+
+The attempt counter treats it as what it is: a match resets the counter,
+whichever PIN it was.
+
+#### What the user actually sees
+
+Not quite a real disable, and it cannot be made to be. The wipe's first step is
+`security_lock_ui_quiesce()`, which closes the running app — so Settings is torn
+down and the watch lands on the watchface, where a real disable would return to
+the Security menu now reading "Off".
+
+The quiesce is not negotiable: it exists to stop consumers reading shredded
+storage, and a notification window left on screen during a wipe was a
+reproducible HardFault. Suppressing it to make the two endings match would trade
+a cosmetic tell for a crash.
+
+The residual tell is therefore *the app closing instead of returning to the
+menu*. It only appears after a PIN that matched, it is indistinguishable from the
+app simply exiting, and re-opening Settings shows Security Lock **Off** — which
+is what was demanded. There is no clean way to close that gap without touching
+the quiesce, so it is left open and written down.
+
+#### Two things the path must not depend on
+
+- **The wipe may erase nothing.** The dirty-since-shred early-out skips the file
+  zeroing when nothing has been written since the last wipe. That is correct —
+  there is nothing left to destroy — and the switch-off is deliberately not
+  conditional on what the wipe reported destroying.
+- **The phone must not be told.** `prv_shred()` already suppresses both the
+  unfaithful flag and `SHRED_COMPLETE` for `SecurityShredReasonDuressPin`, and it
+  drains the refused-writes accumulator unconditionally — so the
+  `prv_report_refused_writes()` inside the `security_lock_disable()` that follows
+  finds nothing to report and stays silent. A phone that resynced would undo the
+  whole thing.
+
+The other Settings prompts are unaffected and unchanged: a duress PIN authorises
+Change PIN and Duress PIN and takes its wipe with it through `verify_pin()`,
+because nothing in those flows turns the feature off underneath the queued shred.
+That is still pinned by a test.
 
 ## What running it actually found
 

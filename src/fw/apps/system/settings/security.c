@@ -259,18 +259,27 @@ static void prv_show_attempts_left(SettingsSecurityData *data, uint8_t left) {
 //! holding an unlocked watch has already won. It exists so that a menu cannot
 //! be used as a frictionless PIN oracle.
 //!
-//! `allow_duress` is false for exactly one prompt, the one that turns the
-//! feature off. A duress PIN unlocks normally and wipes in the background, but
-//! the wipe is queued onto KernelMain while this runs on the app task, and
-//! turning the feature off is precisely what makes that queued wipe decline to
-//! run -- so the two race, and one outcome is a lock disarmed with nothing
-//! erased. Refusing it there is not duress support; it is refusing to be the
-//! worse of the two answers until there is a decision about the better one.
-static bool prv_verify_current_pin(const char *digits, uint8_t len, bool allow_duress) {
-  const bool matched = allow_duress ? security_lock_verify_pin(digits, len, NULL)
-                                    : security_lock_verify_real_pin(digits, len);
+//! A duress PIN authorises these prompts exactly as the real one does, and the
+//! store queues the wipe that comes with it. Nothing here needs to know which
+//! was typed -- except the switch-off prompt, which uses the variant below.
+static bool prv_verify_current_pin(const char *digits, uint8_t len) {
+  const bool matched = security_lock_verify_pin(digits, len, NULL);
   security_lock_reset_failed_attempts();
   return matched;
+}
+
+//! Same, for the switch-off prompt, which is told which PIN matched.
+//!
+//! It has to be: a duress PIN there must wipe and then turn the feature off,
+//! and security_lock_shred() refuses once the feature is off. Letting the store
+//! queue the wipe as usual and carrying on to disable would leave the order to
+//! the scheduler -- the wipe runs on the launcher task and this on the app
+//! task -- so one outcome is a lock disarmed with nothing erased, on precisely
+//! the compelled entry the duress PIN exists for. See prv_duress_disable_cb().
+static SecurityPinVerdict prv_verify_disable_pin(const char *digits, uint8_t len) {
+  const SecurityPinVerdict verdict = security_lock_verify_pin_verdict(digits, len);
+  security_lock_reset_failed_attempts();
+  return verdict;
 }
 
 static void prv_finish_prompt(SettingsSecurityData *data) {
@@ -328,12 +337,36 @@ static void prv_handle_wrong_pin(SettingsSecurityData *data) {
 //! Defined below with the rest of the picker.
 static void prv_length_menu_push(SettingsSecurityData *data);
 
+//! What a duress PIN at the switch-off prompt does: everything the real PIN
+//! does, with a wipe in front of it.
+//!
+//! One callback rather than two, and on the launcher task rather than split
+//! across two tasks. The order is not an implementation detail --
+//! security_lock_shred() refuses once the feature is off, so a switch-off that
+//! landed first would silently erase nothing -- and anything spread across two
+//! tasks has the scheduler decide it.
+//!
+//! Runs on KernelMain, which security_lock_shred() requires: it tears down the
+//! app and modal stacks and blocks for the length of the wipe. This app is one
+//! of the things it closes, so nothing may follow that touches app state.
+static void prv_duress_disable_cb(void *unused) {
+  security_lock_shred(SecurityShredReasonDuressPin);
+
+  // Not conditional on what the wipe destroyed: with nothing written since the
+  // last one it legitimately erases nothing, and the switch still has to work.
+  const status_t rv = security_lock_disable();
+  if (rv != S_SUCCESS) {
+    PBL_LOG_ERR("Refused to turn the security lock off after a duress wipe (%" PRId32 ")",
+                (int32_t)rv);
+  }
+}
+
 static void prv_pin_submit(const char *digits, uint8_t len, void *context) {
   SettingsSecurityData *data = context;
 
   switch (data->stage) {
     case PinStageAuthorizeSet:
-      if (!prv_verify_current_pin(digits, len, true /* allow_duress */)) {
+      if (!prv_verify_current_pin(digits, len)) {
         prv_handle_wrong_pin(data);
         return;
       }
@@ -351,8 +384,21 @@ static void prv_pin_submit(const char *digits, uint8_t len, void *context) {
       return;
 
     case PinStageAuthorizeDisable: {
-      if (!prv_verify_current_pin(digits, len, false /* allow_duress */)) {
+      const SecurityPinVerdict verdict = prv_verify_disable_pin(digits, len);
+      if (verdict == SecurityPinVerdictWrong) {
         prv_handle_wrong_pin(data);
+        return;
+      }
+      if (verdict == SecurityPinVerdictDuress) {
+        // Accepted, and it looks accepted: the prompt goes away before anything
+        // else happens, exactly as it does for the real PIN. The wipe takes the
+        // app with it a moment later, which is the one thing that cannot be
+        // made to match -- see docs/proposals/security-lockdown.md.
+        //
+        // Popped before the callback is queued, in the same order Lock Now
+        // uses: the launcher may run it the instant it is queued.
+        prv_finish_prompt(data);
+        launcher_task_add_callback(prv_duress_disable_cb, NULL);
         return;
       }
       PBL_LOG_DBG("Turning the security lock off");
