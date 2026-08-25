@@ -1,0 +1,195 @@
+---
+session: general
+date: 2026-08-25
+status: in_progress
+outcome: GOOD
+---
+
+goal: >
+  Resume the security lockdown work, find the intermittent boot hang, build a
+  test harness that does not need UI interaction, and clean up the changes made
+  chasing the hang.
+
+now: >
+  Both original blockers are closed. 38 commits on top of 26debf5b9 (75 ahead of
+  origin/main in total, so 37 are from earlier sessions). One agent was still
+  running when this was written -- see in_flight. Nothing has run on hardware.
+
+test: |
+  PATH="$VENV/bin:$PATH" ./waf build
+  PATH="$VENV/bin:$PATH" ./waf test -M '.*/tests/.*(security_lock|settings_security|pin_entry|system_apps/lockdown/|sha256|test_pfs|flash_api|notification|blob_db).*'
+  # 33/35. test_health_db and test_weather_db are pre-existing DUMA stack
+  # smashes; they link nothing this branch touches (verified).
+  #
+  # -M matches the ABSOLUTE PATH with re.match, and this worktree is named
+  # PebbleOS-security-lockdown -- so an unanchored "security_lock" or
+  # "lockdown" alternative matches EVERY test in the tree and silently
+  # disables the filter. Always anchor under /tests/.
+
+the_headline: >
+  The "boot hang" was never in security_lock. prv_flash_erase_start() returned
+  expected_duration * 7 / 8, the QEMU flash HAL reports 1ms, and 1*7/8 == 0 --
+  which is that function's "already finished, semaphore released" signal. The
+  caller skipped polling, prv_flash_erase_poll() never ran, and the erase
+  semaphore leaked, so the next erase blocked forever on portMAX_DELAY. Four
+  earlier fixes had been aimed at security_lock, which was merely the first code
+  to erase a region that was both non-blank and not sector-aligned. Only the
+  QEMU HAL truncates; real backends return 150/50ms. UNTESTED ON HARDWARE.
+
+in_flight:
+  - agent_lockdown_countdown: >
+      Uncommitted, an agent was mid-edit across security_lock/*, settings/
+      security.c, lockdown.c, prompt_commands.* and their tests. Scope: manual
+      triggers stop erasing immediately. "Lockdown" (app, Quick Launch chord)
+      locks and ARMS the erase countdown; "Lockdown + Erase" locks and erases
+      now; Erase After defaults to Never so the feature ships lock-only.
+      THE HARD REQUIREMENT, user-confirmed: a manually armed countdown must
+      survive a Bluetooth reconnect. handle_comm_session_event() clears both
+      deadlines on session open, which is right for a disconnect-armed
+      countdown and would silently cancel a deliberate lockdown. Also check the
+      reverse -- a later disconnect must not restart or shorten a manual one.
+      If the tree is dirty and this is unfinished, check git diff before
+      assuming it is coherent.
+
+verified_live_on_qemu:
+  - pin_pad_unlocks: >
+      The second unresolved blocker in the previous handoff, never seen to work.
+      It does. It was never broken the way it looked -- auto-unlock-on-reconnect
+      meant the watch unlocked itself before a PIN could be typed, since QEMU
+      always has an open session, on top of a flash wedge that made the path
+      untestable.
+  - e2e_27_of_27: >
+      tools/security_lock_e2e.py drives the real touch UI and the protocol
+      endpoint. Previous handoff had it at 19/24.
+  - stress_0_failures: >
+      tools/security_lock_stress.py, 0 failures across ~70 valid trials on three
+      seeds. Was 34/34 FAILING before the crash fix.
+  - wipe_economy: >
+      Three wipes in a row give 0x8000097a then 0x80000000 twice -- one real,
+      two no-ops. shred_pending is 0 at every checkpoint, so no half-wipes.
+      Switch off/on with nothing written leaves dirty=0 and the next wipe is a
+      no-op. Reboot while locked comes back state=2 with nothing pending.
+
+bugs_found_and_fixed:
+  - "flash_api.c integer truncation leaking the erase semaphore -- the boot hang"
+  - "engage() always shredded, so the disconnect path erased at the LOCK delay
+    and the 30-minute erase delay was dead code"
+  - "the clock-rollback trigger was dead at boot, killed by a refactor that
+    discarded a return value"
+  - "layout_get_context() dereferencing a NULL layout's vtable -- deterministic
+    HardFault, 34/34 trials, because the firmware links at VMA 0 so the read
+    lands in the interrupt vector table"
+  - "mutex_lock(NULL) from timeline_event's async init paired with a sync
+    deinit, wedging KernelMain permanently"
+  - "a locked watch stored notifications via THREE ingresses; the one that
+    mattered is blob_db, which is how Gadgetbridge delivers"
+  - "six other shredded stores were still accepted while locked"
+  - "SHRED_COMPLETE was never delivered on the disconnect trigger -- no session
+    exists by definition, and the is_unfaithful fallback is one Gadgetbridge
+    does not read"
+  - "a phone LOCK with no PIN wiped the watch, left it unlocked, and acked
+    success"
+  - "Gadgetbridge's CONFIGURE was 5 bytes against a 6-byte struct, so every one
+    was dropped on a length check and the phone's timeout setting never worked"
+  - "clear_pin() reset dirty_since_shred to its unknown-record default, so
+    switching the feature off fabricated a dirty state; it also zeroed
+    shred_pending, which could abandon a half-finished wipe"
+  - "exported_symbols.json silently drops a symbol if its own revision is not
+    bumped -- sdk_export.md said the generator errors out; it warns"
+
+decisions:
+  - master_switch_ships_off: >
+      SecurityLockStateDisabled is the one notion of enabled. Off means no
+      trigger fires. Setting a PIN turns it on; turning it off requires the PIN
+      and clears it, so "has a PIN" and "is on" are one fact. Enforced at the
+      two funnels, engage() and shred(), not at each caller.
+  - watch_owns_its_settings: >
+      CONFIGURE removed from the endpoint entirely. The phone can LOCK and ask
+      for STATUS, but cannot weaken the watch. A phone that can disarm the watch
+      is a phone that can be compelled to.
+  - reconnect_never_unlocks: >
+      Android keeps Bluetooth up while locked and Gadgetbridge reconnects
+      unattended, so a reconnect proves nothing an attacker cannot arrange with
+      a shielded bag.
+  - blackout_follows_the_wipe_not_the_lock: >
+      Locking leaves the radio up; shredding while locked takes it down and
+      restores the prior airplane setting on unlock. Duress does not black out,
+      because it runs unlocked and must look normal.
+  - duress_at_the_disable_prompt_wipes_then_disables: >
+      Ordered explicitly in one callback on one task. It was a race whose losing
+      interleaving disarmed the lock with nothing erased.
+  - datalogging_not_shredded: >
+      dls files are the outbound watch-to-phone queue, so wiping them destroys
+      data the phone does not have. Also removed a reachable PBL_CROAK.
+  - prf_recovery_is_deliberate: >
+      SELECT+BACK+UP boots recovery, which does not build this feature, and a
+      factory reset from there is the way back into a watch whose PIN is lost.
+      Documented as intended so nobody closes it.
+  - configurable_wipe_targets_declined: >
+      A menu to choose what gets erased, including health data and apps, was
+      requested and then explicitly dropped by the user on 2026-08-25 -- "I
+      don't want to build this additional wipe feature, because I don't need
+      it". Do not resurrect it from the proposal's "considered and not built"
+      note. If it ever returns, it breaks the invariant that everything the
+      shred destroys comes back from the phone, which is what justifies
+      triggering it aggressively, and it needs a scare-screen on enable.
+
+open_questions:
+  - hardware: >
+      Nothing has run on a real watch. This matters more than usual: the bug
+      that started all of this existed ONLY because of an emulator constant, so
+      the emulator both created it and was the only place it could be found.
+      The reverse case -- a bug that only exists on hardware -- is exactly what
+      this session could not catch.
+  - pfs_remove_croak_race: >
+      pfs_shred -> pfs_remove PBL_CROAKs if the fd is IN_USE.
+      notification_storage_store() releases s_pfs_mutex between pfs_open and
+      pfs_close, and the wipe runs on a different task, so the window is real.
+      Not reproduced in ~70 valid trials. Unproven, not disproven.
+  - security_deadlines_hook: >
+      The test command writes deadline timestamps without starting the periodic
+      check that reads them, so they expire unnoticed. Use `security session 0`
+      for deadline paths. Fixing it means exposing a timer-start API purely for
+      testing.
+  - three_stale_commit_messages: >
+      73c54b5d0, 7a9e76d9a and d93f9b63f describe the phantom -- watchdog
+      resets, slow sector erases, a KernelBG deadlock -- none of which was the
+      cause. Later commits revert most of what they did and explain why, so the
+      history is honest, but a reviewer reading forward hits three confident
+      wrong explanations first. Either reword them or say so in the PR
+      description. Leaning toward the PR description: the wrong turns are
+      informative.
+
+worked:
+  - "Instrumenting before patching. Every fix that missed was a guess; the ones
+    that landed came from a recovered FreeRTOS backtrace and from stage markers."
+  - "`log dump current` replays the whole boot from the on-flash log, including
+    everything before PULSE attaches. Without it the early-boot window is
+    invisible and a hang looks identical to a healthy quiet boot."
+  - "Adding `dirty=` to `security status`. The flag was invisible from outside,
+    which is why the wrong mechanism was blamed for it twice."
+  - "Driving state from the console instead of the touch UI."
+
+failed:
+  - "Running two QEMU instances. They collide on the fixed monitor/QMP/console
+    sockets and produce reproducible-looking failures that are pure artefact.
+    This was listed as a known trap in the PREVIOUS handoff and still caught me."
+  - "`pkill -f qemu-pebble` matches the calling shell's own command line and
+    kills it. Kill by PID. `pgrep -c -f` over-reports for the same reason."
+  - "Editing files an agent still had open, producing a half-applied change."
+  - "Relaying an agent's claim as fact without opening the file. Happened twice:
+    the proposal never said CONFIGURE carried a PIN hash, and the dirty flag was
+    never set by the wipe's own DB re-init."
+
+next:
+  - "Land or finish the in_flight lockdown-countdown work above."
+  - "Update tools/security_lock_e2e.py row lists once those menu rows settle.
+    That list has gone stale three times; a shifted index shows up as the wrong
+    row silently doing nothing, and the assertion that notices is rarely the one
+    that broke."
+  - "Hardware validation."
+  - "Gadgetbridge: the watch-to-phone lockdown request. Android will not let a
+    third-party app enter real Lockdown -- DevicePolicyManager.lockNow() is an
+    ordinary lock leaving biometrics enabled, and the only route to true
+    Lockdown is an accessibility service driving the power menu, gated behind
+    WRITE_SECURE_SETTINGS which an app cannot grant itself."

@@ -640,23 +640,56 @@ custom endpoint in this tree — copy that pattern exactly.
 - Reuse the Pebble privacy-mode plumbing (`PebbleSupport.java:192-206`, pref
   `pebble_pref_privacy_mode`) for the notification-suppression half.
 
-## Phasing
+## Status
 
-All twelve phases are implemented. Firmware builds clean for `qemu_emery`;
-Gadgetbridge builds a full APK and its suite passes.
+Feature-complete on the watch and driven end to end under QEMU. **Nothing has
+run on real hardware**, and that gap matters more here than it usually would —
+see the caveat at the end of this section.
 
-1. ✅ `lock_state` settings-file store + unit tests.
-2. ✅ `pfs_shred()` + `pfs_gc_deleted_sectors()` + tests against the flash emulator.
-3. ✅ Shred engine, driven from a console prompt command only.
-4. ✅ Early-boot hook + resume-after-interruption.
-5. ✅ Lock screen modal + button lockout.
-6. ✅ PIN entry window + attempt counter + escalation.
-7. ✅ Protocol endpoint + `SHRED_COMPLETE`.
-8. ✅ Disconnect deadline + RTC rollback guard.
-9. ✅ **GB: `is_unfaithful` parsing + full-resync path.**
-10. ✅ GB: lockdown detection, LOCK send, 10 s BT teardown.
-11. ✅ GB: `SHRED_COMPLETE` handling.
-12. ✅ Settings UI on watch; settings UI in Gadgetbridge.
+### Verified under QEMU
+
+| | |
+|---|---|
+| `tools/security_lock_e2e.py` — real touch UI and protocol endpoint | 27/27 |
+| `tools/security_lock_stress.py` — a wipe colliding with notification traffic | 0 failures, ~70 valid trials |
+| Unit suites for the feature and its neighbours | 33/35 |
+| Gadgetbridge Mainline unit suite | 1215 tests, 0 failures |
+
+The two failing unit suites are `test_health_db` and `test_weather_db`,
+pre-existing DUMA stack smashes that link nothing this work touches.
+
+Behaviours confirmed on the watch rather than inferred: the PIN pad unlocks;
+repeated wipes cost one real erase and then nothing; `shred_pending` never
+sticks, so there are no half-wipes; a reboot while locked comes back locked
+with the wipe finished; the radio blackout engages on a wipe and restores the
+user's prior airplane setting on unlock; a reconnect does not cancel a lock;
+and a duress PIN at the disable prompt wipes before it disables.
+
+### Not built, deliberately
+
+- **A menu to choose what gets erased**, including health data and apps. Asked
+  for and then withdrawn. It would break the invariant the rest of this design
+  rests on — that everything the shred destroys comes back from the phone —
+  which is what makes triggering it aggressively reasonable. If it is ever
+  revisited, "Locking almost always ends in a shred" has to be revisited at the
+  same time, and enabling an unrestorable target needs a warning the user
+  cannot miss.
+- **Shredding health data**, for the same reason, per "Explicitly out of scope".
+- **A watch-initiated phone lockdown.** Android does not permit it:
+  `DevicePolicyManager.lockNow()` is an ordinary lock that leaves biometrics
+  enabled, and the only route to real Lockdown is an accessibility service
+  driving the power menu, gated behind a setting an app cannot grant itself.
+
+### The hardware caveat
+
+The bug that dominated this work — a leaked flash erase semaphore presenting as
+an intermittent boot hang — existed *only* because the QEMU HAL reports a 1 ms
+erase duration, which truncates to zero in `expected_duration * 7 / 8`. Real
+backends return 150/50 ms and never truncate.
+
+So the emulator both created that bug and was the only place it could have been
+found. The symmetric case — something that misbehaves only on hardware — is
+exactly what none of the testing above can catch.
 
 ### Corrections found while building
 
