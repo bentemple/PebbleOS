@@ -830,12 +830,22 @@ app simply exiting, and re-opening Settings shows Security Lock **Off** — whic
 is what was demanded. There is no clean way to close that gap without touching
 the quiesce, so it is left open and written down.
 
-#### Two things the path must not depend on
+#### Three things the path must not depend on
 
 - **The wipe may erase nothing.** The dirty-since-shred early-out skips the file
   zeroing when nothing has been written since the last wipe. That is correct —
   there is nothing left to destroy — and the switch-off is deliberately not
   conditional on what the wipe reported destroying.
+- **Turning it off is not a write.** The switch-off resets the runtime record,
+  and the defaults it resets to read *dirty* — the right answer for a record
+  nothing is known about, and the wrong one for this one. Left that way it undid
+  the early-out for the wipe that came next: the wipe cleared the flag and the
+  disable a few instructions later set it again, so the second duress wipe in a
+  row always did the full job over an empty filesystem.
+  `security_lock_clear_pin()` therefore carries `dirty_since_shred` and
+  `shred_pending` across the reset. Those two are observations about the
+  filesystem; the rest of that record is policy, and only the policy is being
+  turned off.
 - **The phone must not be told.** `prv_shred()` already suppresses both the
   unfaithful flag and `SHRED_COMPLETE` for `SecurityShredReasonDuressPin`, and it
   drains the refused-writes accumulator unconditionally — so the
@@ -899,6 +909,15 @@ Three lessons worth keeping:
   than store them was specified above and never implemented, and there are
   *three* ingresses to `notification_storage_store()`, not one — including the
   blob\_db path, which is how Gadgetbridge delivers them.
+- **The dirty-since-shred early-out almost never fired.** It was blamed on the
+  wipe marking itself, since `prv_shred()` ends by re-initialising four
+  databases. It does not: `security_lock_is_shredding()` holds across that tail
+  and every ingress to both marking sites refuses while it does. The real
+  culprit was `security_lock_clear_pin()`, which resets the runtime record to
+  defaults — and the defaults read dirty. Any switch-off, including the duress
+  one, therefore armed a full wipe for whenever the feature was next turned on.
+  Found by adding `dirty=` to `security status` and watching it go 0 → 1 across
+  `security enable 0` with nothing else running.
 
 ### What `PEBBLE_SECURITY_SHRED_EVENT` is and is not
 

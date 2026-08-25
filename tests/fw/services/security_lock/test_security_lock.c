@@ -576,6 +576,55 @@ void test_security_lock__record_from_an_unknown_version_reads_dirty(void) {
   cl_assert(security_lock_is_dirty_since_shred());
 }
 
+//! Turning the feature off resets the runtime record, and the defaults it
+//! resets to read dirty. That answer is right for a record nothing is known
+//! about and wrong here: switching off writes nothing a wipe destroys, and the
+//! watch was just told exactly what is on it.
+//!
+//! The duress PIN at the disable prompt wipes and then disables, so this is
+//! what made every second duress wipe do the full job over an empty filesystem.
+void test_security_lock__turning_it_off_leaves_a_clean_watch_clean(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_dirty_since_shred());
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
+
+  cl_assert(!security_lock_is_dirty_since_shred());
+  // And it is the record that says so, not just the cache.
+  prv_simulate_reboot();
+  cl_assert(!security_lock_is_dirty_since_shred());
+}
+
+//! The other direction, so the test above is measuring the reset rather than a
+//! flag that stopped working: content written before the switch was thrown is
+//! still on the watch afterwards.
+void test_security_lock__turning_it_off_leaves_a_dirty_watch_dirty(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_dirty_since_shred());
+  security_lock_mark_dirty_since_shred();
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
+
+  cl_assert(security_lock_is_dirty_since_shred());
+  prv_simulate_reboot();
+  cl_assert(security_lock_is_dirty_since_shred());
+}
+
+//! Same rule for the other thing the record knows about the filesystem. A
+//! half-wiped filesystem passes for an untouched one, and the boot path
+//! deliberately finishes an interrupted wipe even with the feature off -- which
+//! it can only do if turning it off did not throw the marker away.
+void test_security_lock__turning_it_off_does_not_drop_an_unfinished_wipe(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_shred_pending(true));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_disable());
+
+  cl_assert(security_lock_is_shred_pending());
+  prv_simulate_reboot();
+  cl_assert(security_lock_is_shred_pending());
+}
+
 // Disconnect deadline
 ////////////////////////////////////
 

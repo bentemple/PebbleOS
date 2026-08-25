@@ -82,7 +82,13 @@ void security_lock_mark_dirty_since_shred(void) {
   s_dirty = true;
 }
 
+//! Whether the resume marker was already armed at the moment the dirty flag was
+//! cleared. The two are separate flash writes, so the order between them is the
+//! whole of what a power cut in the gap sees.
+static bool s_pending_when_cleared;
+
 status_t security_lock_clear_dirty_since_shred(void) {
+  s_pending_when_cleared = s_shred_pending;
   s_dirty = false;
   return S_SUCCESS;
 }
@@ -248,6 +254,7 @@ void test_security_lock_shred__initialize(void) {
   s_during_quiesce = NULL;
   s_refused_dbs = 0;
   s_shred_pending = false;
+  s_pending_when_cleared = false;
   s_dirty = true;
   s_locked = false;
   s_pin_len = 4;
@@ -293,8 +300,62 @@ void test_security_lock_shred__a_write_during_the_wipe_leaves_it_dirty(void) {
   cl_assert(security_lock_is_dirty_since_shred());
 }
 
+//! Clearing the flag and arming the resume marker are two separate flash
+//! writes, so power can be lost between them. The marker goes first, or the gap
+//! reads "nothing to destroy" over a filesystem nothing has touched yet -- and
+//! that answer is persisted, so the next wipe would skip it for good. Armed
+//! first, the worst a cut in the gap costs is one redundant wipe.
+void test_security_lock_shred__the_resume_marker_is_armed_before_the_flag_is_cleared(void) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert(s_pending_when_cleared);
+}
+
 // A wipe with nothing to destroy
 ////////////////////////////////////
+
+//! The property the flag exists for, stated end to end at what a watch actually
+//! shows: two wipes back to back with nothing written in between, and the
+//! second destroys nothing.
+//!
+//! Kept separate from the driven-flag tests below because those set s_dirty by
+//! hand and so cannot notice a first wipe that leaves the watch dirty behind
+//! it. This one only ever runs wipes.
+void test_security_lock_shred__a_second_wipe_with_nothing_written_is_a_no_op(void) {
+  const uint32_t first = security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+  // Every target database, plus the raw-flash regions.
+  cl_assert(first & ~SECURITY_SHRED_NON_BLOBDB_BIT);
+
+  memset(&s_trace, 0, sizeof(s_trace));
+  const uint32_t second = security_lock_shred(SecurityShredReasonManualPanic);
+
+  // The raw-flash regions and nothing else, which is all it erased.
+  cl_assert_equal_i(SECURITY_SHRED_NON_BLOBDB_BIT, second);
+  cl_assert_equal_i(0, s_trace.files_shredded);
+  cl_assert_equal_i(0, s_trace.timeline_deinits);
+  cl_assert_equal_i(0, s_trace.reminder_deinits);
+  cl_assert_equal_i(0, s_trace.pin_deinits);
+  cl_assert_equal_i(0, s_trace.timeline_inits);
+  cl_assert_equal_i(0, s_trace.reminder_inits);
+  cl_assert_equal_i(0, s_trace.pin_inits);
+  cl_assert_equal_i(0, s_trace.notif_resets);
+  cl_assert_equal_i(0, s_trace.sweeps_started);
+}
+
+//! One write in between is enough to make the second real again, so the test
+//! above measures "nothing was written" rather than "a second wipe never runs".
+void test_security_lock_shred__a_write_between_two_wipes_makes_the_second_real(void) {
+  const uint32_t first = security_lock_shred(SecurityShredReasonManualPanic);
+
+  memset(&s_trace, 0, sizeof(s_trace));
+  security_lock_mark_dirty_since_shred();
+  const uint32_t second = security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(first, second);
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+  cl_assert_equal_i(1, s_trace.pin_deinits);
+  cl_assert_equal_i(1, s_trace.sweeps_started);
+}
 
 //! Almost everything a wipe erases came from the phone, so a wipe that arrives
 //! before the phone has written anything back has nothing new to reach. The

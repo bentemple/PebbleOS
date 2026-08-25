@@ -585,7 +585,19 @@ status_t security_lock_clear_pin(void) {
     settings_file_close(&file);
   }
   if (rv == S_SUCCESS) {
+    // What the record knows about the filesystem outlives the policy it also
+    // holds. Turning the feature off is a setting change: it writes nothing a
+    // wipe destroys and finishes nothing a wipe left half done, so neither
+    // answer may be reset. The defaults say "dirty, nothing pending", which is
+    // right for a record nothing is known about and wrong for this one --
+    // fabricating dirty made every wipe after a switch-off do the full job over
+    // an empty filesystem, and dropping pending would abandon a wipe that had
+    // already started.
+    const bool dirty = s_runtime_cache.dirty_since_shred;
+    const bool shred_pending = s_runtime_cache.shred_pending;
     prv_runtime_defaults(&s_runtime_cache);
+    s_runtime_cache.dirty_since_shred = dirty;
+    s_runtime_cache.shred_pending = shred_pending;
     rv = prv_flush_runtime();
   }
   mutex_unlock(s_mutex);

@@ -178,10 +178,20 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
   // the teardown below.
   s_shredding = true;
 
-  // Cleared the moment the decision above is taken, not at the end. Everything
-  // from here on -- including the quiesce, which yields -- re-marks, so a write
-  // racing the wipe leaves the flag dirty and the next wipe runs in full.
   if (!clean) {
+    // Set before anything is destroyed so a shred interrupted by power loss is
+    // resumed at next boot rather than left half done, and before the flag
+    // below is cleared because the two are separate flash writes: the gap
+    // between them has to read "a wipe was in progress", never "there is
+    // nothing to destroy". The clean path leaves it alone -- it is only reached
+    // when the flag is already clear, and it destroys nothing needing resuming.
+    security_lock_set_shred_pending(true);
+
+    // Cleared the moment the decision above is taken, not at the end.
+    // Everything from here on -- including the quiesce, which yields -- can
+    // re-mark, so a write racing the wipe leaves the flag dirty and the next
+    // wipe runs in full. The write guards make that nearly unreachable, but
+    // this is the direction the flag must fail in.
     security_lock_clear_dirty_since_shred();
   }
 
@@ -212,14 +222,6 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
   // than a one-off. factory_reset_fast() does the same for the same reason.
   const PebbleTask task = pebble_task_get_current();
   task_watchdog_mask_clear(task);
-
-  if (!clean) {
-    // Set before anything is destroyed so a shred interrupted by power loss is
-    // resumed at next boot rather than left half done. The clean path leaves it
-    // alone: it is only reached when the flag is already clear, and it destroys
-    // nothing that would need resuming.
-    security_lock_set_shred_pending(true);
-  }
 
   // Announce before wiping, so anything holding data of its own gets the
   // chance to destroy it rather than being told afterwards. Not emitted at
