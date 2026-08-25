@@ -11,9 +11,17 @@ goal: >
   chasing the hang.
 
 now: >
-  Both original blockers are closed. 38 commits on top of 26debf5b9 (75 ahead of
-  origin/main in total, so 37 are from earlier sessions). One agent was still
-  running when this was written -- see in_flight. Nothing has run on hardware.
+  Both original blockers are closed and the queue is done. 41 commits on top of
+  26debf5b9; the branch is 78 ahead of origin/main in total, so the rest are
+  from earlier sessions. Working tree clean. Nothing has run on hardware.
+
+menu_rows_for_the_e2e_script: >
+  Settings > Security has two shapes. Off - one row, "Security Lock / Off". On -
+  eight rows in this order: Security Lock, Change PIN, Lock After, Erase After,
+  Duress PIN, Lockdown, Lockdown + Erase, Show in Launcher. "Lock Now" is gone.
+  PIN length is a step inside the set-PIN flow, not a row. This list is in
+  tools/security_lock_e2e.py and has gone stale four times; a shifted index
+  shows up as the wrong row silently doing nothing.
 
 test: |
   PATH="$VENV/bin:$PATH" ./waf build
@@ -36,20 +44,7 @@ the_headline: >
   to erase a region that was both non-blank and not sector-aligned. Only the
   QEMU HAL truncates; real backends return 150/50ms. UNTESTED ON HARDWARE.
 
-in_flight:
-  - agent_lockdown_countdown: >
-      Uncommitted, an agent was mid-edit across security_lock/*, settings/
-      security.c, lockdown.c, prompt_commands.* and their tests. Scope: manual
-      triggers stop erasing immediately. "Lockdown" (app, Quick Launch chord)
-      locks and ARMS the erase countdown; "Lockdown + Erase" locks and erases
-      now; Erase After defaults to Never so the feature ships lock-only.
-      THE HARD REQUIREMENT, user-confirmed: a manually armed countdown must
-      survive a Bluetooth reconnect. handle_comm_session_event() clears both
-      deadlines on session open, which is right for a disconnect-armed
-      countdown and would silently cancel a deliberate lockdown. Also check the
-      reverse -- a later disconnect must not restart or shorten a manual one.
-      If the tree is dirty and this is unfinished, check git diff before
-      assuming it is coherent.
+in_flight: []
 
 verified_live_on_qemu:
   - pin_pad_unlocks: >
