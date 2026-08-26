@@ -117,10 +117,10 @@ immediately and only the disconnect path deferred. The reasoning:
 - Locking without *some* timed erase is not offered, because it would be a
   second way to spell `Erase After: Never` and the two would drift. A user who
   wants lock-only sets Never, which every countdown path already honours.
-- `LOCK` arrives over the air. Erasing on it outright is an unconditional
-  remote-wipe primitive available to anything that can speak the protocol, on a
-  watch that is still on the user's wrist with the PIN in their head. See
-  §8.
+- `LOCK` arrives over the air and is derived from a platform callback rather
+  than a button, so it defers to `Erase After` like every other unaimed trigger.
+  A phone that means "now" says so with `LOCK_ERASE`, which is a separate
+  command precisely so the unaimed one is not the destructive one. See §8.
 
 `Disabled` is the master switch for the whole feature, and it is where the watch
 ships. It is not a second notion of "on" beside the PIN: there is exactly one,
@@ -523,6 +523,7 @@ watch locking when the phone is seized.
 |---|---|---|---|
 | `0x02` | `LOCK` | phone → watch | `uint8 reason` |
 | `0x03` | `STATUS_REQUEST` | phone → watch | — |
+| `0x04` | `LOCK_ERASE` | phone → watch | `uint8 reason` |
 | `0x82` | `LOCK_ACK` | watch → phone | `uint8 reason` |
 | `0x83` | `STATUS_RESPONSE` | watch → phone | `uint8 state`, `uint8 pin_configured`, `uint32 deadline_remaining_s` |
 | `0x84` | `SHRED_COMPLETE` | watch → phone | `uint8 reason`, `uint32 wiped_db_bitmap` |
@@ -534,8 +535,8 @@ exhausted, `0x06` clock rollback.
 
 **The watch owns its own security configuration.** There is no command that sets
 the master switch or either delay: those live in Settings > Security and nowhere
-else. The phone can *act* on the watch — `LOCK` — and *ask* about it —
-`STATUS_REQUEST` — but it cannot change the watch's security posture.
+else. The phone can *act* on the watch — `LOCK`, `LOCK_ERASE` — and *ask* about
+it — `STATUS_REQUEST` — but it cannot change the watch's security posture.
 
 That split is deliberate rather than an omission. A phone that can disarm the
 watch is a phone that can be compelled to disarm the watch, and the phone being
@@ -548,25 +549,49 @@ every time the two reconnected.
 A phone built against the older protocol still sending it is ignored on the
 unknown-command path — logged and dropped, with no reply and no side effect.
 
-**`LOCK` locks and starts the erase countdown; it does not erase.** The
-argument is the same one that governs the chord, plus one the chord does not
-have: `LOCK` arrives over the air, so treating it as an immediate wipe hands an
-unconditional remote-erase primitive to anything that can speak the protocol.
-It is also the trigger least likely to have been aimed — Gadgetbridge derives it
-from `REASON_LOCKDOWN`, a platform callback, not a button — and the watch is
-still on the user's wrist with the PIN in their head either way. A phone that
-wants the content gone sooner asks for a shorter `Erase After`; there is
-deliberately no command that erases on demand, because that is precisely the
-primitive being withheld.
+**`LOCK` locks and starts the erase countdown. `LOCK_ERASE` locks and erases on
+the spot.** Both lock; they differ only in what is left on the watch afterwards.
+
+`LOCK` is the trigger least likely to have been aimed — Gadgetbridge derives it
+from `REASON_LOCKDOWN`, a platform callback, not a button — so it defers to the
+watch's own `Erase After`, which the PIN cancels. `LOCK_ERASE` is the one a
+phone sends when waiting is the thing that costs, and it is what Gadgetbridge
+sends by default, because lockdown is the case this feature exists for and a
+watch that only locks still holds every notification, calendar entry and contact
+it was sent, behind four digits, on flash that is not encrypted.
+
+The obvious objection is that `LOCK_ERASE` is an unconditional remote-wipe
+primitive available to anything that can speak the protocol. It is, and the
+mitigations are the ones that already exist rather than new ones: the master
+switch refuses both commands when the feature is off, the funnel refuses both
+when there is no usable PIN, and everything the erase destroys is a *copy* the
+phone puts back on the next unlock and reconnect. So the worst an attacker with
+protocol access can do is force a resync — and to do the same to a watch already
+on `Erase After`, they need only wait. What they cannot do with either command
+is read anything, weaken the watch, or stop the user getting back in with the
+PIN.
 
 This shifts what `LOCK_ACK` means, without changing the wire format:
-`LOCK_ACK` says the watch is locked. `SHRED_COMPLETE` says the content is gone,
-and arrives when and if the countdown runs out. The phone can watch the gap via
-`STATUS_RESPONSE.deadline_remaining_s`, which now reports a manual countdown as
-readily as a disconnect one. A phone that reads `LOCK_ACK` as "locked and
-erased" is now slightly optimistic; a phone that reads it as "locked" is right,
-and that was always the accurate reading — the ack is keyed on
-`security_lock_is_locked()`, not on anything having been destroyed.
+`LOCK_ACK` says the watch is locked. `SHRED_COMPLETE` says the content is gone —
+immediately on `LOCK_ERASE`, and when and if the countdown runs out on `LOCK`.
+The phone can watch the gap via `STATUS_RESPONSE.deadline_remaining_s`, which
+reports a manual countdown as readily as a disconnect one. A phone that reads
+`LOCK_ACK` as "locked and erased" is optimistic on `LOCK`; a phone that reads it
+as "locked" is right in both cases, and that was always the accurate reading —
+the ack is keyed on `security_lock_is_locked()`, not on anything having been
+destroyed.
+
+**`LOCK_ERASE` acks before it erases, and the order is load-bearing.**
+`security_lock_shred()` engages the radio blackout whenever the watch is locked,
+so by the time an erase returns there is no session left to answer on. An ack
+sent afterwards would never arrive, and the phone would spend its retry window
+re-asking a watch that had already done the work. So the handler locks through
+the lock-only funnel, acks over a radio that is still up, and only then erases —
+two calls rather than `security_lock_engage()`, which does both with nothing in
+between. The cost is that the UI quiesces twice, closing and relaunching the
+watchface once, which is invisible next to a wipe that holds KernelMain for
+seconds. The lock is *checked* before the erase rather than assumed: a refusal
+must not be followed by wiping a watch that was never locked.
 
 An unfortunate consequence worth naming: the same phone reconnecting cannot
 call off the countdown it started. That is not an oversight — a `LOCK` a
@@ -669,9 +694,9 @@ suppress forwarding for ~2 s or the watch gets flooded.
 ```
 REASON_LOCKDOWN
    │
-   ├─ t=0    send LOCK to watch
+   ├─ t=0    send LOCK_ERASE (or LOCK) to watch
    ├─ t=0    stop forwarding notifications; apply privacy mode
-   ├─ 0<t<10 retry LOCK on LOCK_ACK timeout; re-send on reconnect
+   ├─ 0<t<10 retry on LOCK_ACK timeout; re-send on reconnect
    └─ t=10s  disconnect device, then tear down Bluetooth
 ```
 
@@ -679,13 +704,35 @@ The 10-second delay leaves room for the `LOCK_ACK` round trip and a retry, while
 bounding the exposure window. Watch-side disconnect detection remains the
 backstop for a watch that never got the message.
 
-**`LOCK_ACK` means locked, not erased.** The watch arms its erase countdown and
-runs it down over `Erase After`; `SHRED_COMPLETE` arrives when — and only if —
-that expires. GB must not treat the ack as confirmation that content is gone,
-and must not treat the absence of a `SHRED_COMPLETE` as a failed `LOCK`. A
-second `LOCK` sent to "make sure" is harmless but pointless: the watch keeps
-whichever deadline is nearer, so a repeat can never postpone the erase and can
-only bring it forward if `Erase After` was shortened in between.
+**Which of the two goes out is `Erase this watch on lockdown`, and it is on by
+default.** Lockdown is the case the feature exists for: a watch that only locks
+still holds every notification, calendar entry and contact it was sent, behind
+four digits, on flash that is not encrypted. Everything the erase destroys is a
+copy this phone puts back on the next unlock and reconnect, so the default costs
+a resync and the alternative costs the data.
+
+**It is a per-watch setting**, under the Pebble's own device settings rather
+than on the app-wide lockdown screen. Two reasons. Only a PebbleOS build
+carrying this endpoint can act on it at all, so it does not belong on a screen
+shared with every other device Gadgetbridge supports; and one paired watch may
+hold real content while another is a test unit that should merely lock.
+`LockdownController` therefore stays device-agnostic — it says only "lock down",
+and `PebbleIoThread` resolves the watch's own preference when it encodes the
+command. The panic dialog on the shared screen names no single outcome for the
+same reason: it fans out to every watch, and each answers for itself.
+
+**`LOCK_ACK` means locked, not erased — on both commands.** On `LOCK` the watch
+arms its countdown and `SHRED_COMPLETE` arrives when, and only if, `Erase After`
+expires. On `LOCK_ERASE` the ack is sent *before* the wipe starts, deliberately:
+the erase takes the radio down, so an ack after it would never arrive. Either
+way GB must not read the ack as confirmation that content is gone, nor read a
+missing `SHRED_COMPLETE` as a failed lock.
+
+A second command sent to "make sure" is safe. A repeated `LOCK` can never
+postpone the erase — the watch keeps whichever deadline is nearer — and a
+repeated `LOCK_ERASE` reaches a watch whose radio is already down, or, if it
+does land, is absorbed by the re-entry guard in `security_lock_shred()` and the
+dirty flag that makes a second wipe a no-op.
 
 The teardown at t=10s closes the session, which the watch sees as an ordinary
 disconnect. That is safe by construction — the watch leaves a manual countdown
@@ -809,10 +856,20 @@ custom endpoint in this tree — copy that pattern exactly.
 
 ### 6. Settings
 
-- New `res/xml/lockdown_settings.xml`, registered in
+Two screens, because the settings answer to different owners.
+
+- **App-wide**, in new `res/xml/lockdown_settings.xml`, registered in
   `activities/SettingsActivity.java` (search index and click routing around lines 110-120 and 150-160, following
-  `MapsSettingsActivity`).
-- Keys in `util/GBPrefs.java`; add a `PreferenceMigratorNN` if any key moves.
+  `MapsSettingsActivity`). Holds `lockdown_enabled` and the `lockdown_panic`
+  action — both about how *the phone* responds to lockdown, so both apply to
+  every device. Keys in `util/GBPrefs.java`.
+- **Per watch**, in new `res/xml/devicesettings_pebble_security.xml`, added to
+  the `GENERIC` root screen in `PebbleCoordinator.getDeviceSpecificSettings()`.
+  Holds `pebble_lockdown_erase`, read through `GBApplication.getDevicePrefs()`
+  in `PebbleIoThread.sendSecurityLock()`. It lives here because only a PebbleOS
+  watch running this endpoint can act on it, and because two paired watches can
+  reasonably want different answers.
+- Add a `PreferenceMigratorNN` if any key moves between the two.
 - Reuse the Pebble privacy-mode plumbing (`PebbleSupport.java:192-206`, pref
   `pebble_pref_privacy_mode`) for the notification-suppression half.
 

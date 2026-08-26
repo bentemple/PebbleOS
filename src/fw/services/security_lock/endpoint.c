@@ -27,9 +27,15 @@ PBL_LOG_MODULE_DECLARE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_L
 //! 0x01 was CONFIGURE. The watch owns its own security configuration now, so
 //! there is nothing for the phone to set; an old phone still sending it falls
 //! through to the unknown-command path.
+//!
+//! LOCK_ERASE is a separate command rather than a flag on LOCK, because the two
+//! differ in what they destroy and a length-sensitive parser is exactly how the
+//! retired CONFIGURE broke. Its low nibble matches SHRED_COMPLETE, which is the
+//! reply it ends in.
 typedef enum PACKED {
   SecurityLockCmdLock = 0x02,
   SecurityLockCmdStatusRequest = 0x03,
+  SecurityLockCmdLockErase = 0x04,
 
   SecurityLockCmdLockAck = 0x02 | RESPONSE_MASK,
   SecurityLockCmdStatusResponse = 0x03 | RESPONSE_MASK,
@@ -171,31 +177,63 @@ static void prv_refuse_lock(void) {
   security_lock_endpoint_send_state_changed(security_lock_get_state());
 }
 
-//! The lock funnel touches the app and modal stacks, so it is KernelMain-only.
+//! Answer a lock the phone asked for, once it has been attempted.
 //!
-//! The countdown rather than an immediate erase. LOCK arrives over the air,
-//! which makes an unconditional wipe on it a remote-wipe primitive available to
-//! anything that can speak the protocol -- and it is the trigger least likely
-//! to have been aimed: Gadgetbridge derives it from a platform callback rather
-//! than from a button. The watch is still on the user's wrist either way, so
-//! the PIN is a real way out. A phone that means "now" can say so by locking
-//! the watch and letting the countdown run.
-static void prv_lock_callback(void *data) {
-  const SecurityShredReason reason = (SecurityShredReason)(uintptr_t)data;
-  security_lock_engage_with_countdown(reason);
-
-  // Keyed on what actually happened rather than on having asked. engage()
-  // refuses on more than the master switch -- an unusable stored PIN length
-  // among them -- and every one of those must reach the phone as a refusal.
+//! Keyed on what actually happened rather than on having asked. The funnel
+//! refuses on more than the master switch -- an unusable stored PIN length
+//! among them -- and every one of those must reach the phone as a refusal.
+//!
+//! @return true if the watch is locked, so an erase may follow
+static bool prv_ack_lock(SecurityShredReason reason) {
   if (!security_lock_is_locked()) {
     PBL_LOG_WRN("LOCK did not take effect; reporting state instead of acking");
     prv_refuse_lock();
-    return;
+    return false;
   }
   prv_send_lock_ack(reason);
+  return true;
 }
 
-static void prv_handle_lock(const uint8_t *msg, size_t len) {
+//! The lock funnel touches the app and modal stacks, so it is KernelMain-only.
+//!
+//! The countdown rather than an immediate erase. Plain LOCK is the trigger
+//! least likely to have been aimed -- Gadgetbridge derives it from a platform
+//! callback rather than from a button -- and the watch is still on the user's
+//! wrist, so the PIN is a real way out. A phone that means "now" says so with
+//! LOCK_ERASE.
+static void prv_lock_callback(void *data) {
+  const SecurityShredReason reason = (SecurityShredReason)(uintptr_t)data;
+  security_lock_engage_with_countdown(reason);
+  prv_ack_lock(reason);
+}
+
+//! Lock, say so, then erase -- in that order, and the order is the point.
+//!
+//! security_lock_shred() blacks the radio out whenever the watch is locked, so
+//! by the time an erase returns there is no session left to answer on. An ack
+//! sent afterwards would never arrive, and the phone would spend its retry
+//! window re-asking a watch that had already done the work.
+//!
+//! So this locks through the lock-only funnel, acks over a radio that is still
+//! up, and only then erases. Two calls rather than security_lock_engage(),
+//! which does both with nothing in between. The cost is that the UI quiesces
+//! twice -- the shred's first step repeats what the lock just did, closing and
+//! relaunching the watchface once -- which is invisible next to a wipe that
+//! holds KernelMain for seconds.
+//!
+//! The lock is checked before the erase rather than assumed: a refusal must not
+//! be followed by wiping a watch that was never locked.
+static void prv_lock_erase_callback(void *data) {
+  const SecurityShredReason reason = (SecurityShredReason)(uintptr_t)data;
+  security_lock_engage_lock_only(reason);
+  if (!prv_ack_lock(reason)) {
+    return;
+  }
+  security_lock_shred(reason);
+}
+
+//! @param erase_now whether the phone asked for the content to go immediately
+static void prv_handle_lock(const uint8_t *msg, size_t len, bool erase_now) {
   if (len < sizeof(SecurityLockReasonMsg)) {
     PBL_LOG_ERR("Short LOCK message: %u", (unsigned)len);
     return;
@@ -208,8 +246,10 @@ static void prv_handle_lock(const uint8_t *msg, size_t len) {
     return;
   }
   const SecurityLockReasonMsg *lock_msg = (const SecurityLockReasonMsg *)msg;
-  PBL_LOG_INFO("LOCK from phone, reason %" PRIu8, lock_msg->reason);
-  launcher_task_add_callback(prv_lock_callback, (void *)(uintptr_t)lock_msg->reason);
+  PBL_LOG_INFO("%s from phone, reason %" PRIu8, erase_now ? "LOCK_ERASE" : "LOCK",
+               lock_msg->reason);
+  launcher_task_add_callback(erase_now ? prv_lock_erase_callback : prv_lock_callback,
+                             (void *)(uintptr_t)lock_msg->reason);
 }
 
 void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *msg, size_t len) {
@@ -220,7 +260,10 @@ void security_lock_protocol_msg_callback(CommSession *session, const uint8_t *ms
 
   switch (msg[0]) {
     case SecurityLockCmdLock:
-      prv_handle_lock(msg, len);
+      prv_handle_lock(msg, len, false /* erase_now */);
+      break;
+    case SecurityLockCmdLockErase:
+      prv_handle_lock(msg, len, true /* erase_now */);
       break;
     case SecurityLockCmdStatusRequest:
       prv_send_status();

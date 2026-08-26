@@ -47,6 +47,19 @@ static int s_locks_engaged;
 static int s_shreds;
 static SecurityShredReason s_last_shred_reason;
 
+//! The command byte of every message the endpoint put on the wire, in order. A
+//! refusal is as much about what was not sent as about what was.
+//!
+//! Up here rather than beside the session fake because the shred fake below
+//! samples the count: on the erase path the ack has to precede the wipe, and
+//! "both happened" is not the same claim.
+#define MAX_SENT 8
+static uint8_t s_sent_cmds[MAX_SENT];
+static int s_sent_count;
+
+//! How many messages had gone out by the time the shred started.
+static int s_sent_at_shred;
+
 //! The registered regular timer, or NULL when none is running.
 static RegularTimerInfo *s_timer;
 
@@ -122,6 +135,7 @@ bool security_lock_note_time(time_t now) {
 uint32_t security_lock_shred(SecurityShredReason reason) {
   s_shreds++;
   s_last_shred_reason = reason;
+  s_sent_at_shred = s_sent_count;
   return 0;
 }
 
@@ -140,7 +154,13 @@ void security_lock_engage(SecurityShredReason reason) {
   s_state = SecurityLockStateLocked;
 }
 
+//! The same refusals. It shares one funnel with the other two, so a fake that
+//! locked unconditionally would let a LOCK_ERASE that was refused go on to
+//! erase -- the exact thing prv_lock_erase_callback checks for.
 void security_lock_engage_lock_only(SecurityShredReason reason) {
+  if (prv_engage_refused()) {
+    return;
+  }
   s_locks_engaged++;
   s_state = SecurityLockStateLocked;
 }
@@ -197,12 +217,6 @@ static int s_msgs_sent;
 static uint8_t s_last_msg[16];
 static size_t s_last_msg_len;
 
-//! The command byte of each, in order. A refusal is as much about what was not
-//! sent as about what was.
-#define MAX_SENT 8
-static uint8_t s_sent_cmds[MAX_SENT];
-static int s_sent_count;
-
 void comm_session_send_data(CommSession *session, uint16_t endpoint_id, const uint8_t *data,
                             size_t length, uint32_t timeout_ms) {
   cl_assert(length <= sizeof(s_last_msg));
@@ -240,6 +254,7 @@ static bool prv_timer_running(void) {
 //! Inbound commands, as the phone spells them.
 #define CMD_LOCK 0x02
 #define CMD_STATUS_REQUEST 0x03
+#define CMD_LOCK_ERASE 0x04
 
 //! The retired CONFIGURE, still spoken by a phone built against the old
 //! protocol: command, enabled, then both delays big-endian.
@@ -247,6 +262,11 @@ static bool prv_timer_running(void) {
 
 static void prv_phone_lock(uint8_t reason) {
   const uint8_t msg[] = {CMD_LOCK, reason};
+  security_lock_protocol_msg_callback(NULL, msg, sizeof(msg));
+}
+
+static void prv_phone_lock_erase(uint8_t reason) {
+  const uint8_t msg[] = {CMD_LOCK_ERASE, reason};
   security_lock_protocol_msg_callback(NULL, msg, sizeof(msg));
 }
 
@@ -268,6 +288,18 @@ static void prv_phone_status_request(void) {
 static int prv_count_sent(uint8_t cmd) {
   int count = 0;
   for (int i = 0; i < s_sent_count; ++i) {
+    if (s_sent_cmds[i] == cmd) {
+      count++;
+    }
+  }
+  return count;
+}
+
+//! How many of `cmd` went out among the first `limit` messages. Ordering, not
+//! just occurrence.
+static int prv_count_sent_before(uint8_t cmd, int limit) {
+  int count = 0;
+  for (int i = 0; (i < s_sent_count) && (i < limit); ++i) {
     if (s_sent_cmds[i] == cmd) {
       count++;
     }
@@ -303,6 +335,7 @@ void test_security_lock_endpoint__initialize(void) {
   s_locks_engaged = 0;
   s_shreds = 0;
   s_last_shred_reason = SecurityShredReasonUnknown;
+  s_sent_at_shred = 0;
   s_timer = NULL;
 
   // endpoint.c tracks its timer and any queued resync request in statics, and
@@ -438,6 +471,100 @@ void test_security_lock_endpoint__a_lock_that_does_not_take_is_not_acked(void) {
   cl_assert_equal_i(0, s_locks_engaged);
   cl_assert_equal_i(0, prv_count_sent(CMD_LOCK_ACK));
   cl_assert_equal_i(1, prv_count_sent(CMD_STATE_CHANGED));
+}
+
+// What the phone can ask for: LOCK_ERASE
+////////////////////////////////////
+
+//! The other half of the pair. LOCK defers to Erase After; this one is how a
+//! phone says the content goes now, and it is what the lockdown response sends
+//! by default -- the case it exists for is the one where waiting is the thing
+//! that costs.
+void test_security_lock_endpoint__a_phone_lock_erase_locks_and_erases(void) {
+  prv_phone_lock_erase(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(1, s_locks_engaged);
+  cl_assert_equal_i(SecurityLockStateLocked, s_state);
+  cl_assert_equal_i(1, s_shreds);
+  cl_assert_equal_i(SecurityShredReasonPhoneLockdown, s_last_shred_reason);
+}
+
+//! The whole reason the two are separate calls rather than one engage(). The
+//! erase blacks the radio out, so an ack sent after it would have no session to
+//! go out on and the phone would burn its retry window re-asking a watch that
+//! had already erased itself.
+void test_security_lock_endpoint__a_phone_lock_erase_acks_before_it_erases(void) {
+  prv_phone_lock_erase(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(1, s_shreds);
+  cl_assert_equal_i(1, prv_count_sent_before(CMD_LOCK_ACK, s_sent_at_shred));
+}
+
+//! Erase After governs the countdown, not this. A phone that asked for the
+//! content to go now is not asking for a timer, so Never does not veto it --
+//! the setting says when an unattended watch gives up, and this watch was not
+//! unattended, it was told.
+void test_security_lock_endpoint__a_phone_lock_erase_ignores_erase_after(void) {
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+
+  prv_phone_lock_erase(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(SecurityLockStateLocked, s_state);
+  cl_assert_equal_i(1, s_shreds);
+  cl_assert_equal_i(0, s_shred_deadline);
+}
+
+//! It locks first, so there is no countdown left to run afterwards. Arming one
+//! would leave a deadline pointing at content that no longer exists.
+void test_security_lock_endpoint__a_phone_lock_erase_arms_no_countdown(void) {
+  prv_phone_lock_erase(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(0, s_shred_deadline);
+  cl_assert_equal_i(0, s_lock_deadline);
+  cl_assert_equal_i(SecurityCountdownNone, s_countdown_source);
+}
+
+//! The master switch refuses this exactly as it refuses LOCK. A watch with the
+//! feature off has no PIN to reopen it, so erasing would destroy content and
+//! leave the watch wide open -- the defect the switch exists to dissolve.
+void test_security_lock_endpoint__a_phone_lock_erase_with_the_feature_off_does_nothing(void) {
+  s_state = SecurityLockStateDisabled;
+
+  prv_phone_lock_erase(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(0, s_locks_engaged);
+  cl_assert_equal_i(0, s_shreds);
+  cl_assert_equal_i(SecurityLockStateDisabled, s_state);
+  cl_assert_equal_i(0, prv_count_sent(CMD_LOCK_ACK));
+  cl_assert_equal_i(1, prv_count_sent(CMD_STATE_CHANGED));
+}
+
+//! And a lock that fails inside the funnel stops the erase with it. Wiping a
+//! watch that never locked is the one outcome worse than doing nothing: the
+//! content goes and there is no lock screen in front of what is left.
+void test_security_lock_endpoint__a_lock_erase_that_does_not_take_erases_nothing(void) {
+  // Past the early refusal -- the feature is on -- but the funnel declines,
+  // because there is no PIN the lock screen could prompt for.
+  s_state = SecurityLockStateArmed;
+  s_pin_len = 0;
+
+  prv_phone_lock_erase(SecurityShredReasonPhoneLockdown);
+
+  cl_assert_equal_i(0, s_locks_engaged);
+  cl_assert_equal_i(0, s_shreds);
+  cl_assert_equal_i(0, prv_count_sent(CMD_LOCK_ACK));
+  cl_assert_equal_i(1, prv_count_sent(CMD_STATE_CHANGED));
+}
+
+//! A short LOCK_ERASE is dropped rather than read past its end, the same as a
+//! short LOCK. The reason byte is what makes it two bytes.
+void test_security_lock_endpoint__a_short_lock_erase_is_ignored(void) {
+  const uint8_t msg[] = {CMD_LOCK_ERASE};
+  security_lock_protocol_msg_callback(NULL, msg, sizeof(msg));
+
+  cl_assert_equal_i(0, s_locks_engaged);
+  cl_assert_equal_i(0, s_shreds);
+  cl_assert_equal_i(0, s_msgs_sent);
 }
 
 // The retired CONFIGURE
