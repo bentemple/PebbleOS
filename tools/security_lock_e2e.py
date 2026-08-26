@@ -57,7 +57,8 @@ SECURITY_ROWS_WITH_PIN = [
     "Lock After",
     "Erase After",
     "Duress PIN",
-    "Lock Now",
+    "Lockdown",
+    "Lockdown + Erase",
     "Show in Launcher",
 ]
 
@@ -468,8 +469,10 @@ def test_starts_clean(console, pad):
     check("starts disabled", st["state"] == 0, f"state={st['state']}")
     check("no PIN configured", st["pin_len"] == 0, f"pin_len={st['pin_len']}")
     check("no countdown armed", st["shred_in"] == -1 and st["lock_in"] == -1)
-    check("defaults are 5 and 30 minutes",
-          st["lock_delay"] == 300 and st["shred_delay"] == 1800,
+    # Erase After ships as Never, so out of the box the watch locks and never
+    # erases. Turning erasing on is the user's decision, not the default.
+    check("defaults are 5 minutes and never erase",
+          st["lock_delay"] == 300 and st["shred_delay"] == 0,
           f"lock={st['lock_delay']} shred={st['shred_delay']}")
 
 
@@ -517,7 +520,11 @@ def test_lock_and_unlock(console, pad):
     # lock's chatter is DEBUG and compiled out, so tests must not depend on it.
     check("LOCK reaches the endpoint", console.saw(marker, "LOCK from phone"),
           " | ".join(console.since(marker))[:160])
-    check("the shred runs", console.saw(marker, "Shredding:"))
+    # LOCK arms the erase rather than performing it, and the shipped Erase
+    # After is Never -- so nothing is erased here at all. Asserting on
+    # "Shredding:" would be asserting the old behaviour.
+    check("the phone cannot erase outright", not console.saw(marker, "Shredding:"),
+          " | ".join(console.since(marker))[:160])
 
     # The wipe runs on the launcher task and freezes the UI while it does,
     # exactly as a factory reset does. Input sent during that window is lost,
@@ -591,7 +598,7 @@ def test_disconnect_arms_countdown(console, pad):
     st = console.status()
     check("disconnect arms the lock countdown", 0 < st["lock_in"] <= 300,
           f"lock_in={st['lock_in']}")
-    check("disconnect arms the shred countdown", 0 < st["shred_in"] <= 1800,
+    check("no erase countdown, since Erase After is Never", st["shred_in"] == -1,
           f"shred_in={st['shred_in']}")
 
     phone.set_connected(True)
