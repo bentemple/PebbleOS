@@ -100,20 +100,28 @@ Disabled ──────────────> Armed ───────
                           (re-shred + stay locked)
 ```
 
-**Locking and erasing are two things, and only one trigger does both at once.**
-Everything that locks — the Lockdown app, the Quick Launch chord, the Settings
-row, the phone's `LOCK`, the disconnect grace — locks *now* and arms the erase
-for `Erase After` later. The PIN cancels it. `Lockdown + Erase`, in Settings, is
-the single control that destroys the content on the spot.
+**Locking and erasing are two things, and the destructive one has to be asked
+for by name.** Everything reachable without choosing it specifically — the
+Lockdown app and its chord, the Settings `Lockdown` row, the phone's `LOCK`, the
+disconnect grace — locks *now* and arms the erase for `Erase After` later. The
+PIN cancels it. Erasing on the spot has its own controls: the
+`Lockdown + Erase` row in Settings, which asks first; the phone's `LOCK_ERASE`;
+and a `Lockdown + Erase` Quick Launch app, which is bindable only while
+`Erase After` is set and is deliberately never listed in the launcher.
 
 That is a change from an earlier revision, where every manual trigger erased
 immediately and only the disconnect path deferred. The reasoning:
 
-- The triggers a user can hit by accident are exactly the manual ones — a Quick
-  Launch chord in a pocket, the wrong launcher row, a `LOCK` Gadgetbridge
-  derived from a platform callback. An immediate erase made all of them
-  unrecoverable in the only sense that matters to the user: the watch goes
-  blank and stays blank until the phone resyncs.
+- The triggers a user can hit by accident are the ones reached without aiming —
+  the wrong launcher row, a `LOCK` Gadgetbridge derived from a platform
+  callback. An immediate erase made all of them unrecoverable in the only sense
+  that matters to the user: the watch goes blank and stays blank until the phone
+  resyncs.
+- A Quick Launch binding is not one of those. It is a button the user chose to
+  bind to a named app, so it is the one place an erase-now chord is defensible —
+  and it stays gated on `Erase After`, so it cannot be bound at all by someone
+  who has not opted into erasing. Held in a pocket it still erases, which is the
+  residual cost of having the chord exist.
 - Locking without *some* timed erase is not offered, because it would be a
   second way to spell `Erase After: Never` and the two would drift. A user who
   wants lock-only sets Never, which every countdown path already honours.
@@ -261,6 +269,7 @@ erase.
 | Settings > Lockdown | Same, after a confirmation | Lock now, erase at `Erase After` |
 | Phone sends `LOCK` | Protocol endpoint | Lock now, erase at `Erase After` |
 | Settings > Lockdown + Erase | `security_lock_engage()` | Lock + shred, immediately |
+| Lockdown + Erase Quick Launch chord | Same, gated on `Erase After` | Lock + shred, immediately |
 | Unexpected disconnect while Armed | `PebbleCommSessionEvent` close + grace | Lock at `Lock After`, erase at `Erase After` |
 | Boot with state == `Locked` | Early-boot hook | Re-shred, stay locked |
 | Erase countdown elapses | Absolute-deadline check | Shred, stay locked |

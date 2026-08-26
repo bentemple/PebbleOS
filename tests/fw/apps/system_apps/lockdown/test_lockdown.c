@@ -28,6 +28,9 @@
 static bool s_in_launcher;
 static uint8_t s_pin_len;
 static SecurityLockState s_state;
+//! Erase After. Whether the user has opted into erasing at all, which is what
+//! gates the erasing app.
+static uint32_t s_shred_delay_s;
 static int s_engage_calls;
 static int s_erase_now_calls;
 static SecurityShredReason s_engage_reason;
@@ -63,6 +66,10 @@ uint8_t security_lock_get_pin_len(void) {
 
 SecurityLockState security_lock_get_state(void) {
   return s_state;
+}
+
+uint32_t security_lock_get_shred_delay_s(void) {
+  return s_shred_delay_s;
 }
 
 //! Both funnels, counted separately. Which one the app reaches is the whole
@@ -158,12 +165,24 @@ static void prv_run_app(void) {
   prv_md()->common.main_func();
 }
 
+static const PebbleProcessMdSystem *prv_erase_md(void) {
+  return (const PebbleProcessMdSystem *)lockdown_erase_app_get_app_info();
+}
+
+static void prv_run_erase_app(void) {
+  prv_erase_md()->common.main_func();
+}
+
 void test_lockdown__initialize(void) {
   s_in_launcher = true;
   // A configured PIN with the feature on is the ordinary case; the app only
   // exists to lock behind one. The refusal tests take one or the other away.
   s_pin_len = 4;
   s_state = SecurityLockStateArmed;
+  // A real Erase After, so the erasing app is available by default here. Its
+  // gating tests set Never explicitly. Note this is not the shipped default --
+  // out of the box Erase After is Never and the erasing app is unreachable.
+  s_shred_delay_s = 30 * 60;
   s_engage_calls = 0;
   s_erase_now_calls = 0;
   s_engage_reason = SecurityShredReasonManualPanic;
@@ -431,4 +450,120 @@ void test_lockdown__still_engages_once_a_pin_exists(void) {
   cl_assert(s_deferred_callback != NULL);
   s_deferred_callback(NULL);
   cl_assert_equal_i(1, s_engage_calls);
+}
+
+// Lockdown + Erase
+////////////////////////////////////
+
+// Quick Launch only. The launcher is somewhere you land by accident, and this
+// is the one manual trigger the PIN cannot call back.
+void test_lockdown__erase_is_quick_launch_only(void) {
+  cl_assert_equal_i(ProcessVisibilityQuickLaunch, prv_erase_md()->common.visibility);
+}
+
+// Including when the launcher pref is on, which governs the other app alone.
+void test_lockdown__erase_stays_off_the_launcher_whatever_the_pref_says(void) {
+  shell_prefs_set_lockdown_app_in_launcher(true);
+  cl_assert_equal_i(ProcessVisibilityQuickLaunch, prv_erase_md()->common.visibility);
+  shell_prefs_set_lockdown_app_in_launcher(false);
+  cl_assert_equal_i(ProcessVisibilityQuickLaunch, prv_erase_md()->common.visibility);
+}
+
+// Erase After is where opting into erasing is expressed, so it gates the app.
+// Hidden rather than Quick-Launch-visible, because the picker only filters out
+// entries that are hidden and not Quick-Launch-visible.
+void test_lockdown__erase_is_unbindable_while_erasing_is_off(void) {
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+  cl_assert_equal_i(ProcessVisibilityHidden, prv_erase_md()->common.visibility);
+}
+
+void test_lockdown__erase_comes_back_when_an_erase_delay_is_set(void) {
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+  cl_assert_equal_i(ProcessVisibilityHidden, prv_erase_md()->common.visibility);
+  s_shred_delay_s = 60 * 60;
+  cl_assert_equal_i(ProcessVisibilityQuickLaunch, prv_erase_md()->common.visibility);
+}
+
+// The master switch outranks Erase After, exactly as it does for the other app.
+void test_lockdown__erase_is_hidden_without_a_pin(void) {
+  s_pin_len = 0;
+  cl_assert_equal_i(ProcessVisibilityHidden, prv_erase_md()->common.visibility);
+}
+
+void test_lockdown__erase_is_hidden_while_the_feature_is_off(void) {
+  s_state = SecurityLockStateDisabled;
+  cl_assert_equal_i(ProcessVisibilityHidden, prv_erase_md()->common.visibility);
+}
+
+// Two apps, so Quick Launch can bind them separately. One UUID for both would
+// make the pair a single bindable entry and the distinction unreachable.
+void test_lockdown__erase_is_a_separate_app_from_lockdown(void) {
+  cl_assert(!uuid_equal(&prv_md()->common.uuid, &prv_erase_md()->common.uuid));
+  cl_assert(prv_md()->common.main_func != prv_erase_md()->common.main_func);
+}
+
+// And its identity does not move as it appears and disappears, for the same
+// reason the other app's does not: the binding is an install id from the UUID.
+void test_lockdown__erase_identity_survives_the_gating(void) {
+  const PebbleProcessMdSystem available = *prv_erase_md();
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+  const PebbleProcessMdSystem unavailable = *prv_erase_md();
+
+  cl_assert(uuid_equal(&available.common.uuid, &unavailable.common.uuid));
+  cl_assert(available.common.main_func == unavailable.common.main_func);
+}
+
+// The whole point of the second app: it reaches the erasing funnel.
+void test_lockdown__erase_shreds_on_the_spot(void) {
+  prv_run_erase_app();
+
+  cl_assert(s_deferred_callback != NULL);
+  s_deferred_callback(NULL);
+  cl_assert_equal_i(1, s_erase_now_calls);
+  cl_assert_equal_i(0, s_engage_calls);
+  cl_assert_equal_i(SecurityShredReasonManualPanic, s_engage_reason);
+}
+
+// Asks nothing first, like the other app. What justifies it here is not that
+// nothing is destroyed -- something is -- but that reaching it takes a binding
+// the user made deliberately while erasing was switched on.
+void test_lockdown__erase_asks_nothing_before_shredding(void) {
+  prv_run_erase_app();
+
+  cl_assert_equal_i(0, s_dialog_creates);
+  cl_assert_equal_i(0, s_dialog_pushes);
+}
+
+// A binding outlives the setting: nothing about moving Erase After to Never
+// clears the install id Quick Launch stored. Locking is never the wrong half to
+// do, so it degrades to the recoverable app rather than doing nothing at all.
+void test_lockdown__erase_degrades_to_locking_when_erasing_is_turned_off(void) {
+  s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
+  prv_run_erase_app();
+
+  cl_assert(s_deferred_callback != NULL);
+  s_deferred_callback(NULL);
+  cl_assert_equal_i(0, s_erase_now_calls);
+  cl_assert_equal_i(1, s_engage_calls);
+}
+
+// And the refusals reach it too: no PIN means no lock screen to put in front of
+// what the erase would leave behind.
+void test_lockdown__erase_does_not_shred_without_a_pin(void) {
+  s_pin_len = 0;
+  prv_run_erase_app();
+
+  cl_assert_equal_i(0, s_erase_now_calls);
+  cl_assert_equal_i(0, s_engage_calls);
+  cl_assert(s_deferred_callback == NULL);
+  cl_assert_equal_i(1, s_dialog_pushes);
+}
+
+void test_lockdown__erase_does_not_shred_while_the_feature_is_off(void) {
+  s_state = SecurityLockStateDisabled;
+  prv_run_erase_app();
+
+  cl_assert_equal_i(0, s_erase_now_calls);
+  cl_assert_equal_i(0, s_engage_calls);
+  cl_assert(s_deferred_callback == NULL);
 }

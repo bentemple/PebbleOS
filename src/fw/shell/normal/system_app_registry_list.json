@@ -682,6 +682,15 @@
       "ifdefs": [
         "CONFIG_SERVICE_SECURITY_LOCK"
       ]
+    },
+    {
+      "id": -102,
+      "enum": "LOCKDOWN_ERASE",
+      "md_fn": "lockdown_erase_app_get_app_info",
+      "color_argb8": "GColorRedARGB8",
+      "ifdefs": [
+        "CONFIG_SERVICE_SECURITY_LOCK"
+      ]
     }
   ],
   "resource_apps": [

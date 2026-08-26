@@ -39,6 +39,15 @@ static bool prv_lock_is_available(void) {
          (pin_len <= SECURITY_LOCK_PIN_MAX_LEN);
 }
 
+//! Whether the user has opted into erasing at all.
+//!
+//! Erase After is the one place that opt-in is expressed, so it gates the
+//! erasing app as well as the countdown. A user who has said "never erase on a
+//! timer" is not offered a chord that erases with no timer at all.
+static bool prv_erase_is_enabled(void) {
+  return security_lock_get_shred_delay_s() != SECURITY_LOCK_SHRED_DELAY_NEVER;
+}
+
 //! Say why, and erase nothing.
 //!
 //! Reachable despite the app being hidden: a Quick Launch binding is an install
@@ -85,7 +94,27 @@ static void prv_engage_callback(void *unused) {
   security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
 }
 
-static void prv_main(void) {
+//! Erase on the spot, which is the whole difference from the app above.
+//!
+//! Degrades to that app rather than refusing when Erase After has been set to
+//! Never since the binding was made. The record Quick Launch keeps is an
+//! install id, which nothing about changing that setting touches, so this is
+//! reachable with erasing switched off. A panic chord that did nothing would be
+//! the worst reading of it: locking is never the wrong half to do, and the
+//! countdown path honours Never by arming nothing.
+static void prv_engage_erase_callback(void *unused) {
+  if (!prv_erase_is_enabled()) {
+    PBL_LOG_WRN("Lockdown + Erase with the erase turned off; locking only");
+    security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
+    return;
+  }
+  security_lock_engage(SecurityShredReasonManualPanic);
+}
+
+//! @param window_name already through WINDOW_NAME(), which compiles out in a
+//!                    release build
+//! @param engage which funnel to hand over to, on the launcher task
+static void prv_run(const char *window_name, void (*engage)(void *)) {
   if (!prv_lock_is_available()) {
     prv_show_lock_unavailable();
     app_event_loop();
@@ -100,7 +129,7 @@ static void prv_main(void) {
   Window *window = app_malloc_check(sizeof(*window));
   app_state_set_user_data(window);
 
-  window_init(window, WINDOW_NAME("Lockdown"));
+  window_init(window, window_name);
   window_set_background_color(window, GColorBlack);
   // Same reason: BACK popping the only window would take the stack to empty.
   // There is nothing to back out of anyway, which is the point of the app.
@@ -108,13 +137,21 @@ static void prv_main(void) {
   app_window_stack_push(window, false /* animated */);
 
   // No confirmation, deliberately. A panic button that asks is a worse panic
-  // button, and nothing is destroyed by the time it runs: the erase it starts
-  // is one the PIN calls off, so a mistaken tap costs a PIN entry.
-  launcher_task_add_callback(prv_engage_callback, NULL);
+  // button, and reaching either of these takes a Quick Launch binding the user
+  // made on purpose or a launcher row they chose.
+  launcher_task_add_callback(engage, NULL);
 
   app_event_loop();
 
   app_free(window);
+}
+
+static void prv_main(void) {
+  prv_run(WINDOW_NAME("Lockdown"), prv_engage_callback);
+}
+
+static void prv_erase_main(void) {
+  prv_run(WINDOW_NAME("Lockdown + Erase"), prv_engage_erase_callback);
 }
 
 //! Static records rather than one mutable one. The registry calls this on every
@@ -167,6 +204,44 @@ const PebbleProcessMd *lockdown_app_get_app_info(void) {
   }
 
   return shell_prefs_get_lockdown_app_in_launcher() ? &s_listed.common : &s_unlisted.common;
+}
+
+//! Quick Launch or nowhere -- there is deliberately no listed record.
+//!
+//! The launcher is somewhere a user lands by accident, and this is the one
+//! manual trigger the PIN cannot call back. Reaching it should take a binding
+//! made on purpose, or the Settings row, which asks first. That also leaves
+//! Show in Launcher meaning exactly what it says, rather than one switch
+//! quietly governing two apps with very different consequences.
+//!
+//! Erase After gates it, so a user who has not opted into erasing is never
+//! offered a chord that erases. A binding that outlives the setting is handled
+//! at the other end, in prv_engage_erase_callback().
+const PebbleProcessMd *lockdown_erase_app_get_app_info(void) {
+  static const PebbleProcessMdSystem s_quick_launch = {
+    .common = {
+      .main_func = prv_erase_main,
+      .uuid = LOCKDOWN_ERASE_UUID,
+      .visibility = ProcessVisibilityQuickLaunch,
+    },
+    .name = i18n_noop("Lockdown + Erase"),
+    .icon_resource_id = RESOURCE_ID_GENERIC_WARNING_TINY,
+  };
+
+  static const PebbleProcessMdSystem s_unavailable = {
+    .common = {
+      .main_func = prv_erase_main,
+      .uuid = LOCKDOWN_ERASE_UUID,
+      .visibility = ProcessVisibilityHidden,
+    },
+    .name = i18n_noop("Lockdown + Erase"),
+    .icon_resource_id = RESOURCE_ID_GENERIC_WARNING_TINY,
+  };
+
+  if (!prv_lock_is_available() || !prv_erase_is_enabled()) {
+    return &s_unavailable.common;
+  }
+  return &s_quick_launch.common;
 }
 
 #endif  // CONFIG_SERVICE_SECURITY_LOCK

@@ -68,6 +68,7 @@ Source: `src/fw/apps/system/settings/security.c`.
 | Settings > Lockdown | Lock now, erase at `Erase After` |
 | Phone sends `LOCK` | Lock now, erase at `Erase After` |
 | Settings > Lockdown + Erase | Lock **and erase**, immediately |
+| Lockdown + Erase Quick Launch chord | Lock **and erase**, immediately |
 | Phone sends `LOCK_ERASE` | Lock **and erase**, immediately |
 | Unexpected disconnect while armed | Lock at `Lock After`, erase at `Erase After` |
 | Erase countdown elapses | Erase, stay locked |
@@ -80,10 +81,45 @@ Everything in the first group is a countdown the PIN cancels, and arms nothing
 at all when `Erase After` is `Never`. Everything below it is not a countdown,
 and `Never` does not reach it.
 
-The split matters because the triggers a user can hit *by accident* — a chord in
-a pocket, the wrong launcher row, a `LOCK` the phone derived from a platform
-callback — are all in the first group. A mistaken tap costs a PIN entry, not
-data.
+The split matters because the triggers a user can hit *by accident* — the wrong
+launcher row, a `LOCK` the phone derived from a platform callback — are all in
+the first group. A mistaken tap costs a PIN entry, not data.
+
+## The two Quick Launch apps
+
+`Lockdown` and `Lockdown + Erase` are separate system apps with separate UUIDs,
+so Quick Launch — which binds an install id resolved from the UUID — can bind
+them to different buttons.
+
+They differ in reach as well as in effect:
+
+| | Launcher | Quick Launch | Available when |
+|---|---|---|---|
+| `Lockdown` | `Show in Launcher` | always | the lock is usable |
+| `Lockdown + Erase` | **never** | when erasing is on | `Erase After` is not `Never` |
+
+`Lockdown + Erase` is deliberately never listed in the launcher. The launcher is
+somewhere a user lands by accident, and this is the one manual trigger the PIN
+cannot call back — reaching it should take a binding made on purpose, or the
+Settings row, which asks first. That also keeps `Show in Launcher` meaning what
+it says instead of one switch governing two apps with very different
+consequences.
+
+`Erase After` gates it because that setting is where opting into erasing is
+expressed: a user who has said "never erase on a timer" is not offered a chord
+that erases with no timer at all.
+
+A binding outlives the setting — nothing about moving `Erase After` to `Never`
+clears the install id Quick Launch stored — so the app stays reachable through a
+stale binding. In that case it **degrades to a plain `Lockdown`** rather than
+refusing: locking is never the wrong half to do, and a panic chord that did
+nothing would be the worst reading of it.
+
+Neither app asks for confirmation. A panic button that asks is a worse panic
+button, and reaching either takes a deliberate binding or a chosen launcher row.
+
+Source: `src/fw/apps/system/lockdown.c`, registered in
+`src/fw/shell/normal/system_app_registry_list.json`.
 
 ## The erase countdown
 
