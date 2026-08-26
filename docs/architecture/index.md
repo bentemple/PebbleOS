@@ -119,4 +119,5 @@ Longer design documents live as their own pages:
 ```{toctree}
 :maxdepth: 1
 activity/index.md
+security_lock.md
 ```
