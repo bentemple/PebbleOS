@@ -294,7 +294,17 @@ class Phone:
         time.sleep(0.8)
 
     def lock(self, reason=0x01):
+        """LOCK (0x02): lock now, leave the erase to the watch's Erase After."""
         self.send(struct.pack(">BB", 0x02, reason))
+
+    def lock_erase(self, reason=0x01):
+        """LOCK_ERASE (0x04): lock now and erase now, whatever Erase After says.
+
+        Same length as LOCK -- only the command byte differs -- so a watch that
+        drops one on a length check drops both, rather than silently taking the
+        less destructive path.
+        """
+        self.send(struct.pack(">BB", 0x04, reason))
 
     def close(self):
         self.sock.close()
@@ -522,8 +532,9 @@ def test_lock_and_unlock(console, pad):
           " | ".join(console.since(marker))[:160])
     # LOCK arms the erase rather than performing it, and the shipped Erase
     # After is Never -- so nothing is erased here at all. Asserting on
-    # "Shredding:" would be asserting the old behaviour.
-    check("the phone cannot erase outright", not console.saw(marker, "Shredding:"),
+    # "Shredding:" would be asserting the old behaviour. LOCK_ERASE is the
+    # command that does erase, and test_phone_lock_erase covers it.
+    check("plain LOCK does not erase", not console.saw(marker, "Shredding:"),
           " | ".join(console.since(marker))[:160])
 
     # The wipe runs on the launcher task and freezes the UI while it does,
@@ -558,6 +569,52 @@ def test_lock_and_unlock(console, pad):
     check("correct PIN unlocks", st["state"] == 1, f"state={st['state']}")
     check("unlock clears the countdown", st["shred_in"] == -1 and st["lock_in"] == -1,
           f"lock_in={st['lock_in']} shred_in={st['shred_in']}")
+    phone.close()
+
+
+def test_phone_lock_erase(console, pad):
+    """LOCK_ERASE locks and erases on the spot, with Erase After left at Never.
+
+    The counterpart to "plain LOCK does not erase". Erase After governs the
+    countdown, not this: a phone that asked for the content to go now is not
+    asking for a timer, so Never must not veto it.
+    """
+    if console.status()["pin_len"] == 0:
+        set_or_change_pin(console, pad, "1234")
+    phone = Phone()
+    phone.set_connected(True)
+    marker = console.mark()
+    phone.lock_erase()
+    time.sleep(8.0)
+
+    check("LOCK_ERASE reaches the endpoint", console.saw(marker, "LOCK_ERASE from phone"),
+          " | ".join(console.since(marker))[:160])
+    check("LOCK_ERASE erases despite Erase After being Never",
+          console.saw(marker, "Shredding:"),
+          " | ".join(console.since(marker))[:160])
+
+    started = time.time()
+    recovered = wait_until_responsive(console)
+    elapsed = time.time() - started
+    check(f"the wipe finishes inside {SHRED_BUDGET_S:.0f}s", recovered,
+          f"took {elapsed:.1f}s")
+    if not recovered:
+        print(f"    !! {diagnose_hang()}")
+        phone.close()
+        return
+
+    st = console.status()
+    check("LOCK_ERASE locks the watch too", st["state"] == 2, f"state={st['state']}")
+    # It erased already, so there is nothing left for a countdown to count.
+    check("LOCK_ERASE leaves no countdown", st["shred_in"] == -1,
+          f"shred_in={st['shred_in']}")
+
+    press("select")
+    time.sleep(1.0)
+    type_pin(pad, "1234")
+    time.sleep(2.0)
+    st = console.status()
+    check("the PIN still opens an erased watch", st["state"] == 1, f"state={st['state']}")
     phone.close()
 
 
@@ -669,6 +726,7 @@ TESTS = [
     ("phone_cannot_change_the_delays", test_phone_cannot_change_the_delays),
     ("disconnect_arms_countdown", test_disconnect_arms_countdown),
     ("lock_and_unlock", test_lock_and_unlock),
+    ("phone_lock_erase", test_phone_lock_erase),
     ("wrong_pin_counts_up", test_wrong_pin_counts_up),
     ("turning_it_off_clears_the_pin", test_turning_it_off_clears_the_pin),
 ]
