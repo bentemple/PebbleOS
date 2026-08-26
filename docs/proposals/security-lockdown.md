@@ -892,10 +892,10 @@ see the caveat at the end of this section.
 
 | | |
 |---|---|
-| `tools/security_lock_e2e.py` — real touch UI and protocol endpoint | 27/27 |
-| `tools/security_lock_stress.py` — a wipe colliding with notification traffic | 0 failures, ~70 valid trials |
+| `tools/security_lock_e2e.py` — real touch UI and protocol endpoint | 33/33 |
+| `tools/security_lock_stress.py` — a wipe colliding with notification traffic | 0 failures, 20 valid trials |
 | Unit suites for the feature and its neighbours | 33/35 |
-| Gadgetbridge Mainline unit suite | 1215 tests, 0 failures |
+| Gadgetbridge Mainline unit suite | 1216 tests, 0 failures |
 
 The two failing unit suites are `test_health_db` and `test_weather_db`,
 pre-existing DUMA stack smashes that link nothing this work touches.
@@ -905,7 +905,16 @@ repeated wipes cost one real erase and then nothing; `shred_pending` never
 sticks, so there are no half-wipes; a reboot while locked comes back locked
 with the wipe finished; the radio blackout engages on a wipe and restores the
 user's prior airplane setting on unlock; a reconnect does not cancel a lock;
-and a duress PIN at the disable prompt wipes before it disables.
+a duress PIN at the disable prompt wipes before it disables; a phone `LOCK`
+locks without erasing while `LOCK_ERASE` erases on the spot even with
+`Erase After` at `Never`, and the PIN still opens the watch afterwards.
+
+The `Lockdown + Erase` Quick Launch entry was checked by eye rather than by the
+suite, in both directions: it appears in the picker with `Erase After` set to 30
+minutes and is absent with it at `Never`. Worth knowing where to look — it sorts
+into the Quick-Launch-only group at the *top* of the picker
+(`prv_app_node_comparator()`, "Quick Launch only apps are first"), not
+alphabetically among the rest.
 
 ### Not built, deliberately
 
