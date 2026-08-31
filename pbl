@@ -983,9 +983,6 @@ def build_parser():
         sp = sub.add_parser(name, help=BUILD[name].__doc__ or name)
         sp.add_argument("args", nargs=argparse.REMAINDER)
 
-    # The unit tests still build with waf.
-    sub.add_parser("test", help="Build and run the unit tests")
-
     for name in WAF_PASSTHROUGH:
         sp = sub.add_parser(name, help="Forward to ./waf <args...>")
         sp.add_argument("args", nargs=argparse.REMAINDER)
