@@ -268,13 +268,63 @@ class Phone:
     SPP, BT_CONN = 1, 3
     ENDPOINT = 11300
 
+    #: Commands, from the watch's side of the endpoint.
+    STATUS_REQUEST, STATUS_RESPONSE = 0x03, 0x83
+
     def __init__(self):
         self.sock = socket.create_connection(("localhost", PEBBLE_PORT), timeout=5.0)
         self.sock.settimeout(20.0)
+        self.buf = b""
 
     def _qemu(self, protocol, data):
         self.sock.sendall(struct.pack(">HHH", self.HDR, protocol, len(data)) + data +
                           struct.pack(">H", self.FTR))
+
+    def _read_qemu_packet(self, deadline):
+        """Pull one framed QEMU packet, resyncing on the header signature.
+
+        Resyncing matters: the firmware puts log traffic on this channel too,
+        so the stream is not a clean run of frames.
+        """
+        while True:
+            idx = self.buf.find(struct.pack(">H", self.HDR))
+            if idx >= 0 and len(self.buf) >= idx + 6:
+                _, protocol, length = struct.unpack(">HHH", self.buf[idx:idx + 6])
+                total = idx + 6 + length + 2
+                if len(self.buf) >= total:
+                    data = self.buf[idx + 6:idx + 6 + length]
+                    self.buf = self.buf[total:]
+                    return protocol, data
+
+            if time.time() > deadline:
+                return None, None
+            try:
+                chunk = self.sock.recv(4096)
+            except socket.timeout:
+                return None, None
+            if not chunk:
+                return None, None
+            self.buf += chunk
+
+    def expect(self, command, timeout=15.0):
+        """Wait for one security-endpoint message with the given command."""
+        deadline = time.time() + timeout
+        while True:
+            protocol, data = self._read_qemu_packet(deadline)
+            if protocol is None:
+                return None
+            if protocol != self.SPP or len(data) < 5:
+                continue
+            length, endpoint = struct.unpack(">HH", data[:4])
+            if endpoint != self.ENDPOINT:
+                continue
+            payload = data[4:4 + length]
+            if payload and payload[0] == command:
+                return payload
+
+    def status_request(self):
+        """STATUS_REQUEST (0x03): ask for the state over the wire."""
+        self.send(struct.pack(">B", self.STATUS_REQUEST))
 
     def set_connected(self, connected):
         self._qemu(self.BT_CONN, struct.pack(">B", 1 if connected else 0))
@@ -572,6 +622,37 @@ def test_lock_and_unlock(console, pad):
     phone.close()
 
 
+def test_status_over_the_wire(console, pad):
+    """STATUS_REQUEST comes back as a STATUS_RESPONSE that agrees with the watch.
+
+    The only test that reads a reply off the endpoint rather than asserting on
+    a console line, so it is what covers the response actually being serialised
+    the way the phone expects. Cross-checked against `security status`, which
+    is the watch's own answer: a wire format that has drifted shows up as the
+    two disagreeing rather than as a frame nobody reads.
+    """
+    phone = Phone()
+    phone.set_connected(True)
+    phone.status_request()
+    reply = phone.expect(Phone.STATUS_RESPONSE)
+
+    if not check("STATUS_REQUEST is answered", reply is not None):
+        phone.close()
+        return
+
+    _, state, pin_configured, remaining = struct.unpack(">BBBI", reply[:7])
+    st = console.status()
+    check("the reported state is the watch's own", state == st["state"],
+          f"wire={state} console={st['state']}")
+    check("the PIN flag matches", pin_configured == (1 if st["pin_len"] else 0),
+          f"wire={pin_configured} pin_len={st['pin_len']}")
+    # -1 is the console's "no deadline"; the wire carries 0 for the same thing.
+    expected = max(st["lock_in"], 0)
+    check("the deadline matches", abs(int(remaining) - expected) <= 2,
+          f"wire={remaining}s console={st['lock_in']}s")
+    phone.close()
+
+
 def test_phone_lock_erase(console, pad):
     """LOCK_ERASE locks and erases on the spot, with Erase After left at Never.
 
@@ -721,6 +802,7 @@ def test_turning_it_off_clears_the_pin(console, pad):
 
 TESTS = [
     ("starts_clean", test_starts_clean),
+    ("status_over_the_wire", test_status_over_the_wire),
     ("set_pin", test_set_pin),
     ("mismatched_pin_is_rejected", test_mismatched_pin_is_rejected),
     ("phone_cannot_change_the_delays", test_phone_cannot_change_the_delays),
