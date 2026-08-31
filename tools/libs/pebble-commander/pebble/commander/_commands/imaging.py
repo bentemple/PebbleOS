@@ -12,7 +12,7 @@ from typing import ClassVar
 
 import pebble.pulse2.exceptions
 
-from .. import PebbleCommander
+from ..commander import PebbleCommander
 from ..util import stm32_crc
 
 
