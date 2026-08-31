@@ -203,12 +203,22 @@ status_t pfs_shred(const char *name) {
   return S_SUCCESS;
 }
 
+//! Erase regions the fake filesystem claims, and so the budget one sweep round
+//! gets. Small enough that a test can spend it.
+#define FAKE_ERASE_REGIONS 64
+//! Sectors a pass collects when the tests want one that is still finding work.
+#define FAKE_COLLECTED_PER_PASS 4
+
+//! What the next pass reports collecting. Zero means the filesystem is drained,
+//! which is the only thing that finishes a wipe.
+static int s_gc_collected;
+
 int pfs_gc_deleted_sectors(int max_sectors) {
-  return 0;
+  return s_gc_collected;
 }
 
 int pfs_get_erase_region_count(void) {
-  return 64;
+  return FAKE_ERASE_REGIONS;
 }
 
 void flash_region_erase_optimal_range_no_watchdog(uint32_t min_start, uint32_t max_start,
@@ -225,7 +235,10 @@ void bt_persistent_storage_set_unfaithful(bool unfaithful) {
 }
 
 typedef void (*SystemTaskEventCallback)(void *data);
+//! Run inline. A pass hops timer -> system task -> pass, and the tests have to
+//! be able to get the pass to actually run.
 bool system_task_add_callback(SystemTaskEventCallback cb, void *data) {
+  cb(data);
   return true;
 }
 
@@ -235,12 +248,37 @@ TimerID new_timer_create(void) {
   return 1;
 }
 
+//! The pass the sweep has scheduled and not yet run.
+static NewTimerCallback s_sweep_cb;
+static void *s_sweep_cb_data;
+
 bool new_timer_start(TimerID timer, uint32_t timeout_ms, NewTimerCallback cb, void *cb_data,
                      uint32_t flags) {
-  // The sweep is the only thing this module schedules on a timer. Counted, not
-  // run: the tests care whether the slow half was started at all.
+  // The sweep is the only thing this module schedules on a timer. Held rather
+  // than run, so a sweep cannot finish inside security_lock_shred() and hide
+  // the fact that it is the slow half; prv_run_sweep_pass() runs it by hand.
   s_trace.sweeps_started++;
+  s_sweep_cb = cb;
+  s_sweep_cb_data = cb_data;
   return true;
+}
+
+//! Run the pass the sweep is waiting on.
+static void prv_run_sweep_pass(void) {
+  cl_assert(s_sweep_cb != NULL);
+  NewTimerCallback cb = s_sweep_cb;
+  void *data = s_sweep_cb_data;
+  s_sweep_cb = NULL;
+  cb(data);
+}
+
+//! Let the sweep reach a drained filesystem. A wipe is only recorded as
+//! finished here, so a test asserting a completed wipe has to come through it.
+static void prv_drain_sweep(void) {
+  s_gc_collected = 0;
+  while (s_sweep_cb != NULL) {
+    prv_run_sweep_pass();
+  }
 }
 
 void event_put(void *event) {
@@ -256,7 +294,14 @@ void event_put(void *event) {
 #define SHRED_TARGET_COUNT 7
 
 void test_security_lock_shred__initialize(void) {
+  // A sweep the previous test left in flight is still marked running inside the
+  // module, which would stop this test's sweep from ever starting. Drained
+  // before the trace is cleared, so the passes it costs are not counted here.
+  prv_drain_sweep();
+
   memset(&s_trace, 0, sizeof(s_trace));
+  s_gc_collected = 0;
+  s_sweep_cb = NULL;
   s_during_quiesce = NULL;
   s_refused_dbs = 0;
   s_shred_pending = false;
@@ -292,7 +337,12 @@ void test_security_lock_shred__dirty_storage_runs_the_whole_wipe(void) {
   cl_assert(wiped & SECURITY_SHRED_NON_BLOBDB_BIT);
   cl_assert(wiped & ~SECURITY_SHRED_NON_BLOBDB_BIT);
 
+  // Still owed: the files are zeroed, but a file that was removed rather than
+  // zeroed leaves payload in deleted pages only the sweep reaches.
+  cl_assert(security_lock_is_shred_pending());
+
   // Nothing left half done, and the wipe consumed the reason it ran.
+  prv_drain_sweep();
   cl_assert(!security_lock_is_shred_pending());
   cl_assert(!security_lock_is_dirty_since_shred());
 }
@@ -332,6 +382,10 @@ void test_security_lock_shred__a_second_wipe_with_nothing_written_is_a_no_op(voi
   // Every target database, plus the raw-flash regions.
   cl_assert(first & ~SECURITY_SHRED_NON_BLOBDB_BIT);
 
+  // The first wipe has to actually finish, or the second one is only a no-op
+  // because the first is still owed.
+  prv_drain_sweep();
+
   memset(&s_trace, 0, sizeof(s_trace));
   const uint32_t second = security_lock_shred(SecurityShredReasonManualPanic);
 
@@ -352,6 +406,7 @@ void test_security_lock_shred__a_second_wipe_with_nothing_written_is_a_no_op(voi
 //! above measures "nothing was written" rather than "a second wipe never runs".
 void test_security_lock_shred__a_write_between_two_wipes_makes_the_second_real(void) {
   const uint32_t first = security_lock_shred(SecurityShredReasonManualPanic);
+  prv_drain_sweep();
 
   memset(&s_trace, 0, sizeof(s_trace));
   security_lock_mark_dirty_since_shred();
@@ -425,7 +480,85 @@ void test_security_lock_shred__pending_outranks_a_clean_flag(void) {
 
   cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
   cl_assert_equal_i(1, s_trace.sweeps_started);
+
+  prv_drain_sweep();
   cl_assert(!security_lock_is_shred_pending());
+}
+
+// The sweep is what finishes a wipe
+////////////////////////////////////
+//
+// Zeroing a file destroys the live copy, but "Clear Notifications" removes the
+// notification file rather than rewriting it, and pfs_shred() on a file that is
+// already gone zeroes nothing at all. That payload sits in deleted pages until
+// the sweep erases the sector, so the sweep -- not the file half -- is what
+// decides whether a wipe actually finished.
+
+//! shred_pending outlives the synchronous half. Clearing it there reported a
+//! complete wipe over notification text still readable on flash.
+void test_security_lock_shred__the_wipe_is_not_finished_until_the_sweep_drains(void) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+  cl_assert_equal_i(1, s_trace.sweeps_started);
+  cl_assert(security_lock_is_shred_pending());
+
+  prv_drain_sweep();
+  cl_assert(!security_lock_is_shred_pending());
+}
+
+//! A round that spends its budget starts another rather than giving up. Giving
+//! up also cleared the flag, which made the leftovers unreachable for good: the
+//! next wipe read prv_storage_is_clean() as true and skipped the sweep too.
+void test_security_lock_shred__a_sweep_out_of_budget_starts_another_round(void) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  // A filesystem that never drains: every pass reports work, so the round's
+  // budget runs out. Several rounds' worth, to show it keeps coming back.
+  s_gc_collected = FAKE_COLLECTED_PER_PASS;
+  const int passes_per_round = FAKE_ERASE_REGIONS / FAKE_COLLECTED_PER_PASS;
+  for (int i = 0; i < (passes_per_round * 3); ++i) {
+    prv_run_sweep_pass();
+  }
+
+  // Still going, and still owed.
+  cl_assert(s_sweep_cb != NULL);
+  cl_assert(security_lock_is_shred_pending());
+
+  // And it still finishes the moment the filesystem does drain.
+  prv_drain_sweep();
+  cl_assert(!security_lock_is_shred_pending());
+}
+
+//! A power cut mid-sweep leaves the flag set on flash, which is what makes the
+//! next boot redo the wipe instead of trusting a half-swept filesystem.
+void test_security_lock_shred__a_sweep_interrupted_by_a_reboot_is_owed_again(void) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert(security_lock_is_shred_pending());
+
+  // The reboot: nothing drained the sweep, and the persisted flag is all that
+  // survives. Everything else about the watch reads clean.
+  s_dirty = false;
+  memset(&s_trace, 0, sizeof(s_trace));
+
+  security_lock_handle_boot();
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+}
+
+//! The sweep outlives the wipe, so a second wipe can land while one is running.
+//! It has to feed the round already going rather than start a second chain
+//! against the one timer.
+void test_security_lock_shred__a_wipe_during_a_sweep_does_not_start_a_second(void) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert_equal_i(1, s_trace.sweeps_started);
+
+  security_lock_mark_dirty_since_shred();
+  security_lock_shred(SecurityShredReasonDuressPin);
+
+  // The second wipe ran in full, but did not start a sweep of its own.
+  cl_assert_equal_i(2 * SHRED_TARGET_COUNT, s_trace.files_shredded);
+  cl_assert_equal_i(1, s_trace.sweeps_started);
+  cl_assert(security_lock_is_shred_pending());
 }
 
 // Re-entrancy
@@ -557,6 +690,10 @@ void test_security_lock_shred__boot_wipe_with_something_to_destroy_owes_a_tail(v
   security_lock_finish_boot_shred();
   cl_assert_equal_i(1, s_trace.sweeps_started);
   cl_assert_equal_i(1, s_trace.unfaithful_marks);
+  // The tail started the sweep; it does not get to declare the wipe done.
+  cl_assert(security_lock_is_shred_pending());
+
+  prv_drain_sweep();
   cl_assert(!security_lock_is_shred_pending());
 }
 
@@ -587,6 +724,8 @@ void test_security_lock_shred__a_pending_wipe_still_runs_at_boot_when_clean(void
 
   security_lock_finish_boot_shred();
   cl_assert_equal_i(1, s_trace.sweeps_started);
+
+  prv_drain_sweep();
   cl_assert(!security_lock_is_shred_pending());
 }
 
@@ -653,6 +792,7 @@ void test_security_lock_shred__an_interrupted_wipe_finishes_even_when_off(void) 
   cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
 
   security_lock_finish_boot_shred();
+  prv_drain_sweep();
   cl_assert(!security_lock_is_shred_pending());
 }
 

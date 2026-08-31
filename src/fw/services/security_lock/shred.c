@@ -83,18 +83,30 @@ static void prv_erase_flash_region(uint32_t begin, uint32_t end, const char *wha
 #define SWEEP_SECTORS_PER_PASS 4
 #define SWEEP_PASS_GAP_MS 250
 
-//! Hard ceiling on a whole sweep: one pass over the filesystem, sized from the
+//! Backoff before a fresh round when one runs out of budget. Long on purpose: a
+//! round that spent a whole pass over the filesystem without draining it is
+//! either grinding through a very full one or chasing the reserved block
+//! around, and neither is helped by starting again immediately.
+#define SWEEP_RETRY_GAP_MS 60000
+
+//! Ceiling on a single round: one pass over the filesystem, sized from the
 //! filesystem itself rather than guessed.
 //!
-//! Collecting a sector relocates the live pages in it, which leaves fresh
-//! deleted pages behind, so "collected nothing this pass" is not a state the
-//! sweep reliably reaches -- without a ceiling it reschedules itself forever
-//! and starves the task it runs on. Every sector holding stale payload is
-//! reachable within one pass; anything beyond that is chasing its own tail.
+//! Collecting a sector can relocate the reserved GC block, which leaves fresh
+//! deleted pages behind, so "collected nothing this pass" is not a state a
+//! round reaches immediately -- without a ceiling it reschedules itself at the
+//! pass gap forever and starves the task it runs on.
+//!
+//! Hitting the ceiling ends the round, not the sweep. The only exit that
+//! records the wipe as finished is draining the filesystem; anything else
+//! leaves shred_pending set and comes back for another round.
 static int s_sweep_budget;
+//! A round is in flight. Guards against a wipe arriving mid-sweep starting a
+//! second chain against the one timer.
+static bool s_sweep_running;
 static TimerID s_sweep_timer = TIMER_INVALID_ID;
 
-static void prv_schedule_next_pass(void);
+static void prv_schedule_pass(uint32_t gap_ms);
 
 //! Erase stale sectors a few at a time, rescheduling until there are none left.
 //!
@@ -113,23 +125,34 @@ static void prv_sweep_pass(void *unused) {
   // sweep that is merely grinding is indistinguishable from one that is stuck.
   PBL_LOG_DBG("Shred sweep pass: %d sector(s), %d of budget left", collected, s_sweep_budget);
   if (collected == 0) {
-    PBL_LOG_DBG("Shred sweep finished, %d of budget left", s_sweep_budget);
+    // The filesystem is drained, so the stale copies really are gone. This is
+    // the one place a wipe may be recorded as finished: files that were removed
+    // rather than zeroed -- cleared notifications, above all -- are reachable
+    // only from here, so clearing the flag anywhere else would report a
+    // complete wipe over payload still sitting in deleted pages.
+    s_sweep_running = false;
+    PBL_LOG_INFO("Shred sweep finished");
+    security_lock_set_shred_pending(false);
     return;
   }
   if (s_sweep_budget <= 0) {
-    // A whole pass over the filesystem was not enough. Loud, because stopping
-    // here leaves stale copies on flash and nothing else will notice.
-    PBL_LOG_WRN("Shred sweep hit its ceiling with sectors still to collect");
+    // A whole pass over the filesystem was not enough. Take a fresh budget
+    // rather than stopping: stopping here used to leave stale copies on flash
+    // while the watch told the phone the wipe was done, and because the flag
+    // was already cleared no later wipe would revisit them either.
+    PBL_LOG_WRN("Shred sweep round hit its ceiling; starting another");
+    s_sweep_budget = pfs_get_erase_region_count();
+    prv_schedule_pass(SWEEP_RETRY_GAP_MS);
     return;
   }
-  prv_schedule_next_pass();
+  prv_schedule_pass(SWEEP_PASS_GAP_MS);
 }
 
 static void prv_sweep_timer_cb(void *unused) {
   system_task_add_callback(prv_sweep_pass, NULL);
 }
 
-static void prv_schedule_next_pass(void) {
+static void prv_schedule_pass(uint32_t gap_ms) {
   if (s_sweep_timer == TIMER_INVALID_ID) {
     s_sweep_timer = new_timer_create();
   }
@@ -139,12 +162,19 @@ static void prv_schedule_next_pass(void) {
     system_task_add_callback(prv_sweep_pass, NULL);
     return;
   }
-  new_timer_start(s_sweep_timer, SWEEP_PASS_GAP_MS, prv_sweep_timer_cb, NULL, 0 /* flags */);
+  new_timer_start(s_sweep_timer, gap_ms, prv_sweep_timer_cb, NULL, 0 /* flags */);
 }
 
 static void prv_start_sweep(void) {
+  // Fresh budget on every call: a wipe landing while a sweep is in flight has
+  // just created more deleted pages for it to reach.
   s_sweep_budget = pfs_get_erase_region_count();
-  prv_schedule_next_pass();
+  if (s_sweep_running) {
+    // The chain already running picks the new budget up on its next pass.
+    return;
+  }
+  s_sweep_running = true;
+  prv_schedule_pass(SWEEP_PASS_GAP_MS);
 }
 
 //! True when the filesystem half of a wipe would destroy nothing.
@@ -329,9 +359,13 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
   }
 #endif
 
-  if (!clean && finish) {
-    security_lock_set_shred_pending(false);
-  }
+  // shred_pending is deliberately still set here. It is cleared by the sweep,
+  // and only once the sweep has drained the filesystem: everything above
+  // destroys live copies, but a file that was removed rather than zeroed leaves
+  // its payload in deleted pages that only the sweep reaches. Clearing it here
+  // would call the wipe done while that payload was still readable, and would
+  // also stop any later wipe from retrying -- prv_storage_is_clean() would say
+  // there was nothing left to do.
 
   task_watchdog_mask_set(task);
 
@@ -525,7 +559,7 @@ void security_lock_finish_boot_shred(void) {
   security_lock_endpoint_report_resync_needed(s_boot_shred_reason, s_boot_shred_wiped);
 #endif
 
-  // The data is gone; what is left is cleanup, which does not need resuming on
-  // a later boot.
-  security_lock_set_shred_pending(false);
+  // shred_pending stays set until the sweep above reports the filesystem
+  // drained. A reboot before that happens finds the flag and shreds again,
+  // which is what makes an interrupted sweep resume rather than be forgotten.
 }
