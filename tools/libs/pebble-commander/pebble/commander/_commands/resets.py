@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2024 Google LLC
 # SPDX-License-Identifier: Apache-2.0
 
-from .. import PebbleCommander, exceptions, parsers
+from .. import exceptions, parsers
+from ..commander import PebbleCommander
 
 
 @PebbleCommander.command()

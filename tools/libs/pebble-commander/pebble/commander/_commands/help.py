@@ -3,7 +3,8 @@
 
 import inspect
 
-from .. import PebbleCommander, exceptions
+from .. import exceptions
+from ..commander import PebbleCommander
 
 
 def trim_docstring(var):

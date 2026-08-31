@@ -3,7 +3,8 @@
 
 import time
 
-from .. import PebbleCommander, exceptions
+from .. import exceptions
+from ..commander import PebbleCommander
 
 # Injected input is single-flight on the watch: a click that arrives while an
 # earlier sequence is still draining (or a remote controller holds a button)
