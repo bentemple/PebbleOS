@@ -135,9 +135,9 @@ static bool cst816_enter_bootmode(void) {
   uint8_t retry_cnt = 10;
   while (retry_cnt--) {
     uint8_t cmd = CST816_BOOT_MODE_CMD;
-    bool rv = prv_write_data(CST816_BOOT_MODE_REG, &cmd, 1, 0);
+    prv_write_data(CST816_BOOT_MODE_REG, &cmd, 1, 0);
     psleep(CST816_REG_WR_DELAY_TIME);
-    rv &= prv_read_data(CST816_BOOT_FLAG_REG, &cmd, 1, 0);
+    prv_read_data(CST816_BOOT_FLAG_REG, &cmd, 1, 0);
     psleep(CST816_REG_WR_DELAY_TIME);
 
     if (cmd == CST816_BOOT_FLAG_VAL) {
