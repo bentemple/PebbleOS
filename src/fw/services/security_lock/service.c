@@ -81,8 +81,10 @@ typedef struct PACKED {
   bool airplane_was_on;
 } SecurityLockRuntime;
 
+#if defined(CONFIG_RNG_STUB)
 //! Keeps two salts derived in the same tick from coming out identical.
 static uint32_t s_salt_counter;
+#endif
 
 static PebbleMutex *s_mutex;
 static bool s_initialized;
