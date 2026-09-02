@@ -93,6 +93,13 @@ static bool s_initialized;
 //! touch flash. Flash remains authoritative; the cache is refreshed on write.
 static SecurityLockRuntime s_runtime_cache;
 
+//! The time high-water mark as last written to flash, which the cache above runs
+//! ahead of between writes. See security_lock_note_time(). Zero means "not known
+//! yet", and is seeded from the cache on first use rather than at init, so a
+//! record loaded from flash is what seeds it. RAM only: on the next boot the
+//! value on flash is the truth again.
+static time_t s_time_high_water_persisted;
+
 //! Databases whose inbound writes were refused while the watch was shut.
 //!
 //! RAM only, unlike the rest of the record: a reboot while locked wipes, and
@@ -154,13 +161,24 @@ static status_t prv_read_config(SecurityLockConfig *cfg) {
 
 //! Flush the cache to flash. The caller must hold the mutex.
 static status_t prv_flush_runtime(void) {
-  return prv_write(RT_KEY, &s_runtime_cache, sizeof(s_runtime_cache));
+  const status_t rv = prv_write(RT_KEY, &s_runtime_cache, sizeof(s_runtime_cache));
+  if (rv == S_SUCCESS) {
+    // Every flush writes the whole record, so whatever the reason for this one,
+    // the high-water mark on flash is now the cached one. Tracked here rather
+    // than at the one call site that throttles on it, so an unrelated write
+    // counts too and note_time() does not ask for a second one it does not need.
+    s_time_high_water_persisted = s_runtime_cache.time_high_water;
+  }
+  return rv;
 }
 
 void security_lock_init(void) {
   PBL_LOG_INFO("SECBOOT init enter");
   PBL_ASSERTN(!s_initialized);
   s_mutex = mutex_create();
+  // Re-seeded from whatever the read below loads, rather than carried over from
+  // a previous init in the same process.
+  s_time_high_water_persisted = 0;
 
   mutex_lock(s_mutex);
   SecurityLockRuntime rt;
@@ -876,11 +894,11 @@ status_t security_lock_set_deadlines(time_t lock_deadline, time_t shred_deadline
     return E_INVALID_OPERATION;
   }
   mutex_lock(s_mutex);
-  s_runtime_cache.lock_deadline = lock_deadline;
-  s_runtime_cache.shred_deadline = shred_deadline;
   // "Armed" has one spelling. A source that outlived its deadlines would
   // describe a countdown that is not there, and every reader asking "is this
   // manual" before asking "is anything armed" would believe it.
+  s_runtime_cache.lock_deadline = lock_deadline;
+  s_runtime_cache.shred_deadline = shred_deadline;
   s_runtime_cache.countdown_source =
       ((lock_deadline == 0) && (shred_deadline == 0)) ? SecurityCountdownNone : (uint8_t)source;
   status_t rv = prv_flush_runtime();
@@ -916,8 +934,31 @@ bool security_lock_note_time(time_t now) {
     rolled_back = true;
   }
   if (now > s_runtime_cache.time_high_water) {
+    // Seeded from flash the first time through: at that point the cache still
+    // holds what init() loaded, which is by definition what is on flash.
+    if (s_time_high_water_persisted == 0) {
+      s_time_high_water_persisted = s_runtime_cache.time_high_water;
+    }
     s_runtime_cache.time_high_water = now;
-    prv_flush_runtime();
+
+    // Persisted coarsely, tracked exactly. This is called once a minute for the
+    // whole life of an armed countdown, and on a running clock the mark always
+    // advances, so flushing on every advance meant a settings_file write every
+    // 60 seconds -- and a compaction, with its sector erase, every half hour or
+    // so. The rollback test already tolerates SECURITY_LOCK_TIME_ROLLBACK_SLACK_S
+    // of slack, so a mark trailing the clock by less than that is worth exactly
+    // as much as an exact one and costs no flash.
+    //
+    // Compared against what was last written rather than against the cache: the
+    // cache advances on every call, so comparing with it would never reach the
+    // threshold and nothing would ever be persisted at all.
+    //
+    // A power cut loses at most the trailing part, leaving a mark that is
+    // slightly stale -- the safe direction, since a stale mark cannot invent a
+    // rollback that did not happen.
+    if ((now - s_time_high_water_persisted) >= (time_t)SECURITY_LOCK_TIME_ROLLBACK_SLACK_S) {
+      prv_flush_runtime();
+    }
   }
   mutex_unlock(s_mutex);
   return rolled_back;
