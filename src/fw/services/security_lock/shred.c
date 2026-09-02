@@ -97,16 +97,50 @@ static void prv_erase_flash_region(uint32_t begin, uint32_t end, const char *wha
 //! round reaches immediately -- without a ceiling it reschedules itself at the
 //! pass gap forever and starves the task it runs on.
 //!
-//! Hitting the ceiling ends the round, not the sweep. The only exit that
-//! records the wipe as finished is draining the filesystem; anything else
-//! leaves shred_pending set and comes back for another round.
+//! Hitting the ceiling ends the round, not the sweep.
 static int s_sweep_budget;
+
+//! Ceiling on the whole sweep, across every round, as a multiple of the
+//! filesystem size.
+//!
+//! Draining the filesystem is the exit this wants, but on a running watch it is
+//! not reliably reachable: the sweep's own GC block relocation leaves deleted
+//! pages behind, and so does ordinary operation -- expiring notifications, pin
+//! updates, every settings_file write. Rounds then chase their own tail, and
+//! because shred_pending is cleared nowhere else it stays set, which makes
+//! security_lock_handle_boot() redo the entire wipe on every subsequent boot.
+//! The observed cost of that was continuous 64K sector erasing and a
+//! notification store wiped at each boot.
+//!
+//! So the sweep is bounded by work done instead. Two filesystems' worth of
+//! sector erases is far more than the stale copies of one wipe can occupy;
+//! anything still being collected past that is churn generated after the wipe,
+//! which is not what the wipe is responsible for destroying. Reaching the cap
+//! records the wipe as finished, because the alternative -- never finishing --
+//! leaves the flag set forever and re-wipes at every boot, which destroys the
+//! same data again while protecting nothing extra.
+#define SWEEP_TOTAL_BUDGET_MULTIPLE 2
+//! Sectors left before the whole sweep gives up. Spans rounds, unlike
+//! s_sweep_budget.
+static int s_sweep_total_budget;
 //! A round is in flight. Guards against a wipe arriving mid-sweep starting a
 //! second chain against the one timer.
 static bool s_sweep_running;
 static TimerID s_sweep_timer = TIMER_INVALID_ID;
 
 static void prv_schedule_pass(uint32_t gap_ms);
+
+//! End the sweep and record the wipe as complete.
+//!
+//! The only place shred_pending is cleared. Clearing it is what stops the next
+//! boot redoing the whole wipe, so every exit from the sweep has to come
+//! through here -- an exit that just stops rescheduling would leave the watch
+//! wiping itself at every boot for good.
+static void prv_finish_sweep(const char *why) {
+  s_sweep_running = false;
+  PBL_LOG_INFO("Shred sweep finished (%s)", why);
+  security_lock_set_shred_pending(false);
+}
 
 //! Erase stale sectors a few at a time, rescheduling until there are none left.
 //!
@@ -121,18 +155,23 @@ static void prv_sweep_pass(void *unused) {
   task_watchdog_mask_set(task);
 
   s_sweep_budget -= collected;
+  s_sweep_total_budget -= collected;
   // Logged every pass: this is the slow part of the wipe, and without it a
   // sweep that is merely grinding is indistinguishable from one that is stuck.
   PBL_LOG_DBG("Shred sweep pass: %d sector(s), %d of budget left", collected, s_sweep_budget);
   if (collected == 0) {
-    // The filesystem is drained, so the stale copies really are gone. This is
-    // the one place a wipe may be recorded as finished: files that were removed
-    // rather than zeroed -- cleared notifications, above all -- are reachable
-    // only from here, so clearing the flag anywhere else would report a
-    // complete wipe over payload still sitting in deleted pages.
-    s_sweep_running = false;
-    PBL_LOG_INFO("Shred sweep finished");
-    security_lock_set_shred_pending(false);
+    // The filesystem is drained, so the stale copies really are gone. Files that
+    // were removed rather than zeroed -- cleared notifications, above all -- are
+    // reachable only from here, which is why the sweep exists at all.
+    prv_finish_sweep("drained");
+    return;
+  }
+  if (s_sweep_total_budget <= 0) {
+    // See SWEEP_TOTAL_BUDGET_MULTIPLE. Loud, because a sweep that needed this
+    // much work either met a pathologically full filesystem or is chasing pages
+    // being created behind it, and both are worth knowing about.
+    PBL_LOG_WRN("Shred sweep hit its overall ceiling; recording the wipe as done");
+    prv_finish_sweep("ceiling");
     return;
   }
   if (s_sweep_budget <= 0) {
@@ -169,6 +208,10 @@ static void prv_start_sweep(void) {
   // Fresh budget on every call: a wipe landing while a sweep is in flight has
   // just created more deleted pages for it to reach.
   s_sweep_budget = pfs_get_erase_region_count();
+  // Refilled here too, for the same reason -- a fresh wipe is entitled to a
+  // fresh allowance -- but only ever from a wipe, never from a round rolling
+  // over. That is what keeps the overall ceiling a ceiling.
+  s_sweep_total_budget = pfs_get_erase_region_count() * SWEEP_TOTAL_BUDGET_MULTIPLE;
   if (s_sweep_running) {
     // The chain already running picks the new budget up on its next pass.
     return;

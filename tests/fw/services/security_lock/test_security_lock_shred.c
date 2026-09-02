@@ -514,10 +514,11 @@ void test_security_lock_shred__a_sweep_out_of_budget_starts_another_round(void) 
   security_lock_shred(SecurityShredReasonManualPanic);
 
   // A filesystem that never drains: every pass reports work, so the round's
-  // budget runs out. Several rounds' worth, to show it keeps coming back.
+  // budget runs out and a second round begins. One round's worth of passes,
+  // which is inside the overall ceiling.
   s_gc_collected = FAKE_COLLECTED_PER_PASS;
   const int passes_per_round = FAKE_ERASE_REGIONS / FAKE_COLLECTED_PER_PASS;
-  for (int i = 0; i < (passes_per_round * 3); ++i) {
+  for (int i = 0; i < passes_per_round; ++i) {
     prv_run_sweep_pass();
   }
 
@@ -527,6 +528,34 @@ void test_security_lock_shred__a_sweep_out_of_budget_starts_another_round(void) 
 
   // And it still finishes the moment the filesystem does drain.
   prv_drain_sweep();
+  cl_assert(!security_lock_is_shred_pending());
+}
+
+//! A filesystem that never drains stops the sweep anyway, once it has done more
+//! work than one wipe's leftovers could possibly amount to.
+//!
+//! Rounds used to roll over without limit. On a running watch the drain never
+//! arrives -- the sweep's own GC block relocation leaves deleted pages behind,
+//! and so does every expiring notification and settings_file write -- so the
+//! sweep ground through 64K sector erases indefinitely. Worse, shred_pending is
+//! cleared nowhere else, so it stayed set and security_lock_handle_boot() redid
+//! the whole wipe on every subsequent boot, taking the notification store with
+//! it each time.
+void test_security_lock_shred__a_sweep_that_never_drains_gives_up(void) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  s_gc_collected = FAKE_COLLECTED_PER_PASS;
+  // Enough passes to exhaust the overall ceiling several times over, had it not
+  // stopped. The loop ends early because prv_run_sweep_pass() asserts there is
+  // a callback to run.
+  const int passes_per_round = FAKE_ERASE_REGIONS / FAKE_COLLECTED_PER_PASS;
+  for (int i = 0; (i < (passes_per_round * 8)) && (s_sweep_cb != NULL); ++i) {
+    prv_run_sweep_pass();
+  }
+
+  // Stopped rescheduling, and recorded the wipe as done so the next boot does
+  // not redo it.
+  cl_assert(s_sweep_cb == NULL);
   cl_assert(!security_lock_is_shred_pending());
 }
 
