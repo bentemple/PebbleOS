@@ -897,10 +897,24 @@ status_t security_lock_set_deadlines(time_t lock_deadline, time_t shred_deadline
   // "Armed" has one spelling. A source that outlived its deadlines would
   // describe a countdown that is not there, and every reader asking "is this
   // manual" before asking "is anything armed" would believe it.
+  const uint8_t source_to_store =
+      ((lock_deadline == 0) && (shred_deadline == 0)) ? SecurityCountdownNone : (uint8_t)source;
+
+  // Writing only on a change, because the common caller is not a change. Every
+  // reconnect clears the deadlines whether or not any were armed, and that
+  // reaches here before the master switch is consulted -- so an unconditional
+  // flush put a settings_file write, and eventually a compaction, on every
+  // Bluetooth session open even with the feature switched off.
+  if ((s_runtime_cache.lock_deadline == lock_deadline) &&
+      (s_runtime_cache.shred_deadline == shred_deadline) &&
+      (s_runtime_cache.countdown_source == source_to_store)) {
+    mutex_unlock(s_mutex);
+    return S_SUCCESS;
+  }
+
   s_runtime_cache.lock_deadline = lock_deadline;
   s_runtime_cache.shred_deadline = shred_deadline;
-  s_runtime_cache.countdown_source =
-      ((lock_deadline == 0) && (shred_deadline == 0)) ? SecurityCountdownNone : (uint8_t)source;
+  s_runtime_cache.countdown_source = source_to_store;
   status_t rv = prv_flush_runtime();
   mutex_unlock(s_mutex);
   return rv;
