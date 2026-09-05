@@ -19,4 +19,9 @@ build:
 #       - name: example
 #         class: Example
 #         help: what it does
-commands: []
+commands:
+  - file: tools/pbl_commands/harness.py
+    commands:
+      - name: harness
+        class: Harness
+        help: Keep one console connection to the emulated watch open
