@@ -188,22 +188,36 @@ def cmd_endpoints_table(args):
             return "PebbleProtocolAccessAny"
         raise ValueError(f"Unknown value: {access_str}")
 
+    def get_ifdefs(entry):
+        # Optional seventh column, same shape as the app registry's "ifdefs":
+        # a list of Kconfig symbols that all have to be set.
+        return entry[6] if len(entry) > 6 else []
+
+    def guard(ifdefs):
+        return " && ".join(f"defined({d})" for d in ifdefs)
+
     DEFAULT_RECV_IMPL = "g_default_kernel_receiver_implementation"
     DEFAULT_RECV_OPT = "g_default_kernel_receiver_opt_bg"
     recv_imp_set = {DEFAULT_RECV_IMPL}
     recv_opt_set = {DEFAULT_RECV_OPT}
 
     out = ["// GENERATED -- DO NOT EDIT\n\n", '#include "kernel/pebble_tasks.h"\n\n']
-    for _eid, _eid_str, _access, cb_str, recv_imp, recv_opt in endpoints:
+    for entry in endpoints:
+        _eid, _eid_str, _access, cb_str, recv_imp, recv_opt = entry[:6]
         if recv_imp:
             recv_imp_set.add(recv_imp)
         if recv_opt:
             recv_opt_set.add(recv_opt)
         if cb_str:
+            ifdefs = get_ifdefs(entry)
+            if ifdefs:
+                out.append(f"#if {guard(ifdefs)}\n")
             out.append(
                 f"extern void {cb_str}(CommSession *session, "
                 "const uint8_t* data, size_t length);\n"
             )
+            if ifdefs:
+                out.append("#endif\n")
 
     out.append("\n\n")
     out.extend(f"extern ReceiverImplementation {r};\n" for r in recv_imp_set)
@@ -211,7 +225,8 @@ def cmd_endpoints_table(args):
     out.extend(f"extern const PebbleTask {r};\n" for r in recv_opt_set)
     out.append("\n\nstatic const PebbleProtocolEndpoint s_protocol_endpoints[] = {\n")
 
-    for eid, eid_str, access_str, cb_str, recv_imp, recv_opt in endpoints:
+    for entry in endpoints:
+        eid, eid_str, access_str, cb_str, recv_imp, recv_opt = entry[:6]
         if int(eid_str, base=16) != eid:
             raise ValueError(f"Endpoint IDs need to match: {eid} vs {eid_str}")
         if not cb_str:
@@ -221,10 +236,15 @@ def cmd_endpoints_table(args):
             if not recv_opt:
                 recv_opt = DEFAULT_RECV_OPT
         recv_opt = "&" + recv_opt if recv_opt else "NULL"
+        ifdefs = get_ifdefs(entry)
+        if ifdefs:
+            out.append(f"#if {guard(ifdefs)}\n")
         out.append(
             f"  {{ {eid}, {cb_str}, {get_access_enum(access_str)}, "
             f"&{recv_imp}, {recv_opt} }},\n"
         )
+        if ifdefs:
+            out.append("#endif\n")
     out.append("};\n\n")
     write_if_changed(args.output, "".join(out))
 
