@@ -12,6 +12,12 @@ pbl_clar_test(test_app_message
     src/fw/util/dict.c
 )
 
+pbl_clar_test(test_security_shred_service
+  SOURCES
+    src/fw/applib/security_shred_service.c
+  OVERRIDES dummy_board
+)
+
 pbl_clar_test(test_app_inbox
   SOURCES
     src/fw/applib/app_inbox.c

@@ -32,6 +32,8 @@ typedef struct {
 
   BacklightServiceState backlight_service_state;
 
+  SecurityShredServiceState security_shred_service_state;
+
   TickTimerServiceState tick_timer_service_state;
 
   ConnectionServiceState connection_service_state;
@@ -56,6 +58,8 @@ void worker_state_init(void) {
   battery_state_service_state_init(worker_state_get_battery_state_service_state());
 
   backlight_service_state_init(worker_state_get_backlight_service_state());
+
+  security_shred_service_state_init(worker_state_get_security_shred_service_state());
 
   connection_service_state_init(worker_state_get_connection_service_state());
 
@@ -111,6 +115,10 @@ BatteryStateServiceState *worker_state_get_battery_state_service_state(void) {
 
 BacklightServiceState *worker_state_get_backlight_service_state(void) {
   return &s_worker_state_ptr->backlight_service_state;
+}
+
+SecurityShredServiceState *worker_state_get_security_shred_service_state(void) {
+  return &s_worker_state_ptr->security_shred_service_state;
 }
 
 TickTimerServiceState *worker_state_get_tick_timer_service_state(void) {
