@@ -25,6 +25,10 @@
 #include "system/passert.h"
 #include "util/pstring.h"
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+#include "pbl/services/security_lock.h"
+#endif
+
 PBL_LOG_MODULE_DECLARE(service_notifications, CONFIG_SERVICE_NOTIFICATIONS_LOG_LEVEL);
 
 static const Uuid uuid_reminders_data_source = UUID_REMINDERS_DATA_SOURCE;
@@ -288,6 +292,19 @@ void ancs_notifications_handle_message(uint32_t uid, ANCSProperty properties,
                                        ANCSAttribute **notif_attributes,
                                        ANCSAttribute **app_attributes) {
   PBL_ASSERTN(notif_attributes && app_attributes);
+
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  // Bail before ancs_filtering_record_app() persists app metadata, before the
+  // update path reaches notification_storage_store(), and before an incoming
+  // call puts the caller ID on a locked screen. The in-progress check is not
+  // redundant with the lock state: the duress and clock-rollback wipes both
+  // run unlocked. Logged at DBG: a locked watch with a chatty phone reaches
+  // this once per message, so this must not be a default-level line.
+  if (security_lock_is_locked() || security_lock_is_shredding()) {
+    PBL_LOG_DBG("Locked or shredding, ANCS notification dropped");
+    return;
+  }
+#endif
 
   const ANCSAttribute *app_id = notif_attributes[FetchedNotifAttributeIndexAppID];
   if (!app_id || app_id->length == 0) {
