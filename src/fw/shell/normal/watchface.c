@@ -94,15 +94,18 @@ static void prv_combo_back_timer_callback(void *data) {
   }
 
   AppInstallId app_id = prv_combo_get_app(s_active_combo_buttons);
+  if (app_id == INSTALL_ID_INVALID) {
+    // Enabled but unbound: fall back to the setup app, the same way a held
+    // single button does, rather than silently doing nothing.
+    app_id = app_install_get_id_for_uuid(&quick_launch_setup_get_app_info()->uuid);
+  }
   const ButtonId source_button =
       (s_active_combo_buttons == COMBO_BACK_UP_BUTTONS) ? BUTTON_ID_BACK : BUTTON_ID_UP;
   s_active_combo_buttons = BIT_CLEAR;
-  if (app_id != INSTALL_ID_INVALID) {
-    // Reset all button states before launching app to prevent state corruption.
-    s_buttons_pressed = BIT_CLEAR;
-    prv_launch_quick_launch_app(app_id, source_button, APP_LAUNCH_QUICK_LAUNCH,
-                                APP_QUICK_LAUNCH_ACTION_COMBO);
-  }
+  // Reset all button states before launching app to prevent state corruption.
+  s_buttons_pressed = BIT_CLEAR;
+  prv_launch_quick_launch_app(app_id, source_button, APP_LAUNCH_QUICK_LAUNCH,
+                              APP_QUICK_LAUNCH_ACTION_COMBO);
 }
 
 static void prv_check_combo_back_hold(void) {
