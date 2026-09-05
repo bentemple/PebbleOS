@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Core Devices LLC
+# SPDX-License-Identifier: Apache-2.0
+
+config SERVICE_SECURITY_LOCK
+    bool "Security lock"
+    depends on SERVICE_TOUCH
+    default y
+    help
+      PIN lock and data shred triggered by phone lockdown or watch-side
+      tamper signals. See docs/architecture/security_lock.md.
+
+      Requires touch: the lock screen is an on-screen PIN pad, so this is
+      only available on the newer watches (emery, gabbro).
+
+if SERVICE_SECURITY_LOCK
+
+module = SERVICE_SECURITY_LOCK
+module-str = Security lock
+source "subsys/logging/Kconfig.template.log_level"
+
+endif
