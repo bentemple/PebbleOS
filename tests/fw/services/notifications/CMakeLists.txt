@@ -20,6 +20,7 @@ pbl_clar_test(test_notification_storage
     src/fw/util/legacy_checksum.c
     tests/fakes/fake_rtc.c
     tests/fakes/fake_spi_flash.c
+  DEFINES CONFIG_SERVICE_SECURITY_LOCK=1
   OVERRIDES dummy_board
 )
 
@@ -39,6 +40,20 @@ pbl_clar_test(test_ancs_notifications
     src/fw/util/pstring.c
     src/fw/util/time/time.c
     tests/fakes/fake_events.c
+  DEFINES CONFIG_SERVICE_SECURITY_LOCK=1
+)
+
+pbl_clar_test(test_notifications
+  SOURCES
+    src/fw/services/notifications/notifications.c
+    src/fw/services/timeline/attribute.c
+    src/fw/services/timeline/attributes_actions.c
+    src/fw/services/timeline/attribute_group.c
+    src/fw/services/timeline/item.c
+    src/fw/util/time/time.c
+    tests/fakes/fake_events.c
+    tests/fakes/fake_rtc.c
+  DEFINES CONFIG_SERVICE_SECURITY_LOCK=1
 )
 
 pbl_clar_test(test_ancs_notifications_util
