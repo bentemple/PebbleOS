@@ -852,6 +852,39 @@ void test_window_stack__modal_properties_enable_disable(void) {
 }
 
 // Description:
+// The floor and the setter are held by different subsystems -- the security
+// lock holds one for as long as the watch is shut, the battery FSM raises and
+// drops the other around low power -- so neither may cancel the other. The
+// effective bound is the higher of the two, and only the holder can release it.
+void test_window_stack__modal_min_priority_floor_outlives_the_setter(void) {
+  modal_manager_set_min_priority(ModalPriorityMin);
+  modal_manager_set_min_priority_floor(ModalPriorityMin);
+
+  Window *below = window_create();
+  modal_window_push(below, ModalPriorityGeneric, false);
+  modal_manager_event_loop_upkeep();
+  cl_assert_equal_p(modal_manager_get_top_window(), below);
+
+  modal_manager_set_min_priority_floor(ModalPriorityAlarm);
+  modal_manager_event_loop_upkeep();
+  cl_assert_equal_p(modal_manager_get_top_window(), NULL);
+
+  // What the battery FSM does on leaving low power. The floor stands.
+  modal_manager_set_min_priority(ModalPriorityMin);
+  modal_manager_event_loop_upkeep();
+  cl_assert_equal_p(modal_manager_get_top_window(), NULL);
+
+  // Released by its holder, and only then.
+  modal_manager_set_min_priority_floor(ModalPriorityMin);
+  modal_manager_event_loop_upkeep();
+  cl_assert_equal_p(modal_manager_get_top_window(), below);
+
+  window_stack_remove(below, false);
+  modal_manager_event_loop_upkeep();
+  window_destroy(below);
+}
+
+// Description:
 // This test ensures that when we push a window onto the modal window stack, then
 // we push another window onto the modal window stack at a lower priority, then
 // pushing the first at a lower priority than the second will bring the second onto

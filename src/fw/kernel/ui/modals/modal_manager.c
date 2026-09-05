@@ -54,6 +54,10 @@ static TouchNavState s_modal_touch_nav_state;
 
 static ModalPriority s_modal_min_priority = ModalPriorityMin;
 
+// Held independently of the above, so a subsystem that raises the bound for the
+// length of a lockout does not have it dropped by an unrelated one releasing.
+static ModalPriority s_modal_min_priority_floor = ModalPriorityMin;
+
 // Used to help us keep track various modal properties in aggregate, such as existence.
 // Initialize the default to being equivalent to having no modals.
 static ModalProperty s_current_modal_properties = ModalPropertyDefault;
@@ -63,9 +67,13 @@ static ModalPriority s_last_highest_modal_priority = ModalPriorityInvalid;
 
 // Private API
 ////////////////////
+static ModalPriority prv_effective_min_priority(void) {
+  return MAX(s_modal_min_priority, s_modal_min_priority_floor);
+}
+
 static bool prv_has_visible_window(ModalContext *context, void *unused) {
   const bool empty = (context->window_stack.list_head == NULL);
-  const bool filtered_out = (context < &s_modal_window_stacks[s_modal_min_priority]);
+  const bool filtered_out = (context < &s_modal_window_stacks[prv_effective_min_priority()]);
   return (!empty && !filtered_out);
 }
 
@@ -226,8 +234,8 @@ void modal_manager_init(void) {
 #endif
 }
 
-void modal_manager_set_min_priority(ModalPriority priority) {
-  s_modal_min_priority = priority;
+static void prv_apply_min_priority(void) {
+  const ModalPriority priority = prv_effective_min_priority();
   for (int i = 0; i < priority; i++) {
     window_stack_lock_push(&s_modal_window_stacks[i].window_stack);
   }
@@ -236,8 +244,18 @@ void modal_manager_set_min_priority(ModalPriority priority) {
   }
 }
 
+void modal_manager_set_min_priority(ModalPriority priority) {
+  s_modal_min_priority = priority;
+  prv_apply_min_priority();
+}
+
+void modal_manager_set_min_priority_floor(ModalPriority priority) {
+  s_modal_min_priority_floor = priority;
+  prv_apply_min_priority();
+}
+
 bool modal_manager_get_enabled(void) {
-  return s_modal_min_priority < ModalPriorityMax;
+  return prv_effective_min_priority() < ModalPriorityMax;
 }
 
 ClickManager *modal_manager_get_click_manager(void) {
@@ -685,6 +703,7 @@ void modal_manager_reset(void) {
   }
 
   s_modal_min_priority = ModalPriorityDiscreet;
+  s_modal_min_priority_floor = ModalPriorityMin;
 
   modal_manager_init();
 }
