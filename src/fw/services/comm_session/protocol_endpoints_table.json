@@ -16,7 +16,9 @@
     "The sixth column is the context for that will be passed along when the ",
     "ReceiverImplementation is called. This provides a way to tweak the ",
     "behavior of a receiver slightly on a per-endpoint basis. See notes ",
-    "in default_kernel_receiver.c on the default options."
+    "in default_kernel_receiver.c on the default options. ",
+    "An optional seventh column lists Kconfig symbols, all of which must be ",
+    "set for the endpoint to be compiled in."
   ],
   "prf_and_normal_fw": [
     [ 0,     "0x0000", "any",     "meta_protocol_msg_callback", null, null ],
@@ -48,6 +50,7 @@
     [ 8000,  "0x1f40", "private", "screenshot_protocol_msg_callback", null, null ],
     [ 10000, "0x2710", "private", "audio_endpoint_protocol_msg_callback", null, null ],
     [ 11000, "0x2af8", "private", "voice_endpoint_protocol_msg_callback", null, null ],
+    [ 11300, "0x2c24", "private", "security_lock_protocol_msg_callback", null, null, [ "CONFIG_SERVICE_SECURITY_LOCK" ] ],
     [ 11440, "0x2cb0", "private", "timeline_action_endpoint_protocol_msg_callback", null, null ],
     [ 43981, "0xabcd", "private", "app_order_protocol_msg_callback", null, null ],
     [ 45531, "0xb1db", "private", "blob_db_protocol_msg_callback", null, null ],
