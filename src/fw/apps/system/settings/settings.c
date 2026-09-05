@@ -41,6 +41,11 @@ static const uint32_t SETTINGS_MENU_ICON_RESOURCES[SettingsMenuItem_Count] = {
   [SettingsMenuItemThemes] = RESOURCE_ID_SETTINGS_MENU_ICON_THEMES,
 #endif
   [SettingsMenuItemActivity] = RESOURCE_ID_SETTINGS_MENU_ICON_BACKGROUND_APP,
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  // No artwork drawn for this one yet; the row renders without an icon rather
+  // than borrowing a misleading one.
+  [SettingsMenuItemSecurity] = RESOURCE_ID_INVALID,
+#endif
   [SettingsMenuItemSystem] = RESOURCE_ID_SETTINGS_MENU_ICON_SYSTEM,
 };
 #endif

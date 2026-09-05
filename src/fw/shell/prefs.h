@@ -279,3 +279,14 @@ void shell_prefs_set_music_show_progress_bar(bool enable);
 
 bool shell_prefs_get_music_show_album_art(void);
 void shell_prefs_set_music_show_album_art(bool enable);
+
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+// Whether the Lockdown app is listed in the launcher. Read by its own metadata
+// getter, which the app registry calls on every enumeration, so this has to be
+// reachable from process_management.
+//
+// Off leaves the app installed and bindable in Quick Launch. It is declutter,
+// not a security control: nobody who has taken the watch wants to wipe it.
+bool shell_prefs_get_lockdown_app_in_launcher(void);
+void shell_prefs_set_lockdown_app_in_launcher(bool enable);
+#endif
