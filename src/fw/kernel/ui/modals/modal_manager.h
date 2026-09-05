@@ -53,6 +53,10 @@ typedef enum ModalPriority {
   ModalPriorityCritical,
   //! Priority used for displaying wake up events such as alarms.
   ModalPriorityAlarm,
+  //! Priority for the security lock screen. Its own level, above everything
+  //! else: sharing one with the alarm meant sharing its WindowStack, so an
+  //! alarm could cover the PIN pad and take its buttons.
+  ModalPrioritySecurityLock,
   //! Max priority, all modals are below this priority
   ModalPriorityMax,
   NumModalPriorities = ModalPriorityMax,
@@ -84,6 +88,17 @@ void modal_manager_init(void);
 //! Note that this is usable before modal_manager_init is called and modal_manager_init will not
 //! reset this state.
 void modal_manager_set_min_priority(ModalPriority priority);
+
+//! Sets a floor the setter above cannot drop below; the effective minimum is
+//! the higher of the two.
+//!
+//! For the security lock, which holds its bound for as long as the watch is
+//! shut while the battery FSM raises and drops the same global around low
+//! power. Sharing one variable meant whichever released last won, and leaving
+//! low power dropped a lockout that nothing would re-assert.
+//!
+//! @param priority ModalPriorityMin releases the floor.
+void modal_manager_set_min_priority_floor(ModalPriority priority);
 
 //! Gets whether modal windows are enabled.
 // @returns boolean indicating if modals are enabled

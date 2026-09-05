@@ -56,6 +56,10 @@
 #include "pbl/services/stationary.h"
 #include "pbl/services/wakeup.h"
 #include "pbl/services/runlevel.h"
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+#include "popups/security/lock_screen.h"
+#include "pbl/services/security_lock.h"
+#endif
 #include "shell/normal/app_idle_timeout.h"
 #include "shell/normal/watchface.h"
 #include "shell/prefs.h"
@@ -157,7 +161,69 @@ static void back_button_force_quit_handler(void *data) {
   launcher_task_add_callback(launcher_force_quit_app, NULL);
 }
 
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+//! Which button raised the lock screen, so its release can be swallowed too and
+//! the freshly pushed window is not handed a button-up it never saw go down.
+static ButtonId s_lock_raise_button = NUM_BUTTONS;
+
+//! While locked, every button means "let me in" and nothing else.
+//!
+//! Runs ahead of the rest of launcher_handle_button_event() on purpose. Both
+//! the BACK-held force quit and the 10x-BACK coredump are ways around the lock
+//! screen, so neither may run while locked.
+//!
+//! @return true if the event was consumed.
+static bool prv_handle_locked_button_event(PebbleEvent *e) {
+  if (!security_lock_is_locked()) {
+    return false;
+  }
+
+  // Quick Launch lives on the watchface's click config provider, so the app
+  // task must not see this either.
+  e->task_mask |= 1 << PebbleTask_App;
+
+  if (e->type == PEBBLE_BUTTON_DOWN_EVENT) {
+    light_button_pressed();
+  } else {
+    light_button_released();
+  }
+
+  if (!security_lock_screen_is_visible()) {
+    // The clock stays up until the user asks for the lock screen, and the press
+    // that asks for it is spent doing so.
+    if (e->type == PEBBLE_BUTTON_DOWN_EVENT) {
+      security_lock_screen_push();
+      if (security_lock_screen_is_visible()) {
+        s_lock_raise_button = e->button.button_id;
+      }
+    }
+    return true;
+  }
+
+  if (s_lock_raise_button != NUM_BUTTONS) {
+    if (e->type == PEBBLE_BUTTON_UP_EVENT && e->button.button_id == s_lock_raise_button) {
+      s_lock_raise_button = NUM_BUTTONS;
+    }
+    return true;
+  }
+
+  // modal_manager_handle_button_event() asserts a window is there, and the push
+  // above only takes effect at the next modal upkeep.
+  if (modal_manager_get_top_window() == NULL) {
+    return true;
+  }
+  modal_manager_handle_button_event(e);
+  return true;
+}
+#endif // CONFIG_SERVICE_SECURITY_LOCK && !CONFIG_RECOVERY_FW
+
 static void launcher_handle_button_event(PebbleEvent *e) {
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+  if (prv_handle_locked_button_event(e)) {
+    return;
+  }
+#endif
+
   ButtonId button_id = e->button.button_id;
   const bool watchface_running = app_manager_is_watchface_running();
 
