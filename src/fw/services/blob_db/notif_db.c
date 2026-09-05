@@ -7,12 +7,27 @@
 #include "pbl/services/notifications/notification_storage.h"
 #include <pbl/logging/logging.h>
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+#include "pbl/services/security_lock.h"
+#endif
+
 PBL_LOG_MODULE_DECLARE(service_blob_db, CONFIG_SERVICE_BLOB_DB_LOG_LEVEL);
 
 void notif_db_init(void) {
 }
 
 status_t notif_db_insert(const uint8_t *key, int key_len, const uint8_t *val, int val_len) {
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  // A backstop. blob_db_insert() drops earlier than this and covers every
+  // store the wipe destroys, so on that path -- the only one today -- this is
+  // unreachable. Kept for a future direct caller. Logged at DBG: such a caller
+  // would reach this once per message, so it must not be a default-level line.
+  if (security_lock_is_locked() || security_lock_is_shredding()) {
+    PBL_LOG_DBG("Locked or shredding, notification dropped");
+    return S_SUCCESS;
+  }
+#endif
+
   if (key_len != UUID_SIZE || val_len < (int)sizeof(SerializedTimelineItemHeader)) {
     return E_INVALID_ARGUMENT;
   }
