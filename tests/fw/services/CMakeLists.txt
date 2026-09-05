@@ -31,6 +31,22 @@ pbl_clar_test(test_pfs
   OVERRIDES dummy_board
 )
 
+pbl_clar_test(test_pfs_shred
+  SOURCES
+    src/fw/services/filesystem/flash_translation.c
+    src/fw/services/filesystem/pfs.c
+    src/fw/system/hexdump.c
+    src/fw/flash_region/flash_region.c
+    src/fw/flash_region/filesystem_regions.c
+    tests/fakes/fake_spi_flash.c
+    src/fw/util/crc8.c
+    src/fw/util/legacy_checksum.c
+    tests/fakes/fake_rtc.c
+  PLATFORMS obelix
+  DEFINES DUMA_DISABLED
+  OVERRIDES dummy_board
+)
+
 pbl_clar_test(test_put_bytes
   SOURCES
     src/fw/services/put_bytes/put_bytes.c

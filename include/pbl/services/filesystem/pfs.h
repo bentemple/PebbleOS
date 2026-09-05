@@ -136,6 +136,54 @@ extern status_t pfs_close_and_remove(int fd);
 //! @return - S_SUCCESS or appropriate error code on failure
 extern status_t pfs_remove(const char *name);
 
+//! Overwrites a file's payload with zeroes, then unlinks it.
+//!
+//! pfs_remove() alone only clears a flag in each page header and leaves the
+//! payload bytes readable on flash, so it cannot destroy sensitive data. This
+//! zeroes the live copy first.
+//!
+//! It does NOT destroy stale copies left elsewhere on flash by earlier garbage
+//! collection, settings_file compaction, or OP_FLAG_OVERWRITE writes. Follow a
+//! batch of shreds with pfs_gc_deleted_sectors() for that.
+//!
+//! @param name - the name of the file to shred
+//! @return - S_SUCCESS (including when the file does not exist) or an error
+extern status_t pfs_shred(const char *name);
+
+//! Returned by pfs_gc_deleted_sectors() when deleted pages were found but none
+//! could be collected.
+//!
+//! Distinct from 0, which means the filesystem holds no stale payload at all.
+//! A caller that reads this as 0 reports a scrub as complete over data that is
+//! still readable.
+#define PFS_GC_NO_PROGRESS (-1)
+
+//! Garbage collects every erase sector that contains deleted pages.
+//!
+//! Live pages are relocated and the sector is physically erased, destroying
+//! stale payload bytes left behind by earlier deletes and compactions. Data
+//! still in use is preserved, so the filesystem can be scrubbed without the
+//! collateral damage of pfs_format().
+//!
+//! Each 64K sector erase takes roughly 150ms and the filesystem is hundreds of
+//! sectors, so a full sweep blocks its task for minutes. Pass a budget and call
+//! repeatedly to spread that out; the sweep resumes where it left off because
+//! collected sectors no longer contain deleted pages.
+//!
+//! @param max_sectors - stop after collecting this many, or 0 for no limit
+//! @return - number of sectors collected. Zero means there was nothing left to
+//!           do, which is how a caller knows to stop. PFS_GC_NO_PROGRESS means
+//!           there was work and none of it could be done. The sweep continues
+//!           past a failing region rather than aborting.
+extern int pfs_gc_deleted_sectors(int max_sectors);
+
+//! Number of erase sectors the filesystem spans.
+//!
+//! The upper bound on what a single pass of pfs_gc_deleted_sectors() can
+//! collect, so a caller sweeping in slices can size its own ceiling from the
+//! filesystem rather than hard-coding a board's layout. 0 before pfs_init().
+extern int pfs_get_erase_region_count(void);
+
 //! Returns the size of the file. (The amount of bytes that can be read out)
 extern size_t pfs_get_file_size(int fd);
 
