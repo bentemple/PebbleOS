@@ -12,9 +12,19 @@ not surface it to apps:
    `src/fw/syscall/syscall_internal.h`), either in the matching
    `src/fw/syscall/<area>_syscalls.c` or alongside the implementation it
    wraps.
+
+   Not every export needs a new syscall. Anything built on the event service
+   — the `*_service_subscribe()` family — rides the existing
+   `sys_event_service_client_subscribe`, and the event service creates its
+   entry lazily on first subscribe, so no registration is needed either.
 2. **Register the symbol** in
    `tools/generate_native_sdk/exported_symbols.json` under the matching
-   group, with an `addedRevision` matching the new SDK revision.
+   group, with an `addedRevision` matching the new SDK revision, **and bump
+   the file's own top-level `"revision"` field to match**. Both. If
+   `addedRevision` is greater than the file's `revision`, the generator logs
+   a warning and **silently omits your symbol** — the build succeeds, the
+   firmware compiles, and the function simply is not in the SDK. The warning
+   is easy to miss among the pre-existing ones.
 3. **Bump the SDK revision** in
    `src/fw/process_management/pebble_process_info.h`: increment
    `PROCESS_INFO_CURRENT_SDK_VERSION_MINOR` and add a comment line above the
@@ -105,11 +115,68 @@ Notes:
 - `types` are emitted in the order listed; put typedefs after the typedefs
   they depend on (`includeAfter` is the escape hatch for ordering
   exceptions).
-- The generator errors out on exports it cannot find in the parsed headers
-  and on inconsistent revision numbers, but it does not verify that the
-  resulting `pebble.h` compiles — review its output.
+- The generator errors out on exports it cannot find in the parsed headers,
+  but an `addedRevision` newer than the file's `revision` only warns, and the
+  symbol is dropped. It also does not verify that the resulting `pebble.h`
+  compiles — review its output.
+- Platforms frozen at an older revision (`FROZEN_AT_REVISION`, set per
+  platform in `tools/pebble_sdk_platform.py`) turn a too-new function into a
+  stub define — basalt gets
+  `#define your_function(...) (0)`. That is the answer for a capability the
+  older platforms do not have: apps compile everywhere without an `#ifdef`,
+  so an export does not need guarding for their sake.
 - The comment ledger above `PROCESS_INFO_CURRENT_SDK_VERSION_MINOR` is the
   only mapping between SDK revisions and version minors: no formula relates
   them (the minor once jumped `0x19` → `0x20` between revs 35 and 36, and a
   few minors and revs are skipped or doubled up). Treat the ledger as
   append-only history.
+
+## Verifying the export actually landed
+
+Since the whole point is that a clean firmware build proves nothing, check
+the generated output rather than the compile:
+
+```bash
+grep -c '<your_function>' build/src/fw/pebble.auto.c build/sdk/<platform>/include/pebble.h
+```
+
+Both must be non-zero. A useful negative control: before registering the
+symbol, `arm-none-eabi-nm build/pebbleos.elf | grep <your_function>` will not
+find it at all — `--gc-sections` drops it, because nothing references it
+until `pebble.auto.c` does.
+
+Two further checks worth doing for anything ABI-visible:
+
+- Diff the function-pointer table against the previous build and confirm your
+  entries are **appended** with no reordering of existing ones. That ordering
+  is the ABI.
+- `generate_shim_files()` (in
+  `tools/generate_native_sdk/generate_pebble_native_sdk_files.py`) runs the
+  real generator against a given symbol file into an output directory of your
+  choice, for any platform — so you can check platforms other than your
+  configured board, and test a change to `exported_symbols.json` against a
+  copy before touching the real one.
+
+  It parses the firmware headers with libclang, so it needs an `autoconf.h`
+  to resolve `CONFIG_*` macros, and an absolute `pbl_src_dir` (it derives the
+  repo root from it). Point it at a configured build directory, and run it
+  from the repo root:
+
+  ```python
+  import os, sys
+  sys.path[:0] = ["tools/generate_native_sdk", "tools"]
+  from generate_pebble_native_sdk_files import generate_shim_files
+
+  out, build = "/tmp/sdkcheck", "build"  # any configured build dir
+  for d in ("include", "lib", "src/fw"):
+      os.makedirs(f"{out}/{d}", exist_ok=True)
+  generate_shim_files("tools/generate_native_sdk/exported_symbols.json",
+                      os.path.abspath("src"), f"{out}/src", f"{out}/include",
+                      f"{out}/lib", "basalt", internal_sdk_build=False,
+                      autoconf=os.path.abspath(f"{build}/autoconf.h"))
+  ```
+
+  `tools/build_sdk.py` wraps the same call but passes no `autoconf`, so its
+  CLI (`python tools/build_sdk.py basalt`) fails in `parse_c_decl.py` on the
+  first `CONFIG_*` macro it meets. Its `--output-dir` also defaults to
+  `build/sdk`, which overwrites the real SDK tree — always pass one.

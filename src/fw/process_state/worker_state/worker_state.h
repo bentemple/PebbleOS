@@ -12,6 +12,8 @@
 #include "applib/battery_state_service_private.h"
 #include "applib/connection_service_private.h"
 #include "applib/health_service_private.h"
+#include "applib/security_shred_service.h"
+#include "applib/security_shred_service_private.h"
 #include "applib/tick_timer_service_private.h"
 #include "applib/tick_timer_service.h"
 #include "pbl/util/heap.h"
@@ -46,6 +48,8 @@ LogState *worker_state_get_log_state(void);
 BatteryStateServiceState *worker_state_get_battery_state_service_state(void);
 
 BacklightServiceState *worker_state_get_backlight_service_state(void);
+
+SecurityShredServiceState *worker_state_get_security_shred_service_state(void);
 
 TickTimerServiceState *worker_state_get_tick_timer_service_state(void);
 
