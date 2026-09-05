@@ -38,6 +38,11 @@
 #include "util/net.h"
 #include "pbl/util/string.h"
 
+#if defined(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS)
+#include "pbl/services/security_lock.h"
+#include "pbl/services/security_lock_shred.h"
+#endif
+
 #include <cmsis_core.h>
 
 #include <bluetooth/responsiveness.h>
@@ -829,6 +834,52 @@ void command_factory_reset(void) {
 
   factory_reset(false /* should_shutdown */);
 }
+
+#if defined(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS)
+//! One machine-readable line of lock state, so an end-to-end test can assert on
+//! what the watch actually believes rather than on what a screenshot looks like.
+//!
+//! Test hook, not a diagnostic: the console is reachable from a seized watch,
+//! and this line hands over the PIN length, the failed-attempt count and both
+//! deadlines. It is compiled out of release firmware along with the rest of the
+//! security test hooks, and reports no duress state even there -- whether a
+//! duress PIN exists is exactly the secret.
+void command_security_status(void) {
+  char buf[192];
+  const time_t now = rtc_get_time();
+  const time_t lock_deadline = security_lock_get_lock_deadline();
+  const time_t shred_deadline = security_lock_get_shred_deadline();
+
+  // countdown= is SecurityCountdownSource: 0 nothing armed, 1 the phone went
+  // away, 2 the user asked for it. Reported because it decides what may retire
+  // the countdown, which is otherwise invisible from the deadlines alone.
+  snprintf(buf, sizeof(buf),
+           "enabled=%d state=%d pin_len=%u attempts=%u shred_pending=%d dirty=%d lock_in=%d "
+           "shred_in=%d countdown=%d lock_delay=%u shred_delay=%u",
+           (int)security_lock_is_enabled(), (int)security_lock_get_state(),
+           (unsigned)security_lock_get_pin_len(), (unsigned)security_lock_get_failed_attempts(),
+           (int)security_lock_is_shred_pending(), (int)security_lock_is_dirty_since_shred(),
+           (lock_deadline == 0) ? -1 : (int)(lock_deadline - now),
+           (shred_deadline == 0) ? -1 : (int)(shred_deadline - now),
+           (int)security_lock_get_countdown_source(), (unsigned)security_lock_get_lock_delay_s(),
+           (unsigned)security_lock_get_shred_delay_s());
+  prompt_send_response(buf);
+}
+
+static void prv_security_shred_callback(void *unused) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+}
+
+//! Unauthenticated wipe trigger, so it is a test hook only: anyone holding the
+//! watch and a serial cable can destroy its data with it.
+void command_security_shred(void) {
+  prompt_command_finish();
+  // Runs on the launcher task: the shred blocks for seconds on sector erases,
+  // which would otherwise stall the prompt's own task.
+  launcher_task_add_callback(prv_security_shred_callback, NULL);
+}
+
+#endif
 
 void command_factory_reset_fast(void) {
   prompt_command_finish();

@@ -42,6 +42,10 @@ extern void command_reset(void);
 extern void command_boot_prf(void);
 extern void command_factory_reset(void);
 extern void command_factory_reset_fast(void);
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+extern void command_security_shred(void);
+extern void command_security_status(void);
+#endif
 
 extern void command_infinite_loop(void);
 extern void command_assert_fail(void);
@@ -322,6 +326,10 @@ static const Command s_prompt_commands[] = {
   {"factory reset fast", command_factory_reset_fast, 0},
 #endif
   {"factory reset", command_factory_reset, 0},
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+  {"security status", command_security_status, 0},
+  {"security shred", command_security_shred, 0},
+#endif
   {"set time", command_set_time, 1},
   {"version", command_version_info, 0},
   {"boot bit set", command_boot_bit_set, 2},
