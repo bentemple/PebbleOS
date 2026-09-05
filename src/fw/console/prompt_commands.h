@@ -42,9 +42,27 @@ extern void command_reset(void);
 extern void command_boot_prf(void);
 extern void command_factory_reset(void);
 extern void command_factory_reset_fast(void);
-#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
-extern void command_security_shred(void);
+
+// Test hooks: implemented in services/security_lock/test_hooks.c, apart from
+// the two below that live in prompt_commands.c. Never built into a shipping
+// firmware: one reports the PIN length and attempt count, the other wipes the
+// watch with no authentication, and the console is reachable from a seized
+// watch.
+#if defined(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS)
 extern void command_security_status(void);
+extern void command_security_shred(void);
+extern void command_security_ui(void);
+extern void command_security_enable(const char *);
+extern void command_security_set_pin(const char *);
+extern void command_security_set_duress(const char *);
+extern void command_security_clear_pin(void);
+extern void command_security_lock(void);
+extern void command_security_lockdown(void);
+extern void command_security_unlock(const char *);
+extern void command_security_delays(const char *, const char *);
+extern void command_security_deadlines(const char *, const char *);
+extern void command_security_session(const char *);
+extern void command_security_boot_wipe(const char *);
 #endif
 
 extern void command_infinite_loop(void);
@@ -326,9 +344,27 @@ static const Command s_prompt_commands[] = {
   {"factory reset fast", command_factory_reset_fast, 0},
 #endif
   {"factory reset", command_factory_reset, 0},
-#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+#if defined(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS)
+  // Console control surface, so a harness never has to drive the touch UI to
+  // set up a state. Commands are matched by prefix in table order, so none of
+  // these may be a prefix of another.
   {"security status", command_security_status, 0},
   {"security shred", command_security_shred, 0},
+  {"security ui", command_security_ui, 0},
+  {"security enable", command_security_enable, 1},
+  {"security set pin", command_security_set_pin, 1},
+  {"security set duress", command_security_set_duress, 1},
+  {"security clear pin", command_security_clear_pin, 0},
+  // Before "security lock", which is a prefix of it: the table is matched by
+  // prefix in order, so the longer name has to come first or it can never be
+  // reached. This is the one pair in the table where that matters.
+  {"security lockdown", command_security_lockdown, 0},
+  {"security lock", command_security_lock, 0},
+  {"security unlock", command_security_unlock, 1},
+  {"security delays", command_security_delays, 2},
+  {"security deadlines", command_security_deadlines, 2},
+  {"security session", command_security_session, 1},
+  {"security boot wipe", command_security_boot_wipe, 1},
 #endif
   {"set time", command_set_time, 1},
   {"version", command_version_info, 0},

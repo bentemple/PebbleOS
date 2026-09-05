@@ -3,19 +3,31 @@
 
 config SERVICE_SECURITY_LOCK
     bool "Security lock"
-    depends on SERVICE_TOUCH
+    depends on SERVICE_TOUCH && !RECOVERY_FW
     default y
     help
       PIN lock and data shred triggered by phone lockdown or watch-side
       tamper signals. See docs/architecture/security_lock.md.
 
       Requires touch: the lock screen is an on-screen PIN pad, so this is
-      only available on the newer watches (emery, gabbro).
+      only available on the boards with a digitizer -- obelix (emery) and
+      getafix (gabbro), plus their qemu_emery and qemu_gabbro emulators.
+
+      Never built into recovery firmware, which has no PIN to check and
+      must stay reachable.
 
 if SERVICE_SECURITY_LOCK
 
 module = SERVICE_SECURITY_LOCK
 module-str = Security lock
 source "subsys/logging/Kconfig.template.log_level"
+
+config SERVICE_SECURITY_LOCK_TEST_HOOKS
+    bool "Security lock test hooks"
+    depends on !RELEASE && !RECOVERY_FW
+    default y if BOARD_QEMU_EMERY || BOARD_QEMU_GABBRO
+    help
+      Console commands that set PINs, lock, unlock and suppress the boot
+      wipe, bypassing every user-facing control. Emulator-only; never ship.
 
 endif
