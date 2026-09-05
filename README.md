@@ -26,6 +26,12 @@ Here's a quick summary of resources to help you find your way around:
 - ⌚ [Source Code Repository](https://github.com/coredevices/PebbleOS)
 - 🐛 [Issue Tracker](https://github.com/coredevices/PebbleOS/issues)
 - 🤝 [Contribution Guide](CONTRIBUTING.md)
+- 🏛️ [Architecture Overview](https://pebbleos-core.readthedocs.io/en/latest/architecture/index.html)
+
+### Features
+
+- 🔒 [Security Lock](https://pebbleos-core.readthedocs.io/en/latest/architecture/security_lock.html) —
+  PIN lock and data shred for a watch whose phone has been taken
 
 ### Community and Support
 

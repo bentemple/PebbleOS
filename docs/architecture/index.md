@@ -121,4 +121,5 @@ Longer design documents live as their own pages:
 activity/index.md
 kernel.md
 kernel_internals.md
+security_lock.md
 ```
