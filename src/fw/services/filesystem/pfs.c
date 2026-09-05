@@ -2025,6 +2025,152 @@ done:
   return (E_INTERNAL);
 }
 
+//! Size of the stack buffer of zeroes used to overwrite a file's payload.
+#define PFS_SHRED_CHUNK_SIZE 64
+
+status_t pfs_shred(const char *name) {
+  if (name == NULL) {
+    return (E_INVALID_ARGUMENT);
+  }
+
+  pbl_mutex_lock(&s_pfs_mutex, PBL_FOREVER);
+
+  // The size has to come from an existing file: opening with OP_FLAG_WRITE
+  // creates one if it is absent, and we would then shred and delete a file we
+  // had just created ourselves.
+  int fd = pfs_open(name, OP_FLAG_READ, FILE_TYPE_STATIC, 0);
+  if (fd < 0) {
+    // Nothing on flash to destroy counts as a successful shred.
+    status_t open_rv = (fd == E_DOES_NOT_EXIST) ? S_SUCCESS : (status_t)fd;
+    pbl_mutex_unlock(&s_pfs_mutex);
+    return (open_rv);
+  }
+  size_t size = pfs_get_file_size(fd);
+  pfs_close(fd);
+
+  // OP_FLAG_OVERWRITE must NOT be used here. It writes to a shadow copy and
+  // swaps it in on close, leaving the original payload bytes intact on flash --
+  // precisely what we are trying to destroy.
+  fd = pfs_open(name, OP_FLAG_READ | OP_FLAG_WRITE, FILE_TYPE_STATIC, size);
+  if (fd < 0) {
+    pbl_mutex_unlock(&s_pfs_mutex);
+    return ((status_t)fd);
+  }
+
+  // NOR flash writes only clear bits, so writing 0x00 over live data always
+  // succeeds without needing an erase first.
+  status_t rv = S_SUCCESS;
+  uint8_t zeros[PFS_SHRED_CHUNK_SIZE];
+  memset(zeros, 0, sizeof(zeros));
+  pfs_seek(fd, 0, FSeekSet);
+  size_t remaining = size;
+  while (remaining > 0) {
+    int written = pfs_write(fd, zeros, MIN(remaining, sizeof(zeros)));
+    if (written <= 0) {
+      PBL_LOG_ERR("Failed to zero %s: %d", name, written);
+      rv = (written < 0) ? (status_t)written : E_INTERNAL;
+      break;
+    }
+    remaining -= written;
+  }
+
+  pfs_close(fd);
+
+  if (rv == S_SUCCESS) {
+    rv = pfs_remove(name);
+  }
+
+  pbl_mutex_unlock(&s_pfs_mutex);
+  return (rv);
+}
+
+int pfs_get_erase_region_count(void) {
+  // Fixed once pfs_init() has sized the filesystem, so no lock is needed.
+  return (s_pfs_page_count / PFS_PAGES_PER_ERASE_SECTOR);
+}
+
+int pfs_gc_deleted_sectors(int max_sectors) {
+  pbl_mutex_lock(&s_pfs_mutex, PBL_FOREVER);
+
+  if (!pfs_active()) {
+    // No filesystem to walk, which says nothing about what is on the flash.
+    pbl_mutex_unlock(&s_pfs_mutex);
+    return (PFS_GC_NO_PROGRESS);
+  }
+
+  const int num_erase_regions = pfs_get_erase_region_count();
+  int regions_collected = 0;
+  // A region holding deleted pages was left uncollected. Separates "nothing
+  // left to do" from "could not do it", which a scrubbing caller reads as the
+  // difference between finished and stalled.
+  bool work_remains = false;
+
+  for (uint16_t region = 0; region < (uint16_t)num_erase_regions; region++) {
+    // Recomputed every iteration: collecting a region can relocate the reserved
+    // block, and erasing that would destroy the scratch area GC depends on.
+    //
+    // Skipping it is not work left behind: the block is erased before it is
+    // used as GC scratch, so any deleted pages in it go with it.
+    const uint16_t gc_region = s_gc_block.gc_start_page / PFS_PAGES_PER_ERASE_SECTOR;
+    if (s_gc_block.block_valid && (region == gc_region)) {
+      continue;
+    }
+
+    const uint16_t start_pg = region * PFS_PAGES_PER_ERASE_SECTOR;
+    bool has_deleted = false;
+    for (uint16_t pg = start_pg; pg < start_pg + PFS_PAGES_PER_ERASE_SECTOR; pg++) {
+      if (page_is_deleted(prv_get_page_flags(pg))) {
+        has_deleted = true;
+        break;
+      }
+    }
+    if (!has_deleted) {
+      // Nothing unlinked here, so there is no stale payload to erase.
+      continue;
+    }
+
+    if ((max_sectors > 0) && (regions_collected >= max_sectors)) {
+      // Budget spent. The caller comes back for the rest, so whatever runs
+      // this is not blocked for the whole filesystem at once.
+      pbl_mutex_unlock(&s_pfs_mutex);
+      return (regions_collected);
+    }
+
+    uint16_t free_page = INVALID_PAGE;
+    const uint32_t sectors_active = prv_get_sector_page_status(region, &free_page);
+
+    // Relocating live pages needs the reserved GC block; without it we would
+    // assert inside prv_copy_sector_to_gc_file().
+    if ((sectors_active != 0) && !prv_update_gc_reserved_region()) {
+      PBL_LOG_WRN("No GC region available, leaving region %" PRIu16 " unshredded", region);
+      work_remains = true;
+      continue;
+    }
+
+    uint16_t unused_free_page = INVALID_PAGE;
+    status_t gc_rv = garbage_collect_sector(&unused_free_page, start_pg, sectors_active);
+    if (gc_rv != S_SUCCESS) {
+      // Record the failure but keep sweeping: one bad region must not leave the
+      // rest of the filesystem un-erased.
+      PBL_LOG_ERR("GC of region %" PRIu16 " failed: %" PRId32, region, (int32_t)gc_rv);
+      work_remains = true;
+      continue;
+    }
+    regions_collected++;
+
+    // Erases are slow (~150ms per 64K sector) and there can be hundreds.
+    task_watchdog_bit_set(pebble_task_get_current());
+  }
+
+  PBL_LOG_DBG("Shred GC swept %d region(s)", regions_collected);
+
+  pbl_mutex_unlock(&s_pfs_mutex);
+  if ((regions_collected == 0) && work_remains) {
+    return (PFS_GC_NO_PROGRESS);
+  }
+  return (regions_collected);
+}
+
 status_t pfs_init(bool run_filesystem_check) {
   for (int fd = FD_INDEX_OFFSET; fd < FD_INDEX_OFFSET + MAX_FD_HANDLES; fd++) {
     PFS_FD(fd) = (FileDesc){.fd_status = FD_STATUS_FREE};
