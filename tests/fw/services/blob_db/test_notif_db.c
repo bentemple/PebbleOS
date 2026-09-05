@@ -16,6 +16,7 @@
 #include "fake_spi_flash.h"
 #include "fake_system_task.h"
 #include "fake_kernel_services_notifications.h"
+#include "fake_security_lock.h"
 
 // Stubs
 ////////////////////////////////////////////////////////////////
@@ -35,6 +36,8 @@ void test_notif_db__initialize(void) {
   fake_spi_flash_init(0, 0x1000000);
   pfs_init(false);
   notification_storage_reset();
+  fake_security_lock_reset();
+  fake_kernel_services_notifications_reset();
 }
 
 void test_notif_db__cleanup(void) {
@@ -110,3 +113,35 @@ void test_notif_db__flush(void) {
   cl_assert_equal_i(notif_db_get_len((uint8_t *)&hdr2, UUID_SIZE), 0);
   cl_assert_equal_i(notif_db_get_len((uint8_t *)&hdr3, UUID_SIZE), 0);
 }
+
+static SerializedTimelineItemHeader prv_make_header(void) {
+  SerializedTimelineItemHeader hdr = {
+    .common = {
+      .ancs_uid = 1,
+      .layout = 0,
+      .flags = 0,
+      .timestamp = 0,
+    },
+  };
+  uuid_generate(&hdr.common.id);
+  return hdr;
+}
+
+//! blob_db_insert() drops before this gate is ever reached, so this covers a
+//! backstop that production declares unreachable. One case is enough: it pins
+//! the drop and the silent success, and the states that lead here are covered
+//! where they are actually enforced, in test_blob_db.
+void test_notif_db__locked_or_shredding_drops(void) {
+  SerializedTimelineItemHeader hdr = prv_make_header();
+
+  // Shredding as well as locked: the duress and clock-rollback wipes both run
+  // unlocked, so the lock state on its own would let this land in the file
+  // being zeroed.
+  fake_security_lock_set_locked(true);
+  fake_security_lock_set_shredding(true);
+  // Silent success: the phone gets a normal ack and learns nothing.
+  cl_assert_equal_i(notif_db_insert((uint8_t *)&hdr, UUID_SIZE, (uint8_t *)&hdr, sizeof(hdr)), 0);
+  cl_assert_equal_i(notif_db_get_len((uint8_t *)&hdr, UUID_SIZE), 0);
+  cl_assert_equal_i(fake_kernel_services_notifications_ancs_notifications_count(), 0);
+}
+
