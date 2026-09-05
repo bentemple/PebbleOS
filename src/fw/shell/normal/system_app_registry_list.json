@@ -687,6 +687,24 @@
       "id": -101,
       "enum": "QUICK_LAUNCH_NOTHING",
       "md_fn": "quick_launch_nothing_get_app_info"
+    },
+    {
+      "id": -102,
+      "enum": "LOCKDOWN",
+      "md_fn": "lockdown_app_get_app_info",
+      "color_argb8": "GColorRedARGB8",
+      "ifdefs": [
+        "CONFIG_SERVICE_SECURITY_LOCK"
+      ]
+    },
+    {
+      "id": -103,
+      "enum": "LOCKDOWN_ERASE",
+      "md_fn": "lockdown_erase_app_get_app_info",
+      "color_argb8": "GColorRedARGB8",
+      "ifdefs": [
+        "CONFIG_SERVICE_SECURITY_LOCK"
+      ]
     }
   ],
   "resource_apps": [
