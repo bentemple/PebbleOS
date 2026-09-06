@@ -43,6 +43,25 @@ pbl_clar_test(test_calendar
   OVERRIDES dummy_board
 )
 
+pbl_clar_test(test_timeline_event_lifecycle
+  SOURCES
+    src/fw/services/blob_db/pin_db.c
+    src/fw/services/blob_db/timeline_item_storage.c
+    src/fw/services/timeline/attribute.c
+    src/fw/services/timeline/attribute_group.c
+    src/fw/services/timeline/attributes_actions.c
+    src/fw/services/timeline/calendar.c
+    src/fw/services/timeline/event.c
+    src/fw/services/timeline/item.c
+    src/fw/services/timeline/timeline.c
+    src/fw/util/crc8.c
+    src/fw/util/time/time.c
+    tests/fakes/fake_events.c
+    tests/fakes/fake_rtc.c
+    tests/fakes/fake_settings_file.c
+  OVERRIDES dummy_board
+)
+
 pbl_clar_test(test_timeline_peek_event
   SOURCES
     src/fw/services/blob_db/pin_db.c

@@ -35,6 +35,10 @@ static TimelineEventImplGetter s_services[TimelineEventServiceCount] = {
 static PBL_MUTEX_DEFINE(s_mutex);
 static bool s_initialized;
 
+//! init() only queues its work, so a deinit can land before that work runs.
+//! Cleared by deinit to retire an init that is still on the queue.
+static bool s_init_pending;
+
 static TimelineEventState s_states[TimelineEventServiceCount];
 
 static TimerID s_timer;
@@ -168,8 +172,17 @@ static void prv_update_status(void) {
 }
 
 static void prv_init(void *PBL_UNUSED data) {
-  s_initialized = true;
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
+
+  if (!s_init_pending) {
+    // A deinit landed after init() queued this. Bringing the services back up
+    // now would resurrect the module behind the caller that just tore it down,
+    // and the databases it reads have had their files closed.
+    pbl_mutex_unlock(&s_mutex);
+    return;
+  }
+  s_init_pending = false;
+  s_initialized = true;
 
   for (unsigned int i = 0; i < TimelineEventServiceCount; i++) {
     TimelineEventState *state = &s_states[i];
@@ -183,14 +196,24 @@ static void prv_init(void *PBL_UNUSED data) {
 }
 
 void timeline_event_init(void) {
+  pbl_mutex_lock(&s_mutex, PBL_FOREVER);
+  s_init_pending = true;
+  pbl_mutex_unlock(&s_mutex);
+
   system_task_add_callback(prv_init, NULL);
 }
 
 void timeline_event_deinit(void) {
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
 
-  new_timer_delete(s_timer);
-  s_timer = TIMER_INVALID_ID;
+  s_init_pending = false;
+
+  // Nothing to delete if the queued init has not run yet, and new_timer_delete()
+  // asserts on TIMER_INVALID_ID rather than ignoring it.
+  if (s_timer != TIMER_INVALID_ID) {
+    new_timer_delete(s_timer);
+    s_timer = TIMER_INVALID_ID;
+  }
 
   pbl_mutex_unlock(&s_mutex);
   s_initialized = false;
