@@ -75,6 +75,8 @@ typedef struct {
 
   BacklightServiceState backlight_service_state;
 
+  SecurityLockServiceState security_lock_service_state;
+
   SecurityShredServiceState security_shred_service_state;
 
   TickTimerServiceState tick_timer_service_state;
@@ -307,6 +309,8 @@ PBL_NOINLINE void app_state_init(void) {
 
   backlight_service_state_init(app_state_get_backlight_service_state());
 
+  security_lock_service_state_init(app_state_get_security_lock_service_state());
+
   security_shred_service_state_init(app_state_get_security_shred_service_state());
 
   connection_service_state_init(app_state_get_connection_service_state());
@@ -430,6 +434,10 @@ BatteryStateServiceState *app_state_get_battery_state_service_state(void) {
 
 BacklightServiceState *app_state_get_backlight_service_state(void) {
   return &s_app_state_ptr->backlight_service_state;
+}
+
+SecurityLockServiceState *app_state_get_security_lock_service_state(void) {
+  return &s_app_state_ptr->security_lock_service_state;
 }
 
 SecurityShredServiceState *app_state_get_security_shred_service_state(void) {

@@ -5,6 +5,7 @@
 
 #include "pbl/services/alarms/alarm.h"
 #include "pbl/services/notifications/notification_storage.h"
+#include "pbl/services/security_lock.h"
 
 DEFINE_SYSCALL(bool, sys_alarm_get_next_enabled, time_t *timestamp_out) {
   if (PRIVILEGE_WAS_ELEVATED) {
@@ -25,6 +26,16 @@ DEFINE_SYSCALL(uint8_t, sys_notification_get_unread_count) {
 DEFINE_SYSCALL(bool, sys_hrm_manager_is_hrm_present) {
 #ifdef CONFIG_SERVICE_HRM
   return true;
+#else
+  return false;
+#endif
+}
+
+// Answers for a board without the feature too, so the applib service -- and
+// with it the SDK -- is the same everywhere.
+DEFINE_SYSCALL(bool, sys_security_lock_is_locked) {
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  return security_lock_is_locked();
 #else
   return false;
 #endif

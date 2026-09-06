@@ -18,6 +18,12 @@ pbl_clar_test(test_security_shred_service
   OVERRIDES dummy_board
 )
 
+pbl_clar_test(test_security_lock_service
+  SOURCES
+    src/fw/applib/security_lock_service.c
+  OVERRIDES dummy_board
+)
+
 pbl_clar_test(test_app_inbox
   SOURCES
     src/fw/applib/app_inbox.c

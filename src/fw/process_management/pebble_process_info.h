@@ -170,8 +170,8 @@ typedef enum {
 // .minor:0x6a -- Add HRV sampling API (health_service_set_hrv_sample_period) (rev 109)
 // sdk.major:0x5 .minor:0x6b -- Expose notification service (notification_service_get_unread_count)
 // to apps (rev 110)
-// sdk.major:0x5 .minor:0x6c -- Add security_shred_service_subscribe/unsubscribe for
-// security shred events (rev 111)
+// sdk.major:0x5 .minor:0x6c -- Add security shred and security lock services (shred
+// subscribe/unsubscribe, lock peek_is_locked/subscribe/unsubscribe) (rev 111)
 
 #define PROCESS_INFO_CURRENT_SDK_VERSION_MAJOR 0x5
 #define PROCESS_INFO_CURRENT_SDK_VERSION_MINOR 0x6c

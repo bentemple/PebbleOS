@@ -11,6 +11,7 @@
 #include <pbl/drivers/rtc.h>
 #include <pbl/logging/logging.h>
 #include "kernel/event_loop.h"
+#include "kernel/events.h"
 #include "pbl/kernel/mutex.h"
 #include "pbl/services/bluetooth/bluetooth_ctl.h"
 #include "pbl/services/security_lock_shred.h"
@@ -33,7 +34,7 @@ PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LE
 //! discarding the config record throws the PIN away. Sharing one number meant a
 //! runtime-only field could disarm the lock on upgrade; these cannot.
 #define CFG_RECORD_VERSION 4
-#define RT_RECORD_VERSION 6
+#define RT_RECORD_VERSION 7
 
 //! Config: written rarely (only when the PIN changes).
 static const char *CFG_KEY = "cfg";
@@ -58,6 +59,10 @@ typedef struct PACKED {
   uint16_t version;
   uint8_t state;
   uint8_t failed_attempts;
+  //! Wall clock at the last counted failed attempt, which the escalating
+  //! lockout is measured from. Persisted alongside the counter, so a reboot
+  //! does not hand back a free guess.
+  time_t last_attempt;
   bool shred_pending;
   //! Something has been written to the storage a shred destroys since the last
   //! one ran. False means a shred has nothing new to destroy.
@@ -173,7 +178,6 @@ static status_t prv_flush_runtime(void) {
 }
 
 void security_lock_init(void) {
-  PBL_LOG_INFO("SECBOOT init enter");
   PBL_ASSERTN(!s_initialized);
   // Re-seeded from whatever the read below loads, rather than carried over from
   // a previous init in the same process.
@@ -181,14 +185,11 @@ void security_lock_init(void) {
 
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
   SecurityLockRuntime rt;
-  // Bracketed by markers because this is not the read-only operation it looks
-  // like: settings_file_open() opens with OP_FLAG_WRITE and creates the file
-  // when it is missing, which allocates a page and can take a synchronous
-  // garbage collect with it. This runs before anything else is up, so a boot
-  // that dies in here dies with nothing at all on the wire.
-  PBL_LOG_INFO("SECBOOT init read enter");
+  // Not the read-only operation it looks like: settings_file_open() opens with
+  // OP_FLAG_WRITE and creates the file when it is missing, which allocates a
+  // page and can take a synchronous garbage collect with it. This runs before
+  // anything else is up, so a boot that dies here dies with nothing on the wire.
   status_t rv = prv_read(RT_KEY, &rt, sizeof(rt));
-  PBL_LOG_INFO("SECBOOT init read leave rv=%" PRId32, (int32_t)rv);
   if (rv == S_SUCCESS && rt.version == RT_RECORD_VERSION) {
     s_runtime_cache = rt;
   } else {
@@ -224,9 +225,9 @@ void security_lock_init(void) {
   s_initialized = true;
   pbl_mutex_unlock(&s_mutex);
 
-  PBL_LOG_INFO("SECBOOT init leave state=%" PRIu8 " attempts=%" PRIu8 " shred_pending=%d",
-               s_runtime_cache.state, s_runtime_cache.failed_attempts,
-               (int)s_runtime_cache.shred_pending);
+  PBL_LOG_DBG("Init: state=%" PRIu8 " attempts=%" PRIu8 " shred_pending=%d",
+              s_runtime_cache.state, s_runtime_cache.failed_attempts,
+              (int)s_runtime_cache.shred_pending);
 }
 
 void security_lock_deinit(void) {
@@ -301,10 +302,36 @@ bool security_lock_is_locked(void) {
   return security_lock_get_state() == SecurityLockStateLocked;
 }
 
+//! Announce a change of lockedness, and only a change.
+//!
+//! Subscribers treat each event as an edge, so a set-state that landed on the
+//! state already held must be silent -- the same care the deadline and record
+//! writes take, and here it also keeps a repeated lock from telling an onlooker
+//! that something is retrying.
+//!
+//! Only the new state goes out. Which trigger locked the watch, and whether the
+//! unlock used the duress PIN, stay in this file: an app that could tell a
+//! duress unlock from an ordinary one would be a way to observe someone
+//! entering it under coercion.
+//!
+//! Call outside the mutex. \a was_locked is read before the change.
+static void prv_broadcast_lock_state(bool was_locked) {
+  const bool is_locked = security_lock_is_locked();
+  if (is_locked == was_locked) {
+    return;
+  }
+  PebbleEvent event = {
+      .type = PEBBLE_SECURITY_LOCK_EVENT,
+      .security_lock = {.is_locked = is_locked},
+  };
+  event_put(&event);
+}
+
 status_t security_lock_set_state(SecurityLockState state) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
+  const bool was_locked = security_lock_is_locked();
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
   s_runtime_cache.state = (uint8_t)state;
   if (state != SecurityLockStateLocked) {
@@ -316,6 +343,7 @@ status_t security_lock_set_state(SecurityLockState state) {
     // A disconnect countdown does not re-arm on reconnect either; only the next
     // unexpected disconnect arms one again.
     s_runtime_cache.failed_attempts = 0;
+    s_runtime_cache.last_attempt = 0;
     s_runtime_cache.lock_deadline = 0;
     s_runtime_cache.shred_deadline = 0;
     s_runtime_cache.countdown_source = SecurityCountdownNone;
@@ -337,6 +365,8 @@ status_t security_lock_set_state(SecurityLockState state) {
     // itself and goes out when the session reopens.
     prv_report_refused_writes();
   }
+
+  prv_broadcast_lock_state(was_locked);
   return rv;
 }
 
@@ -429,6 +459,10 @@ bool security_lock_is_radio_blackout(void) {
 //! @return false if no usable salt could be produced, in which case the caller
 //!         must not store anything.
 static bool prv_make_salt(uint8_t salt[SECURITY_LOCK_SALT_LEN]) {
+  // The loop below writes a whole word at a time, so a salt length that is not
+  // a multiple of one would run off the end of the array.
+  _Static_assert(SECURITY_LOCK_SALT_LEN % sizeof(uint32_t) == 0,
+                 "salt length must be a whole number of words");
   bool have_rng = true;
   for (size_t i = 0; i < SECURITY_LOCK_SALT_LEN; i += sizeof(uint32_t)) {
     uint32_t r;
@@ -478,8 +512,11 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   if (!prv_pin_is_well_formed(digits, len)) {
     return E_INVALID_ARGUMENT;
   }
+  const bool was_locked = security_lock_is_locked();
 
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
+
+  bool arm = false;
 
   // Preserve any duress PIN across a change of the real one: the two are set
   // independently and forgetting the duress PIN here would silently disarm it.
@@ -507,15 +544,33 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   }
 
   rv = prv_write(CFG_KEY, &cfg, sizeof(cfg));
-  if (rv == S_SUCCESS) {
-    s_runtime_cache.state = SecurityLockStateArmed;
-    s_runtime_cache.failed_attempts = 0;
-    rv = prv_flush_runtime();
-  }
+  arm = (rv == S_SUCCESS);
 
 unlock:
   pbl_mutex_unlock(&s_mutex);
   memset(&cfg, 0, sizeof(cfg));
+
+  if (!arm) {
+    return rv;
+  }
+
+  if (was_locked) {
+    // Through set_state, which is the only thing that unwinds a lock: it retires
+    // the countdown, gives the radio back, asks the phone to resend what was
+    // refused while shut, and broadcasts the change. This path is reachable
+    // while Locked, and used to skip all four.
+    return security_lock_set_state(SecurityLockStateArmed);
+  }
+
+  // Not a lock coming down, so there is nothing to unwind -- and going through
+  // set_state anyway would retire a disconnect countdown the watch is
+  // legitimately running.
+  pbl_mutex_lock(&s_mutex, PBL_FOREVER);
+  s_runtime_cache.state = SecurityLockStateArmed;
+  s_runtime_cache.failed_attempts = 0;
+  s_runtime_cache.last_attempt = 0;
+  rv = prv_flush_runtime();
+  pbl_mutex_unlock(&s_mutex);
   return rv;
 }
 
@@ -530,16 +585,17 @@ status_t security_lock_set_duress_pin(const char *digits, uint8_t len) {
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
 
   SecurityLockConfig cfg;
+  uint8_t candidate[SECURITY_LOCK_HASH_LEN] = {0};
   status_t rv = prv_read_config(&cfg);
   if (rv != S_SUCCESS) {
-    // No real PIN means nothing to be under duress about.
-    pbl_mutex_unlock(&s_mutex);
-    return E_INVALID_OPERATION;
+    // No real PIN means nothing to be under duress about. Out via the common
+    // exit, so the partially read salt and hash are scrubbed off the stack.
+    rv = E_INVALID_OPERATION;
+    goto unlock;
   }
 
   // Identical PINs would make the duress one unreachable -- the real check runs
   // first and would always win.
-  uint8_t candidate[SECURITY_LOCK_HASH_LEN];
   if ((cfg.pin_len == len) &&
       security_lock_pin_hash(digits, len, cfg.salt, candidate) == S_SUCCESS &&
       security_lock_hash_equal(candidate, cfg.pin_hash)) {
@@ -601,6 +657,8 @@ status_t security_lock_clear_pin(void) {
   if (!s_initialized) {
     return E_INVALID_OPERATION;
   }
+  const bool was_locked = security_lock_is_locked();
+
   // Before the runtime record goes: that record is the only thing that knows
   // the radio was taken down and what to put back.
   security_lock_radio_blackout_release();
@@ -635,6 +693,10 @@ status_t security_lock_clear_pin(void) {
     rv = prv_flush_runtime();
   }
   pbl_mutex_unlock(&s_mutex);
+
+  // The recovery path out of Locked, and the one that skips set_state, so the
+  // broadcast has to be repeated rather than inherited.
+  prv_broadcast_lock_state(was_locked);
   return rv;
 }
 
@@ -654,6 +716,36 @@ static void prv_duress_shred_callback(void *unused) {
   security_lock_shred(SecurityShredReasonDuressPin);
 }
 
+//! How long an entry made with \a attempts already spent must wait.
+//!
+//! Doubles per attempt past the budget and stops at the cap: 60s, 2m, 4m, ...
+//! up to an hour. Nothing before the budget is spent waits at all.
+static uint32_t prv_lockout_delay_s(uint8_t attempts) {
+  if (attempts < SECURITY_LOCK_MAX_PIN_ATTEMPTS) {
+    return 0;
+  }
+  const uint8_t over = attempts - SECURITY_LOCK_MAX_PIN_ATTEMPTS;
+  uint32_t delay = SECURITY_LOCK_LOCKOUT_BASE_S;
+  for (uint8_t i = 0; (i < over) && (delay < SECURITY_LOCK_LOCKOUT_MAX_S); ++i) {
+    delay *= 2;
+  }
+  return (delay > SECURITY_LOCK_LOCKOUT_MAX_S) ? SECURITY_LOCK_LOCKOUT_MAX_S : delay;
+}
+
+//! Seconds left of the backoff. The caller must hold the mutex.
+static uint32_t prv_lockout_remaining_s(time_t now) {
+  const uint32_t delay = prv_lockout_delay_s(s_runtime_cache.failed_attempts);
+  if (delay == 0) {
+    return 0;
+  }
+  const time_t elapsed = now - s_runtime_cache.last_attempt;
+  // A clock wound backwards buys no credit: the wait starts over.
+  if (elapsed < 0) {
+    return delay;
+  }
+  return ((uint32_t)elapsed >= delay) ? 0 : (delay - (uint32_t)elapsed);
+}
+
 //! The comparison itself, which triggers nothing. What a duress match is worth
 //! doing about is the caller's decision, and the two public entry points below
 //! make it differently.
@@ -668,12 +760,27 @@ static SecurityPinVerdict prv_verify_pin(const char *digits, uint8_t len,
 
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
 
+  // Refuse before hashing once the budget is spent, until the backoff has run.
+  // Nothing above this layer can be trusted to do it: the console and the phone
+  // endpoint reach this same function, and without it 9^4 guesses at 350ms each
+  // is a forty minute search that ends in a real unlock.
+  const time_t now = rtc_get_time();
+  const uint32_t lockout_s = prv_lockout_remaining_s(now);
+  if (lockout_s > 0) {
+    // Not counted. Counting refusals would let someone hammering the pad push
+    // the delay to the cap and keep it there, locking the owner out for good.
+    PBL_LOG_DBG("PIN attempt refused; %" PRIu32 "s of lockout left", lockout_s);
+    pbl_mutex_unlock(&s_mutex);
+    return SecurityPinVerdictWrong;
+  }
+
   // Burn the attempt before doing any comparison. If power is pulled between
   // here and the check below, the attempt is still counted -- otherwise an
   // attacker could brute force the PIN by cutting power on each wrong guess.
   if (s_runtime_cache.failed_attempts < UINT8_MAX) {
     s_runtime_cache.failed_attempts++;
   }
+  s_runtime_cache.last_attempt = now;
   status_t flush_rv = prv_flush_runtime();
   if (flush_rv != S_SUCCESS) {
     // Could not record the attempt, so we cannot bound guesses. Refuse rather
@@ -705,6 +812,7 @@ static SecurityPinVerdict prv_verify_pin(const char *digits, uint8_t len,
   // guess that failed.
   if (verdict != SecurityPinVerdictWrong) {
     s_runtime_cache.failed_attempts = 0;
+    s_runtime_cache.last_attempt = 0;
     prv_flush_runtime();
   }
 
@@ -754,6 +862,7 @@ status_t security_lock_reset_failed_attempts(void) {
   }
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
   s_runtime_cache.failed_attempts = 0;
+  s_runtime_cache.last_attempt = 0;
   status_t rv = prv_flush_runtime();
   pbl_mutex_unlock(&s_mutex);
   return rv;
@@ -761,6 +870,16 @@ status_t security_lock_reset_failed_attempts(void) {
 
 bool security_lock_attempts_exhausted(void) {
   return security_lock_get_failed_attempts() >= SECURITY_LOCK_MAX_PIN_ATTEMPTS;
+}
+
+uint32_t security_lock_get_lockout_remaining_s(void) {
+  if (!s_initialized) {
+    return 0;
+  }
+  pbl_mutex_lock(&s_mutex, PBL_FOREVER);
+  const uint32_t remaining = prv_lockout_remaining_s(rtc_get_time());
+  pbl_mutex_unlock(&s_mutex);
+  return remaining;
 }
 
 bool security_lock_is_shred_pending(void) {
