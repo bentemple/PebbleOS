@@ -16,7 +16,7 @@
 #   tools/build_dual_slot.sh --board getafix@dvt2 --debug --outdir /tmp/fw
 #   tools/build_dual_slot.sh --board obelix@pvt -- -DCONFIG_SERVICE_SECURITY_LOCK=n
 #
-# Anything after `--` is passed through to `./pbl configure`, which forwards
+# Anything after `--` is passed through to `pbl configure`, which forwards
 # unrecognised arguments to CMake.
 
 set -euo pipefail
@@ -58,6 +58,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$BOARD" ]] || die "--board is required, e.g. obelix@pvt, getafix@dvt2"
+
+# pbl is installed from requirements.txt, not run out of the checkout.
+command -v pbl >/dev/null || \
+  die "pbl is not on PATH -- activate the virtualenv it was installed into
+       (pip install -r requirements.txt)."
 
 BOARD_BASE="${BOARD%%@*}"
 # The bundle names its file after the normalised board, same as CI does.
@@ -135,7 +140,7 @@ collect_bundle() {
 
   pattern="$BUILD_DIR/normal_${BOARD_NAME}_"*"${suffix}.pbz"
   mapfile -t matches < <(compgen -G "$pattern" || true)
-  [[ ${#matches[@]} -gt 0 ]] || die "no bundle matched $pattern -- did ./pbl bundle run?"
+  [[ ${#matches[@]} -gt 0 ]] || die "no bundle matched $pattern -- did pbl bundle run?"
   if [[ ${#matches[@]} -gt 1 ]]; then
     printf '  %s\n' "${matches[@]}" >&2
     die "several bundles match $pattern; stale builds from another version are
@@ -152,7 +157,7 @@ build_slot() {
   configure_args+=("${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}")
 
   note "configuring slot ${slot}"
-  ./pbl configure "${configure_args[@]}"
+  pbl configure "${configure_args[@]}"
 
   # Belt and braces: read the slot back out of the configuration that was
   # actually generated, rather than trusting that our -D reached Kconfig.
@@ -164,8 +169,8 @@ build_slot() {
   fi
 
   note "building slot ${slot}"
-  ./pbl build
-  ./pbl bundle
+  pbl build
+  pbl bundle
 }
 
 SLOTS=(0 1)
