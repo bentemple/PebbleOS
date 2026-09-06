@@ -5,6 +5,7 @@
 
 #include <string.h>
 
+#include "kernel/events.h"
 #include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_pin_hash.h"
 #include "pbl/services/security_lock_shred.h"
@@ -34,13 +35,6 @@
 
 // Fakes for the service's new dependencies
 ////////////////////////////////////
-
-//! Changing a PIN requires a connected phone; tests drive this directly.
-static bool s_phone_connected = true;
-typedef struct CommSession CommSession;
-CommSession *comm_session_get_system_session(void) {
-  return s_phone_connected ? (CommSession *)1 : NULL;
-}
 
 //! A duress unlock defers the wipe to the launcher task rather than running it
 //! inline, so the test captures the callback instead of shredding.
@@ -82,11 +76,27 @@ void bt_persistent_storage_set_unfaithful(bool unfaithful) {
   s_unfaithful_marks++;
 }
 
+//! Lock-state broadcasts. The sequence is recorded rather than counted:
+//! subscribers read these as edges, so what matters is that each one is a
+//! change and that no state repeats.
+#define MAX_LOCK_EVENTS 8
+static int s_lock_events;
+static bool s_lock_event_locked[MAX_LOCK_EVENTS];
+void event_put(PebbleEvent *event) {
+  cl_assert_equal_i(PEBBLE_SECURITY_LOCK_EVENT, event->type);
+  cl_assert(s_lock_events < MAX_LOCK_EVENTS);
+  s_lock_event_locked[s_lock_events++] = event->security_lock.is_locked;
+}
+
 // Fake PIN hash
 ////////////////////////////////////
-// Substituted for the mbedtls-backed implementation so the test does not link
-// a crypto library to exercise the record store. Must still be salt- and
-// PIN-sensitive, or the tests below would pass vacuously.
+// Substituted for the real derivation, which is 10000 SHA-256 rounds per PIN
+// operation -- minutes across this suite, for a property none of it is about.
+// It links nothing extra: pin_hash.c uses the local sha256.c, not mbedtls.
+//
+// Must still be salt- and PIN-sensitive, or the tests below would pass
+// vacuously. The derivation itself, and the constant-time comparator this
+// substitutes an ordinary memcmp for, are covered by test_security_lock_pin_hash.
 
 //! Attempts already recorded at the moment hashing was invoked. Used to prove
 //! the counter is bumped before any comparison happens.
@@ -171,7 +181,6 @@ static const char *DURESS = "4321";
 void test_security_lock__initialize(void) {
   s_attempts_at_hash_time = -1;
   s_hash_call_count = 0;
-  s_phone_connected = true;
   s_duress_shreds = 0;
   s_pending_cb = NULL;
   s_resync_reports = 0;
@@ -179,6 +188,7 @@ void test_security_lock__initialize(void) {
   s_resync_dbs = 0;
   s_airplane_at_report = false;
   s_unfaithful_marks = 0;
+  s_lock_events = 0;
   fake_bt_ctl_reset();
   fake_spi_flash_init(0, 0x1000000);
   pfs_init(false);
@@ -1405,4 +1415,120 @@ void test_security_lock__locking_asks_for_nothing(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
 
   cl_assert_equal_i(0, s_resync_reports);
+}
+
+// The lock-state broadcast
+////////////////////////////////////
+//
+// What an app subscribed to the lock service sees. Only locked/unlocked ever
+// goes out: the reason for the lock and the PIN that ended it stay in the
+// service, so a duress unlock is indistinguishable from an ordinary one.
+
+void test_security_lock__locking_and_unlocking_each_broadcast_once(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(0, s_lock_events);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert_equal_i(1, s_lock_events);
+  cl_assert(s_lock_event_locked[0]);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+  cl_assert_equal_i(2, s_lock_events);
+  cl_assert(!s_lock_event_locked[1]);
+}
+
+//! Setting the state the watch is already in is not a transition. A repeat
+//! lock is a real path -- the boot handler locks a watch that may already be
+//! locked -- and a second event for it would tell a subscriber something
+//! happened when nothing did.
+void test_security_lock__re_locking_broadcasts_nothing(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert_equal_i(1, s_lock_events);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+
+  cl_assert_equal_i(1, s_lock_events);
+}
+
+//! Armed and Disabled are both unlocked, so moving between them is not an
+//! event: the service reports lockedness, not its own state machine.
+void test_security_lock__unlocked_state_changes_broadcast_nothing(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateDisabled));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert_equal_i(0, s_lock_events);
+}
+
+//! Clearing the PIN is the other way out of Locked and skips set_state, so it
+//! has to broadcast for itself.
+void test_security_lock__clearing_the_pin_broadcasts_an_unlock(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert_equal_i(1, s_lock_events);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_pin());
+
+  cl_assert_equal_i(2, s_lock_events);
+  cl_assert(!s_lock_event_locked[1]);
+}
+
+//! Clearing the PIN of an unlocked watch changes nothing an app can see.
+void test_security_lock__clearing_the_pin_while_unlocked_broadcasts_nothing(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_clear_pin());
+
+  cl_assert_equal_i(0, s_lock_events);
+}
+
+//! A duress unlock takes the same path and produces the same event as a real
+//! one. Nothing in the broadcast says which PIN was entered.
+void test_security_lock__a_duress_unlock_looks_like_any_other(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_duress_pin(DURESS, strlen(DURESS)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+
+  cl_assert(security_lock_verify_pin(DURESS, strlen(DURESS), NULL));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateArmed));
+
+  cl_assert_equal_i(2, s_lock_events);
+  cl_assert(s_lock_event_locked[0]);
+  cl_assert(!s_lock_event_locked[1]);
+}
+
+//! An uninitialised service refuses the state change, so it must not announce
+//! one either.
+void test_security_lock__no_broadcast_before_init(void) {
+  security_lock_deinit();
+
+  cl_assert_equal_i(E_INVALID_OPERATION, security_lock_set_state(SecurityLockStateLocked));
+
+  cl_assert_equal_i(0, s_lock_events);
+  security_lock_init();
+}
+
+//! Setting a PIN is the third path that moves the state without set_state.
+//! Only the debug hook can reach it from Locked, but the broadcast follows the
+//! state rather than the caller.
+void test_security_lock__setting_a_pin_while_locked_broadcasts_an_unlock(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert_equal_i(1, s_lock_events);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin("5678", 4));
+
+  cl_assert_equal_i(2, s_lock_events);
+  cl_assert(!s_lock_event_locked[1]);
+}
+
+//! Changing the PIN of an unlocked watch is not a transition.
+void test_security_lock__setting_a_pin_while_unlocked_broadcasts_nothing(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin("5678", 4));
+
+  cl_assert_equal_i(0, s_lock_events);
 }

@@ -129,6 +129,7 @@ typedef enum {
   PEBBLE_SPEAKER_EVENT,
   PEBBLE_BACKLIGHT_EVENT,
   PEBBLE_SECURITY_SHRED_EVENT,
+  PEBBLE_SECURITY_LOCK_EVENT,
 
   PEBBLE_NUM_EVENTS
 } PebbleEventType;
@@ -499,23 +500,38 @@ typedef struct PBL_PACKED { // 1 byte
   bool is_on;
 } PebbleBacklightEvent;
 
-//! Broadcast when the security lock is about to destroy the watch's content,
-//! so anything holding data of its own can destroy it too.
+//! Broadcast when the security lock has destroyed the watch's content, so
+//! anything holding data of its own can destroy it too.
 //!
-//! Emitted before the wipe starts, on KernelBG or KernelMain depending on what
-//! triggered it. Handlers must be quick and must not block: the shred is
-//! already under way behind them and a slow handler only widens the window in
-//! which the data still exists.
+//! Queued from KernelMain inside the shred, so it is delivered once the wipe
+//! has finished, not before. A running watchface receives it; a foreground
+//! app does not, because its deinit is queued ahead of this. Boot shreds
+//! publish nothing.
 //!
 //! Third-party app persist storage is deliberately not wiped by the shred
 //! itself -- the phone cannot restore it -- so this event is how an app opts
 //! in to clearing its own.
 typedef struct PACKED { // 1 byte
-  //! SecurityShredReason. Note that SecurityShredReasonDuressPin means the
-  //! user is being coerced: handlers must not show UI or otherwise make the
-  //! wipe observable.
+  //! SecurityShredReason. Never SecurityShredReasonDuressPin: a duress wipe
+  //! publishes nothing, so a subscriber cannot tell one from an ordinary
+  //! unlock and report it.
   uint8_t reason;
 } PebbleSecurityShredEvent;
+
+//! Broadcast when the watch locks or unlocks, so anything that draws a lock
+//! indicator can follow the state without polling.
+//!
+//! One event per transition and none for a set-state that changed nothing, so
+//! a subscriber can treat each one as an edge.
+//!
+//! Carries the new state and nothing else. Why the watch locked, how many PIN
+//! attempts are left and which PIN unlocked it all stay in the lock service:
+//! one of the PINs the watch accepts unlocks while quietly destroying the
+//! watch's content, and anything here that told the two unlocks apart would be
+//! a way to observe someone entering it under coercion.
+typedef struct PACKED { // 1 byte
+  bool is_locked;
+} PebbleSecurityLockEvent;
 
 typedef enum {
   VoiceEventTypeSessionSetup,
@@ -828,6 +844,7 @@ typedef struct PBL_PACKED {
     PebbleSpeakerEvent speaker;
     PebbleBacklightEvent backlight;
     PebbleSecurityShredEvent security_shred;
+    PebbleSecurityLockEvent security_lock;
   };
   PebbleTaskBitset task_mask; // 1 == filter out, 0 == leave in
   // NOTE: we put this 8 bit field at the end so that we can pack this structure and still keep the

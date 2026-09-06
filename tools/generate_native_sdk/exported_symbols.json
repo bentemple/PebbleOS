@@ -56,6 +56,7 @@
     "fw/applib/health_service.h",
     "fw/applib/moddable/moddable.h",
     "fw/applib/platform.h",
+    "fw/applib/security_lock_service.h",
     "fw/applib/security_shred_service.h",
     "fw/applib/tick_timer_service.h",
     "fw/applib/touch_service.h",
@@ -477,6 +478,29 @@
                 }, {
                   "type": "function",
                   "name": "security_shred_service_unsubscribe",
+                  "addedRevision": "110"
+                }
+              ]
+            }, {
+              "type": "group",
+              "name": "SecurityLockService",
+              "addedRevision": "110",
+              "exports": [
+                {
+                  "type": "type",
+                  "name": "SecurityLockHandler",
+                  "addedRevision": "110"
+                }, {
+                  "type": "function",
+                  "name": "security_lock_service_peek_is_locked",
+                  "addedRevision": "110"
+                }, {
+                  "type": "function",
+                  "name": "security_lock_service_subscribe",
+                  "addedRevision": "110"
+                }, {
+                  "type": "function",
+                  "name": "security_lock_service_unsubscribe",
                   "addedRevision": "110"
                 }
               ]

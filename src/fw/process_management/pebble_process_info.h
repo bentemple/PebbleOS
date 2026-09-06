@@ -168,8 +168,7 @@ typedef enum {
 // (tap/pan/swipe + window attach/detach) to apps (rev 107) sdk.major:0x5 .minor:0x69 -- Add
 // app_touch_navigation_enable() opt-in for third-party touch nav (rev 108) sdk.major:0x5
 // .minor:0x6a -- Add HRV sampling API (health_service_set_hrv_sample_period) (rev 109)
-// sdk.major:0x5 .minor:0x6b -- Add security_shred_service_subscribe/unsubscribe for security
-// shred events (rev 110)
+// sdk.major:0x5 .minor:0x6b -- Add security shred and security lock services (rev 110)
 
 #define PROCESS_INFO_CURRENT_SDK_VERSION_MAJOR 0x5
 #define PROCESS_INFO_CURRENT_SDK_VERSION_MINOR 0x6b

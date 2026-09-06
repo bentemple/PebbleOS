@@ -210,6 +210,12 @@ void sys_light_set_system_color(void);
 bool sys_mobile_app_is_connected_debounced(void);
 bool sys_pebblekit_is_connected_debounced(void);
 
+//! Whether the watch is locked, for security_lock_service_peek_is_locked().
+//! False on a board built without the feature. Deliberately the only thing the
+//! lock service exposes to an unprivileged task: the reason for the lock and
+//! the failed-attempt count stay on this side.
+bool sys_security_lock_is_locked(void);
+
 bool sys_touch_service_is_enabled(void);
 void sys_touch_reset(void);
 
