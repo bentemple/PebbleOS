@@ -794,28 +794,18 @@ void test_security_lock_shred__a_wipe_without_a_lock_leaves_the_radio_alone(void
 // What the wipe tells apps
 ////////////////////////////////////
 
-//! The duress PIN unlocks first and wipes afterwards, so it is the only trigger
-//! that publishes an unlock and then a shred. An app subscribed to both SDK
-//! services would read that pair as "the duress PIN was entered" -- and because
-//! a duress wipe deliberately skips the radio blackout, it could send the
-//! inference straight to the phone, which in a duress is quite possibly in the
-//! coercer's hands. So this wipe announces nothing at all.
-void test_security_lock_shred__a_duress_wipe_announces_nothing(void) {
-  security_lock_shred(SecurityShredReasonDuressPin);
-
-  cl_assert_equal_i(0, s_trace.events);
-  // Silent, not skipped: the wipe itself still ran in full.
-  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
-}
-
-//! The other half of the rule above, so the silence is a property of the duress
-//! reason rather than of an announcement that never fires for anything.
-void test_security_lock_shred__every_other_reason_still_announces(void) {
+//! Every reason announces, duress included. A duress wipe is the one an app
+//! most needs to hear about, since it is the one where the app's own storage is
+//! the only thing left holding the user's data. The tell it leaves -- duress is
+//! the only trigger that publishes an unlock and then a shred -- is a known
+//! residual, documented in docs/architecture/security_lock.md alongside the
+//! others the duress PIN cannot close.
+void test_security_lock_shred__every_reason_announces(void) {
   const SecurityShredReason reasons[] = {
       SecurityShredReasonUnknown,           SecurityShredReasonPhoneLockdown,
       SecurityShredReasonManualPanic,       SecurityShredReasonDisconnectTimeout,
       SecurityShredReasonRebootWhileLocked, SecurityShredReasonPinAttemptsExhausted,
-      SecurityShredReasonClockRollback,
+      SecurityShredReasonClockRollback,     SecurityShredReasonDuressPin,
   };
 
   for (size_t i = 0; i < ARRAY_LENGTH(reasons); ++i) {
@@ -824,6 +814,14 @@ void test_security_lock_shred__every_other_reason_still_announces(void) {
   }
 
   cl_assert_equal_i((int)ARRAY_LENGTH(reasons), s_trace.events);
+}
+
+//! And the duress wipe still runs in full behind the announcement.
+void test_security_lock_shred__a_duress_wipe_destroys_everything(void) {
+  security_lock_shred(SecurityShredReasonDuressPin);
+
+  cl_assert_equal_i(1, s_trace.events);
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
 }
 
 // Boot
