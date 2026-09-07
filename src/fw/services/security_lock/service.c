@@ -34,13 +34,18 @@ PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LE
 //! discarding the config record throws the PIN away. Sharing one number meant a
 //! runtime-only field could disarm the lock on upgrade; these cannot.
 #define CFG_RECORD_VERSION 4
-#define RT_RECORD_VERSION 7
+#define RT_RECORD_VERSION 6
 
 //! Config: written rarely (only when the PIN changes).
 static const char *CFG_KEY = "cfg";
 //! Runtime: written often (state changes, failed attempts, deadlines), kept
 //! separate so a failed-attempt write does not rewrite the PIN verifier.
 static const char *RT_KEY = "rt";
+//! Wall clock at the last counted failed attempt, which the escalating lockout
+//! is measured from. Its own key rather than a field in the record above: the
+//! record is read whole, and growing it would make every already-installed
+//! watch fail the read and come back unlocked on the upgrade that added it.
+static const char *ATTEMPT_KEY = "at";
 
 typedef struct PACKED {
   uint16_t version;
@@ -59,10 +64,6 @@ typedef struct PACKED {
   uint16_t version;
   uint8_t state;
   uint8_t failed_attempts;
-  //! Wall clock at the last counted failed attempt, which the escalating
-  //! lockout is measured from. Persisted alongside the counter, so a reboot
-  //! does not hand back a free guess.
-  time_t last_attempt;
   bool shred_pending;
   //! Something has been written to the storage a shred destroys since the last
   //! one ran. False means a shred has nothing new to destroy.
@@ -112,6 +113,10 @@ static time_t s_time_high_water_persisted;
 //! -- while persisting it would mean a flash write per refused write.
 static uint32_t s_refused_dbs;
 
+//! Mirrors ATTEMPT_KEY. Absent on a watch upgrading from before the lockout,
+//! which reads as zero: the full delay, never a free guess.
+static time_t s_last_attempt;
+
 static void prv_runtime_defaults(SecurityLockRuntime *rt) {
   *rt = (SecurityLockRuntime){
       .version = RT_RECORD_VERSION,
@@ -155,6 +160,11 @@ static status_t prv_write(const char *key, const void *val, size_t len) {
   return rv;
 }
 
+static void prv_set_last_attempt(time_t when) {
+  s_last_attempt = when;
+  prv_write(ATTEMPT_KEY, &s_last_attempt, sizeof(s_last_attempt));
+}
+
 static status_t prv_read_config(SecurityLockConfig *cfg) {
   status_t rv = prv_read(CFG_KEY, cfg, sizeof(*cfg));
   if (rv == S_SUCCESS && cfg->version != CFG_RECORD_VERSION) {
@@ -190,6 +200,12 @@ void security_lock_init(void) {
   // page and can take a synchronous garbage collect with it. This runs before
   // anything else is up, so a boot that dies here dies with nothing on the wire.
   status_t rv = prv_read(RT_KEY, &rt, sizeof(rt));
+  // Absent on a watch that predates the lockout, and on any watch that has
+  // never had a failed attempt. Zero is the safe answer either way: the full
+  // delay applies, so an upgrade never hands back a guess.
+  if (prv_read(ATTEMPT_KEY, &s_last_attempt, sizeof(s_last_attempt)) != S_SUCCESS) {
+    s_last_attempt = 0;
+  }
   if (rv == S_SUCCESS && rt.version == RT_RECORD_VERSION) {
     s_runtime_cache = rt;
   } else {
@@ -343,7 +359,7 @@ status_t security_lock_set_state(SecurityLockState state) {
     // A disconnect countdown does not re-arm on reconnect either; only the next
     // unexpected disconnect arms one again.
     s_runtime_cache.failed_attempts = 0;
-    s_runtime_cache.last_attempt = 0;
+    prv_set_last_attempt(0);
     s_runtime_cache.lock_deadline = 0;
     s_runtime_cache.shred_deadline = 0;
     s_runtime_cache.countdown_source = SecurityCountdownNone;
@@ -516,8 +532,6 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
 
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
 
-  bool arm = false;
-
   // Preserve any duress PIN across a change of the real one: the two are set
   // independently and forgetting the duress PIN here would silently disarm it.
   SecurityLockConfig cfg;
@@ -544,33 +558,23 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   }
 
   rv = prv_write(CFG_KEY, &cfg, sizeof(cfg));
-  arm = (rv == S_SUCCESS);
+  if (rv == S_SUCCESS) {
+    s_runtime_cache.state = SecurityLockStateArmed;
+    s_runtime_cache.failed_attempts = 0;
+    prv_set_last_attempt(0);
+    rv = prv_flush_runtime();
+  }
 
 unlock:
   pbl_mutex_unlock(&s_mutex);
   memset(&cfg, 0, sizeof(cfg));
 
-  if (!arm) {
-    return rv;
-  }
-
-  if (was_locked) {
-    // Through set_state, which is the only thing that unwinds a lock: it retires
-    // the countdown, gives the radio back, asks the phone to resend what was
-    // refused while shut, and broadcasts the change. This path is reachable
-    // while Locked, and used to skip all four.
-    return security_lock_set_state(SecurityLockStateArmed);
-  }
-
-  // Not a lock coming down, so there is nothing to unwind -- and going through
-  // set_state anyway would retire a disconnect countdown the watch is
-  // legitimately running.
-  pbl_mutex_lock(&s_mutex, PBL_FOREVER);
-  s_runtime_cache.state = SecurityLockStateArmed;
-  s_runtime_cache.failed_attempts = 0;
-  s_runtime_cache.last_attempt = 0;
-  rv = prv_flush_runtime();
-  pbl_mutex_unlock(&s_mutex);
+  // The third path that moves the state without set_state. Deliberately does
+  // not unwind the way set_state does: a disconnect countdown takes a much
+  // less aggressive stance than a lock the user is standing in front of, and
+  // routing through set_state would retire one the watch is legitimately
+  // running. Silent unless the watch was actually locked.
+  prv_broadcast_lock_state(was_locked);
   return rv;
 }
 
@@ -738,7 +742,7 @@ static uint32_t prv_lockout_remaining_s(time_t now) {
   if (delay == 0) {
     return 0;
   }
-  const time_t elapsed = now - s_runtime_cache.last_attempt;
+  const time_t elapsed = now - s_last_attempt;
   // A clock wound backwards buys no credit: the wait starts over.
   if (elapsed < 0) {
     return delay;
@@ -780,7 +784,7 @@ static SecurityPinVerdict prv_verify_pin(const char *digits, uint8_t len,
   if (s_runtime_cache.failed_attempts < UINT8_MAX) {
     s_runtime_cache.failed_attempts++;
   }
-  s_runtime_cache.last_attempt = now;
+  prv_set_last_attempt(now);
   status_t flush_rv = prv_flush_runtime();
   if (flush_rv != S_SUCCESS) {
     // Could not record the attempt, so we cannot bound guesses. Refuse rather
@@ -812,7 +816,7 @@ static SecurityPinVerdict prv_verify_pin(const char *digits, uint8_t len,
   // guess that failed.
   if (verdict != SecurityPinVerdictWrong) {
     s_runtime_cache.failed_attempts = 0;
-    s_runtime_cache.last_attempt = 0;
+    prv_set_last_attempt(0);
     prv_flush_runtime();
   }
 
@@ -862,7 +866,7 @@ status_t security_lock_reset_failed_attempts(void) {
   }
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
   s_runtime_cache.failed_attempts = 0;
-  s_runtime_cache.last_attempt = 0;
+  prv_set_last_attempt(0);
   status_t rv = prv_flush_runtime();
   pbl_mutex_unlock(&s_mutex);
   return rv;
