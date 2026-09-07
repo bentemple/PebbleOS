@@ -50,6 +50,11 @@ static void prv_run_pending_callback(void) {
     cb(NULL);
   }
 }
+//! Pulled in by security_lock_should_drop_notifications(). The real ones live
+//! in shred.c and the shell prefs; neither is the subject of this suite.
+bool security_lock_is_shredding(void) { return false; }
+bool shell_prefs_get_block_notifications_when_locked(void) { return true; }
+
 uint32_t security_lock_shred(SecurityShredReason reason) {
   if (reason == SecurityShredReasonDuressPin) {
     s_duress_shreds++;

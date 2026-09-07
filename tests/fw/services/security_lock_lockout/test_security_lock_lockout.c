@@ -51,6 +51,11 @@ void security_lock_endpoint_report_resync_needed(SecurityShredReason reason, uin
 
 void bt_persistent_storage_set_unfaithful(bool unfaithful) {}
 
+//! Pulled in by security_lock_should_drop_notifications(). The real ones live
+//! in shred.c and the shell prefs; neither is the subject of this suite.
+bool security_lock_is_shredding(void) { return false; }
+bool shell_prefs_get_block_notifications_when_locked(void) { return true; }
+
 void event_put(PebbleEvent *event) {}
 
 //! Counts every derivation, which is what tells a refused entry from a compared
@@ -275,28 +280,34 @@ void test_security_lock_lockout__unlocking_clears_it_for_good(void) {
 // Leaving Locked by setting a PIN
 ////////////////////////////////////
 //
-// The third path out of the locked state. It used to write the state itself and
-// skip everything the other two do: the radio stayed down, the deadlines stayed
-// armed and the phone was never asked to resend what was refused while shut.
-// Covered here rather than beside the other record-store cases because this
-// suite already stands up the whole service against real flash.
+// The third path out of the locked state, and deliberately the quiet one. It
+// writes the state itself rather than going through set_state, so it does not
+// retire a countdown the watch is legitimately running: a lock armed by a
+// bluetooth disconnect takes a much less aggressive stance than one the user is
+// standing in front of, and setting a PIN is not an answer to it. Covered here
+// because this suite already stands up the whole service against real flash.
 
-void test_security_lock_lockout__setting_a_pin_out_of_locked_tears_the_lock_down(void) {
+void test_security_lock_lockout__setting_a_pin_out_of_locked_leaves_the_countdown_alone(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
   cl_assert_equal_i(S_SUCCESS,
-                    security_lock_set_deadlines(4000, 5000, SecurityCountdownManual));
-  security_lock_radio_blackout_engage();
-  security_lock_note_write_refused(BlobDBIdPins);
-  cl_assert(security_lock_is_radio_blackout());
-  s_resync_reports = 0;
+                    security_lock_set_deadlines(4000, 5000, SecurityCountdownDisconnect));
 
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin("5678", 4));
 
+  // Out of Locked, but nothing else unwound.
   cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
-  cl_assert(!security_lock_is_radio_blackout());
-  cl_assert(!bt_ctl_is_airplane_mode_on());
-  cl_assert_equal_i(1, s_resync_reports);
-  cl_assert_equal_i(0, security_lock_get_lock_deadline());
-  cl_assert_equal_i(0, security_lock_get_shred_deadline());
-  cl_assert_equal_i(SecurityCountdownNone, security_lock_get_countdown_source());
+  cl_assert_equal_i(4000, security_lock_get_lock_deadline());
+  cl_assert_equal_i(5000, security_lock_get_shred_deadline());
+  cl_assert_equal_i(SecurityCountdownDisconnect, security_lock_get_countdown_source());
+}
+
+//! The attempt budget still resets, so a new PIN is not born already locked out.
+void test_security_lock_lockout__setting_a_pin_clears_the_lockout(void) {
+  prv_exhaust();
+  cl_assert(security_lock_get_lockout_remaining_s() > 0);
+
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin("5678", 4));
+
+  cl_assert_equal_i(0, security_lock_get_failed_attempts());
+  cl_assert_equal_i(0, security_lock_get_lockout_remaining_s());
 }
