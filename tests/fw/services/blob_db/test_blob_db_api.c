@@ -352,3 +352,25 @@ void test_blob_db_api__a_write_dropped_mid_wipe_is_recorded(void) {
 
   cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdNotifs), fake_security_lock_get_refused_dbs());
 }
+
+//! The notification store is the one the setting reaches. Turning it off lets
+//! phone-pushed notifications land on a locked watch...
+void test_blob_db_api__the_setting_lets_notifications_through_while_locked(void) {
+  fake_security_lock_set_locked(true);
+  fake_security_lock_set_block_notifications(false);
+
+  cl_assert_equal_i(S_SUCCESS, prv_insert(BlobDBIdNotifs));
+
+  cl_assert_equal_i(0, fake_security_lock_get_refused_dbs());
+}
+
+//! ...and reaches nothing else. Pins, reminders and the rest stay refused for
+//! as long as the watch is shut; the setting is about notifications only.
+void test_blob_db_api__the_setting_does_not_reach_the_other_stores(void) {
+  fake_security_lock_set_locked(true);
+  fake_security_lock_set_block_notifications(false);
+
+  cl_assert_equal_i(S_SUCCESS, prv_insert(BlobDBIdPins));
+
+  cl_assert_equal_i(SECURITY_SHRED_DB_BIT(BlobDBIdPins), fake_security_lock_get_refused_dbs());
+}

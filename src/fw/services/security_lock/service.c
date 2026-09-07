@@ -23,6 +23,7 @@
 #include "pbl/services/system_task.h"
 #include "system/passert.h"
 #include "pbl/util/size.h"
+#include "shell/prefs.h"
 #include "util/units.h"
 
 PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LEVEL);
@@ -1103,4 +1104,11 @@ time_t security_lock_get_time_high_water(void) {
     return 0;
   }
   return s_runtime_cache.time_high_water;
+}
+
+bool security_lock_should_drop_notifications(void) {
+  if (security_lock_is_shredding()) {
+    return true;
+  }
+  return security_lock_is_locked() && shell_prefs_get_block_notifications_when_locked();
 }

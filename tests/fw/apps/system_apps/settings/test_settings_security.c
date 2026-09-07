@@ -278,6 +278,17 @@ bool shell_prefs_get_lockdown_app_in_launcher(void) {
   return s_lockdown_in_launcher;
 }
 
+//! Mirrors the production default: on.
+static bool s_block_notifications_when_locked = true;
+
+bool shell_prefs_get_block_notifications_when_locked(void) {
+  return s_block_notifications_when_locked;
+}
+
+void shell_prefs_set_block_notifications_when_locked(bool enable) {
+  s_block_notifications_when_locked = enable;
+}
+
 void shell_prefs_set_lockdown_app_in_launcher(bool enable) {
   s_lockdown_in_launcher = enable;
 }
@@ -512,10 +523,11 @@ void i18n_free_all(const void *owner) {
 #define ROW_LOCK_AFTER 2
 #define ROW_ERASE_AFTER 3
 #define ROW_DURESS_PIN 4
-#define ROW_LOCKDOWN 5
-#define ROW_LOCKDOWN_ERASE 6
-#define ROW_SHOW_IN_LAUNCHER 7
-#define ROWS_WHEN_ON 8
+#define ROW_BLOCK_NOTIFICATIONS 5
+#define ROW_LOCKDOWN 6
+#define ROW_LOCKDOWN_ERASE 7
+#define ROW_SHOW_IN_LAUNCHER 8
+#define ROWS_WHEN_ON 9
 
 static void prv_open_settings(void) {
   settings_security_get_info()->init();
@@ -2080,4 +2092,48 @@ void test_settings_security__delay_pickers_open_on_the_current_choice(void) {
 
   prv_select(ROW_ERASE_AFTER);
   cl_assert_equal_i(3, s_option_choice);  // 30m, 1h, 2h, 4h
+}
+
+// Block Notifications
+////////////////////////////////////
+
+//! On by default, and the subtitle says what "on" does to a message rather than
+//! just that it is on.
+void test_settings_security__block_notifications_defaults_to_on(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_draw(ROW_BLOCK_NOTIFICATIONS);
+
+  cl_assert(shell_prefs_get_block_notifications_when_locked());
+  cl_assert_equal_s("Block Notifications", s_drawn_title);
+  cl_assert_equal_s("On, discarded while locked", s_drawn_subtitle);
+}
+
+//! Selecting it toggles, and the subtitle states the consequence of off --
+//! kept, not shown, which is the distinction the row exists to make.
+void test_settings_security__block_notifications_toggles(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_BLOCK_NOTIFICATIONS);
+
+  cl_assert(!shell_prefs_get_block_notifications_when_locked());
+  prv_draw(ROW_BLOCK_NOTIFICATIONS);
+  cl_assert_equal_s("Off, kept until unlocked", s_drawn_subtitle);
+
+  prv_select(ROW_BLOCK_NOTIFICATIONS);
+  cl_assert(shell_prefs_get_block_notifications_when_locked());
+}
+
+//! And it is gone with the rest when the feature is off: there is no lock for a
+//! notification to arrive behind.
+void test_settings_security__block_notifications_is_hidden_when_off(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
+
+  prv_disable_with_pin("1234");
+
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
 }

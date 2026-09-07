@@ -294,13 +294,12 @@ void ancs_notifications_handle_message(uint32_t uid, ANCSProperty properties,
   PBL_ASSERTN(notif_attributes && app_attributes);
 
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
-  // Bail before ancs_filtering_record_app() persists app metadata, before the
-  // update path reaches notification_storage_store(), and before an incoming
-  // call puts the caller ID on a locked screen. The in-progress check is not
-  // redundant with the lock state: the duress and clock-rollback wipes both
-  // run unlocked. Logged at DBG: a locked watch with a chatty phone reaches
-  // this once per message, so this must not be a default-level line.
-  if (security_lock_is_locked() || security_lock_is_shredding()) {
+  // Bails before ancs_filtering_record_app() persists app metadata and before
+  // the update path reaches notification_storage_store(). Always while the wipe
+  // runs; while merely locked it follows the setting, on by default. Nothing
+  // reaches the display either way -- the lock screen outranks the notification
+  // modal, and launcher_block_popups() holds an incoming call's UI back.
+  if (security_lock_should_drop_notifications()) {
     PBL_LOG_DBG("Locked or shredding, ANCS notification dropped");
     return;
   }

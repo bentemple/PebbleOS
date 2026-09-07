@@ -80,4 +80,5 @@
 
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
   PREFS_MACRO(PREF_KEY_LOCKDOWN_APP_IN_LAUNCHER, s_lockdown_app_in_launcher)
+  PREFS_MACRO(PREF_KEY_BLOCK_NOTIFICATIONS_WHEN_LOCKED, s_block_notifications_when_locked)
 #endif

@@ -20,9 +20,8 @@ status_t notif_db_insert(const uint8_t *key, int key_len, const uint8_t *val, in
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
   // A backstop. blob_db_insert() drops earlier than this and covers every
   // store the wipe destroys, so on that path -- the only one today -- this is
-  // unreachable. Kept for a future direct caller. Logged at DBG: such a caller
-  // would reach this once per message, so it must not be a default-level line.
-  if (security_lock_is_locked() || security_lock_is_shredding()) {
+  // unreachable. Kept for a future direct caller.
+  if (security_lock_should_drop_notifications()) {
     PBL_LOG_DBG("Locked or shredding, notification dropped");
     return S_SUCCESS;
   }

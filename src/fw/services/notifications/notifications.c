@@ -82,12 +82,11 @@ void notifications_init(void) {
 
 void notifications_add_notification(TimelineItem *notification) {
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
-  // A locked watch has shredded its content; storing this would put cleartext
-  // back on flash. The in-progress check is not redundant with the lock state:
-  // the duress and clock-rollback wipes both run unlocked. Never log the item
-  // itself. Logged at DBG: a locked watch with a chatty phone reaches this once
-  // per message, so this must not be a default-level line.
-  if (security_lock_is_locked() || security_lock_is_shredding()) {
+  // Always while the wipe runs; while merely locked it follows the setting,
+  // which is on by default. Off stores it for whoever unlocks -- never shows
+  // it, since the lock screen outranks the notification modal regardless.
+  // Never log the item itself.
+  if (security_lock_should_drop_notifications()) {
     PBL_LOG_DBG("Locked or shredding, notification dropped");
     return;
   }

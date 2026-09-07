@@ -355,9 +355,14 @@ static bool s_music_show_album_art = false;
 
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
 #define PREF_KEY_LOCKDOWN_APP_IN_LAUNCHER "lockdownAppInLauncher"
+#define PREF_KEY_BLOCK_NOTIFICATIONS_WHEN_LOCKED "blockNotifsWhenLocked"
 
 //! A panic action nobody can find is not a panic action.
 static bool s_lockdown_app_in_launcher = true;
+
+//! On by default: a message arriving while the watch is shut is the case the
+//! lock exists for. Off keeps them, still unshown, for whoever unlocks.
+static bool s_block_notifications_when_locked = true;
 #endif
 
 // ============================================================================================
@@ -961,6 +966,11 @@ static bool prv_set_s_music_show_album_art(bool *enabled) {
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
 static bool prv_set_s_lockdown_app_in_launcher(bool *enabled) {
   s_lockdown_app_in_launcher = *enabled;
+  return true;
+}
+
+static bool prv_set_s_block_notifications_when_locked(bool *enabled) {
+  s_block_notifications_when_locked = *enabled;
   return true;
 }
 #endif
@@ -2316,5 +2326,13 @@ bool shell_prefs_get_lockdown_app_in_launcher(void) {
 
 void shell_prefs_set_lockdown_app_in_launcher(bool enable) {
   prv_pref_set(PREF_KEY_LOCKDOWN_APP_IN_LAUNCHER, &enable, sizeof(enable));
+}
+
+bool shell_prefs_get_block_notifications_when_locked(void) {
+  return s_block_notifications_when_locked;
+}
+
+void shell_prefs_set_block_notifications_when_locked(bool enable) {
+  prv_pref_set(PREF_KEY_BLOCK_NOTIFICATIONS_WHEN_LOCKED, &enable, sizeof(enable));
 }
 #endif

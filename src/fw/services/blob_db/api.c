@@ -206,9 +206,13 @@ static uint32_t s_writes_dropped;
 //! The in-flight check is not redundant with the lock state -- the duress and
 //! clock-rollback wipes both run unlocked.
 //!
+//! The notification store is the one the user has a say over: while the watch
+//! is merely locked it follows the block-notifications-when-locked setting, so
+//! turning that off keeps messages for whoever unlocks. Everything else stays
+//! refused for as long as the watch is shut, and nothing is exempt mid-wipe.
+//!
 //! Also owns the log bookkeeping: one line when the drops start and one when
-//! they stop, never one per write. A locked watch with a chatty phone reaches
-//! this per message, and this module's level compiles PBL_LOG_DBG out.
+//! they stop, never one per write.
 //!
 //! Records which database was refused as it goes. The success we report is what
 //! makes that necessary: the phone marks the record delivered and will not
@@ -223,6 +227,10 @@ static bool prv_should_drop_write(BlobDBId db_id) {
   }
 
   if (!security_lock_shred_covers_db(db_id)) {
+    return false;
+  }
+
+  if ((db_id == BlobDBIdNotifs) && !security_lock_should_drop_notifications()) {
     return false;
   }
 
