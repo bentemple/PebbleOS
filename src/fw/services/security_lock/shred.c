@@ -347,16 +347,12 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
   // function has returned and the wipe is already done. Anything of ours goes
   // in security_lock_ui_quiesce() above instead.
   //
-  // Silent for the duress PIN, and that is the whole reason the condition is
-  // not just dbs_running. Duress is the one trigger that unlocks first and
-  // wipes afterwards, so a subscriber that also watches PEBBLE_SECURITY_LOCK_EVENT
-  // would see unlock-then-shred and see it for no other trigger. Duress also
-  // deliberately skips the radio blackout, so an app that spotted the pattern
-  // could send it straight to the phone -- which in a duress is quite possibly
-  // in the hands of the person doing the coercing. The cost is that an app
-  // cannot erase its own storage on precisely this wipe; leaking that the
-  // duress PIN was entered is the worse of the two.
-  if (dbs_running && (reason != SecurityShredReasonDuressPin)) {
+  // Sent for a duress wipe too. A subscriber that also watches
+  // PEBBLE_SECURITY_LOCK_EVENT sees unlock-then-shred, which no other trigger
+  // produces, so this is one more of the residual tells the duress PIN cannot
+  // close (see docs/architecture/security_lock.md). Withholding it would cost
+  // an app the chance to erase its own storage on the wipe that most needs it.
+  if (dbs_running) {
     PebbleEvent event = {
         .type = PEBBLE_SECURITY_SHRED_EVENT,
         .security_shred = {.reason = (uint8_t)reason},
