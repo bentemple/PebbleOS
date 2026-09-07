@@ -36,15 +36,17 @@ void security_lock_ui_lockout(void) {
   // battery popups off a locked watch is the priority bound below.
   launcher_block_popups(true);
 
-  // Lock every modal stack below the lock screen's own. Deliberately not
-  // ModalPriorityMax, which the panic and critical-battery paths use: that
-  // reports modals as disabled outright, which would stop the lock screen
-  // itself from being pushed, rendered or given button events.
+  // Bound at the alarm level, not the lock screen's own: an alarm still has to
+  // go off on a locked watch. The lock screen sits a level above it, so it
+  // stays on top and keeps the buttons; everything below the alarm is shut out.
+  // Deliberately not ModalPriorityMax, which the panic and critical-battery
+  // paths use: that reports modals as disabled outright, which would stop the
+  // lock screen itself from being pushed, rendered or given button events.
   //
   // The floor rather than the plain setter: the battery FSM drops the same
   // bound to ModalPriorityMin on leaving low power, and nothing here would
   // re-assert it.
-  modal_manager_set_min_priority_floor(SECURITY_LOCK_MODAL_PRIORITY);
+  modal_manager_set_min_priority_floor(ModalPriorityAlarm);
 }
 
 void security_lock_ui_quiesce(void) {
