@@ -816,6 +816,7 @@ enum SettingsSecurityItem {
   SettingsSecurityLockDelay,
   SettingsSecurityShredDelay,
   SettingsSecurityDuressPin,
+  SettingsSecurityBlockNotifications,
   //! The recoverable one first: it is the row to land on by accident.
   SettingsSecurityLockdown,
   SettingsSecurityLockdownErase,
@@ -921,6 +922,20 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       /// confirmation.
       subtitle = i18n_get(i18n_noop("Locks and erases now"), data);
       break;
+    case SettingsSecurityBlockNotifications:
+      /// Whether a notification arriving while the watch is locked is refused
+      /// outright or kept, unshown, for whoever unlocks.
+      title = i18n_noop("Block Notifications");
+      if (shell_prefs_get_block_notifications_when_locked()) {
+        /// Subtitle when notifications are refused while locked. Says what
+        /// happens to them, since "On" alone does not.
+        subtitle = i18n_get(i18n_noop("On, discarded while locked"), data);
+      } else {
+        /// Subtitle when they are kept. They are still never displayed on a
+        /// locked watch, and saying so is the point of the row.
+        subtitle = i18n_get(i18n_noop("Off, kept until unlocked"), data);
+      }
+      break;
     case SettingsSecurityLockdownInLauncher:
       /// Whether the Lockdown app is listed in the launcher. Off is decluttering
       /// only -- the app stays installed and stays bindable to a button.
@@ -979,6 +994,11 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
       break;
     case SettingsSecurityLockdownErase:
       prv_lockdown_erase_push(data);
+      break;
+    case SettingsSecurityBlockNotifications:
+      shell_prefs_set_block_notifications_when_locked(
+          !shell_prefs_get_block_notifications_when_locked());
+      prv_refresh(data);
       break;
     case SettingsSecurityLockdownInLauncher:
       shell_prefs_set_lockdown_app_in_launcher(!shell_prefs_get_lockdown_app_in_launcher());

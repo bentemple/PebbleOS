@@ -104,3 +104,36 @@ void test_notifications__unlocking_resumes_storing(void) {
   cl_assert_equal_i(fake_notification_storage_get_store_count(), 1);
   cl_assert_equal_i(fake_event_get_count(), 1);
 }
+
+// The block-notifications-when-locked setting
+////////////////////////////////////
+
+//! Off keeps them. Nothing has been destroyed while the watch is merely shut,
+//! so there is nothing to write back, and the user gets what arrived while they
+//! were away. Never shown either way: the lock screen outranks the modal.
+void test_notifications__locked_stores_when_the_setting_is_off(void) {
+  TimelineItem *item = prv_create_notification();
+
+  fake_security_lock_set_locked(true);
+  fake_security_lock_set_block_notifications(false);
+  notifications_add_notification(item);
+
+  cl_assert_equal_i(fake_notification_storage_get_store_count(), 1);
+
+  timeline_item_destroy(item);
+}
+
+//! And the setting does not reach the wipe. A store landing mid-erase would put
+//! cleartext back as fast as it is destroyed, whatever the user chose.
+void test_notifications__shredding_drops_even_when_the_setting_is_off(void) {
+  TimelineItem *item = prv_create_notification();
+
+  fake_security_lock_set_locked(false);
+  fake_security_lock_set_shredding(true);
+  fake_security_lock_set_block_notifications(false);
+  notifications_add_notification(item);
+
+  cl_assert_equal_i(fake_notification_storage_get_store_count(), 0);
+
+  timeline_item_destroy(item);
+}

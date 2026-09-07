@@ -289,4 +289,10 @@ void shell_prefs_set_music_show_album_art(bool enable);
 // not a security control: nobody who has taken the watch wants to wipe it.
 bool shell_prefs_get_lockdown_app_in_launcher(void);
 void shell_prefs_set_lockdown_app_in_launcher(bool enable);
+
+// Whether a notification arriving while the watch is locked is refused outright
+// rather than stored for whoever unlocks. On by default. Off never means shown:
+// the lock screen outranks the notification modal either way.
+bool shell_prefs_get_block_notifications_when_locked(void);
+void shell_prefs_set_block_notifications_when_locked(bool enable);
 #endif

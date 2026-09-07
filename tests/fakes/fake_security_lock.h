@@ -27,6 +27,13 @@ void fake_security_lock_set_shredding(bool shredding) {
   s_fake_security_lock_shredding = shredding;
 }
 
+//! Mirrors the block-notifications-when-locked setting, which is on by default.
+static bool s_fake_security_lock_block_notifs = true;
+
+void fake_security_lock_set_block_notifications(bool block) {
+  s_fake_security_lock_block_notifs = block;
+}
+
 int fake_security_lock_get_dirty_marks(void) {
   return s_fake_security_lock_dirty_marks;
 }
@@ -36,6 +43,7 @@ void fake_security_lock_reset(void) {
   s_fake_security_lock_shredding = false;
   s_fake_security_lock_dirty_marks = 0;
   s_fake_security_lock_refused_dbs = 0;
+  s_fake_security_lock_block_notifs = true;
 }
 
 void security_lock_mark_dirty_since_shred(void) {
@@ -58,4 +66,13 @@ bool security_lock_is_locked(void) {
 
 bool security_lock_is_shredding(void) {
   return s_fake_security_lock_shredding;
+}
+
+//! Mirrors security_lock_should_drop_notifications() in
+//! src/fw/services/security_lock/service.c.
+bool security_lock_should_drop_notifications(void) {
+  if (s_fake_security_lock_shredding) {
+    return true;
+  }
+  return s_fake_security_lock_locked && s_fake_security_lock_block_notifs;
 }

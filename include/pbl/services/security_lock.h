@@ -222,6 +222,15 @@ status_t security_lock_set_shred_pending(bool pending);
 //! entire point, and a detected clock rollback.
 bool security_lock_is_shredding(void);
 
+//! True when an inbound notification must not reach flash.
+//!
+//! Always while a wipe is running: a store landing then would put cleartext
+//! straight back behind the erase. While merely locked it follows the
+//! block-notifications-when-locked setting, which is on by default. Off stores
+//! them for whoever unlocks; it never means shown, since the lock screen
+//! outranks the notification modal either way.
+bool security_lock_should_drop_notifications(void);
+
 //! True when something has been written to the storage a shred destroys since
 //! the last shred ran.
 //!
