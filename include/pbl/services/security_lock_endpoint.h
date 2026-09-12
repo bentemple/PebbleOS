@@ -54,7 +54,7 @@ void security_lock_endpoint_init(void);
 //! deadline written with nothing running to notice it expire.
 //!
 //! Arms nothing when Erase After is Never. Keeps a disconnect countdown that was
-//! already closer than the configured delay, so pressing Lockdown can only ever
+//! already closer than the configured delay, so pressing Lock can only ever
 //! bring an erase forward -- but records it as manual either way, which is what
 //! stops a reconnect retiring it.
 //!

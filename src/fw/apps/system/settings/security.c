@@ -97,10 +97,10 @@ typedef struct SettingsSecurityData {
   char pin_subtitle[SUBTITLE_BUF_SIZE];
   char lock_delay_subtitle[DELAY_SUBTITLE_BUF_SIZE];
   char shred_delay_subtitle[DELAY_SUBTITLE_BUF_SIZE];
-  //! What Lockdown will actually do, which is the Erase After setting read from
+  //! What Lock will actually do, which is the Erase After setting read from
   //! the moment it is pressed. The only place the concrete delay appears
   //! alongside the action it applies to.
-  char lockdown_subtitle[DELAY_SUBTITLE_BUF_SIZE];
+  char lock_subtitle[DELAY_SUBTITLE_BUF_SIZE];
 
   //! Erase After rows, filtered down to those still legal for the current Lock
   //! After. Held here because the option menu keeps the array rather than
@@ -166,23 +166,23 @@ static void prv_format_delay(uint32_t seconds, char *buf, size_t buf_size) {
   }
 }
 
-//! Render the Erase After delay as what Lockdown will do with it.
+//! Render the Erase After delay as what Lock will do with it.
 //!
 //! Stated on the action rather than only on the setting, because the two rows
 //! answer different questions: Erase After says what the number is and what it
 //! is counted from, and this says what pressing the row above it will cost.
-//! Without it, the only way to learn that Lockdown starts an erase at all is to
+//! Without it, the only way to learn that Lock starts an erase at all is to
 //! read a setting three rows up and join them yourself.
-static void prv_format_lockdown(uint32_t seconds, char *buf, size_t buf_size) {
+static void prv_format_lock(uint32_t seconds, char *buf, size_t buf_size) {
   char format[DELAY_SUBTITLE_BUF_SIZE];
   if ((seconds >= DELAY_SECONDS_PER_HOUR) && ((seconds % DELAY_SECONDS_PER_HOUR) == 0)) {
-    /// Subtitle on the Lockdown row, in hours: the watch locks now and erases
+    /// Subtitle on the Lock row, in hours: the watch locks now and erases
     /// after this long unless the PIN is entered first.
-    i18n_get_with_buffer(i18n_noop("Locks, erases in %u hr"), format, sizeof(format));
+    i18n_get_with_buffer(i18n_noop("Locks now, erases in %u hr"), format, sizeof(format));
     sniprintf(buf, buf_size, format, (unsigned)(seconds / DELAY_SECONDS_PER_HOUR));
   } else {
     /// Same, in minutes.
-    i18n_get_with_buffer(i18n_noop("Locks, erases in %u min"), format, sizeof(format));
+    i18n_get_with_buffer(i18n_noop("Locks now, erases in %u min"), format, sizeof(format));
     sniprintf(buf, buf_size, format, (unsigned)(seconds / DELAY_SECONDS_PER_MINUTE));
   }
 }
@@ -232,16 +232,15 @@ static void prv_update_state(SettingsSecurityData *data) {
     /// because turning the erase off is not turning the feature off.
     i18n_get_with_buffer(i18n_noop("Never, locks only"), data->shred_delay_subtitle,
                          sizeof(data->shred_delay_subtitle));
-    /// Subtitle on the Lockdown row when Erase After is Never. Setting Never is
+    /// Subtitle on the Lock row when Erase After is Never. Setting Never is
     /// how a user gets lock-without-erase, so the row has to stop promising one
     /// rather than show a bare zero.
-    i18n_get_with_buffer(i18n_noop("Locks, no timed erase"), data->lockdown_subtitle,
-                         sizeof(data->lockdown_subtitle));
+    i18n_get_with_buffer(i18n_noop("Locks now, no timed erase"), data->lock_subtitle,
+                         sizeof(data->lock_subtitle));
   } else {
     prv_format_delay(data->shred_delay_s, data->shred_delay_subtitle,
                      sizeof(data->shred_delay_subtitle));
-    prv_format_lockdown(data->shred_delay_s, data->lockdown_subtitle,
-                        sizeof(data->lockdown_subtitle));
+    prv_format_lock(data->shred_delay_s, data->lock_subtitle, sizeof(data->lock_subtitle));
   }
 }
 
@@ -713,14 +712,15 @@ static void prv_shred_delay_menu_push(SettingsSecurityData *data) {
                             data->shred_rows, data);
 }
 
-// Lockdown and Lockdown + Erase
+// Lock and Lockdown + Erase
 //////////////////////////////////////////////////////////////////////////////
 //
 // Two actions, because they make different promises and one row would have to
-// describe one of them inaccurately -- always the destructive one. Lockdown
-// locks and starts the Erase After countdown, which the PIN calls off, exactly
-// as a disconnect countdown behaves. Lockdown + Erase destroys the content
-// there and then.
+// describe one of them inaccurately -- always the destructive one. Lock locks
+// and starts the Erase After countdown, which the PIN calls off, exactly as a
+// disconnect countdown behaves; that sameness is why it is called Lock and not
+// Lockdown. Lockdown + Erase destroys the content there and then, and is the
+// only thing the word Lockdown is used for.
 //
 // There is deliberately no third "lock only" row: that is Erase After set to
 // Never, which the countdown action honours by arming nothing. A separate row
@@ -737,7 +737,7 @@ static void prv_erase_now_callback(void *unused) {
   security_lock_engage(SecurityShredReasonManualPanic);
 }
 
-static void prv_lockdown_confirm(ClickRecognizerRef recognizer, void *e_dialog) {
+static void prv_lock_confirm(ClickRecognizerRef recognizer, void *e_dialog) {
   expandable_dialog_pop(e_dialog);
   launcher_task_add_callback(prv_countdown_callback, NULL);
 }
@@ -768,7 +768,7 @@ static void prv_push_confirmation(const char *name, const char *header, const ch
   app_expandable_dialog_push(e_dialog);
 }
 
-static void prv_lockdown_push(SettingsSecurityData *data) {
+static void prv_lock_push(SettingsSecurityData *data) {
   /// Explanation shown before the watch locks and starts the erase countdown.
   /// The delay itself is on the row, so this says what stops it rather than
   /// repeating a number: the countdown is the part users have to know is
@@ -784,8 +784,7 @@ static void prv_lockdown_push(SettingsSecurityData *data) {
       "flash.",
       data);
 
-  prv_push_confirmation("Lockdown", i18n_get("Lockdown", data), text,
-                        prv_lockdown_confirm);
+  prv_push_confirmation("Lock", i18n_get("Lock", data), text, prv_lock_confirm);
 }
 
 static void prv_lockdown_erase_push(SettingsSecurityData *data) {
@@ -818,9 +817,9 @@ enum SettingsSecurityItem {
   SettingsSecurityDuressPin,
   SettingsSecurityBlockNotifications,
   //! The recoverable one first: it is the row to land on by accident.
-  SettingsSecurityLockdown,
+  SettingsSecurityLock,
   SettingsSecurityLockdownErase,
-  SettingsSecurityLockdownInLauncher,
+  SettingsSecurityLockAppInLauncher,
   NumSettingsSecurityItems
 };
 
@@ -906,12 +905,12 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       // No subtitle, deliberately: any state shown here is the state that has
       // to stay hidden, and "Off" versus "On" is the whole secret.
       break;
-    case SettingsSecurityLockdown:
+    case SettingsSecurityLock:
       /// Lock now, erase at the configured Erase After unless the PIN is
-      /// entered first. The same action the Lockdown app and the Quick Launch
-      /// chord perform.
-      title = i18n_noop("Lockdown");
-      subtitle = data->lockdown_subtitle;
+      /// entered first -- which is what a disconnect lock leaves running too.
+      /// The same action the Lock app and the Quick Launch chord perform.
+      title = i18n_noop("Lock");
+      subtitle = data->lock_subtitle;
       break;
     case SettingsSecurityLockdownErase:
       /// Lock now and erase now. Named so the difference from the row above is
@@ -936,14 +935,14 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
         subtitle = i18n_get(i18n_noop("Off, kept until unlocked"), data);
       }
       break;
-    case SettingsSecurityLockdownInLauncher:
-      /// Whether the Lockdown app is listed in the launcher. Off is decluttering
+    case SettingsSecurityLockAppInLauncher:
+      /// Whether the Lock app is listed in the launcher. Off is decluttering
       /// only -- the app stays installed and stays bindable to a button.
       title = i18n_noop("Show in Launcher");
-      if (shell_prefs_get_lockdown_app_in_launcher()) {
+      if (shell_prefs_get_lock_app_in_launcher()) {
         subtitle = i18n_get(i18n_noop("On"), data);
       } else {
-        /// Subtitle once Lockdown is off the launcher list. Says where it has
+        /// Subtitle once Lock is off the launcher list. Says where it has
         /// gone rather than suggesting it is hidden from anyone: whoever takes
         /// the watch has no reason to erase the data they came for.
         subtitle = i18n_get(i18n_noop("Off, Quick Launch only"), data);
@@ -989,8 +988,8 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
       // answer the question the menu exists to refuse to answer.
       prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetDuress);
       break;
-    case SettingsSecurityLockdown:
-      prv_lockdown_push(data);
+    case SettingsSecurityLock:
+      prv_lock_push(data);
       break;
     case SettingsSecurityLockdownErase:
       prv_lockdown_erase_push(data);
@@ -1000,8 +999,8 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
           !shell_prefs_get_block_notifications_when_locked());
       prv_refresh(data);
       break;
-    case SettingsSecurityLockdownInLauncher:
-      shell_prefs_set_lockdown_app_in_launcher(!shell_prefs_get_lockdown_app_in_launcher());
+    case SettingsSecurityLockAppInLauncher:
+      shell_prefs_set_lock_app_in_launcher(!shell_prefs_get_lock_app_in_launcher());
       prv_refresh(data);
       break;
     default:

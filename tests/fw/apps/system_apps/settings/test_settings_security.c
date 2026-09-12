@@ -272,10 +272,10 @@ status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s)
 // Deliberately a shell pref rather than part of the lock record: what the
 // launcher lists is a display preference, and hiding the app protects nothing.
 
-static bool s_lockdown_in_launcher;
+static bool s_lock_in_launcher;
 
-bool shell_prefs_get_lockdown_app_in_launcher(void) {
-  return s_lockdown_in_launcher;
+bool shell_prefs_get_lock_app_in_launcher(void) {
+  return s_lock_in_launcher;
 }
 
 //! Mirrors the production default: on.
@@ -289,8 +289,8 @@ void shell_prefs_set_block_notifications_when_locked(bool enable) {
   s_block_notifications_when_locked = enable;
 }
 
-void shell_prefs_set_lockdown_app_in_launcher(bool enable) {
-  s_lockdown_in_launcher = enable;
+void shell_prefs_set_lock_app_in_launcher(bool enable) {
+  s_lock_in_launcher = enable;
 }
 
 // Fake UI surface
@@ -524,7 +524,7 @@ void i18n_free_all(const void *owner) {
 #define ROW_ERASE_AFTER 3
 #define ROW_DURESS_PIN 4
 #define ROW_BLOCK_NOTIFICATIONS 5
-#define ROW_LOCKDOWN 6
+#define ROW_LOCK 6
 #define ROW_LOCKDOWN_ERASE 7
 #define ROW_SHOW_IN_LAUNCHER 8
 #define ROWS_WHEN_ON 9
@@ -628,7 +628,7 @@ void test_settings_security__initialize(void) {
   s_capture_block_at_deinit = false;
   // The shipped default: the panic action is in the launcher unless asked
   // otherwise.
-  s_lockdown_in_launcher = true;
+  s_lock_in_launcher = true;
 }
 
 void test_settings_security__cleanup(void) {
@@ -838,7 +838,7 @@ void test_settings_security__nothing_else_is_reachable_while_it_is_off(void) {
 
   for (uint16_t row = 0; row < prv_num_rows(); row++) {
     prv_draw(row);
-    cl_assert(strcmp(s_drawn_title, "Lockdown") != 0);
+    cl_assert(strcmp(s_drawn_title, "Lock") != 0);
     cl_assert(strcmp(s_drawn_title, "Lockdown + Erase") != 0);
     cl_assert(strcmp(s_drawn_title, "Lock Now") != 0);
     cl_assert(strcmp(s_drawn_title, "Lock After") != 0);
@@ -911,8 +911,8 @@ void test_settings_security__rows_follow_the_pin_appearing(void) {
 
   // And the lockdown rows really are where the indices say, not something that
   // fell through to a default.
-  prv_draw(ROW_LOCKDOWN);
-  cl_assert_equal_s("Lockdown", s_drawn_title);
+  prv_draw(ROW_LOCK);
+  cl_assert_equal_s("Lock", s_drawn_title);
   prv_draw(ROW_LOCKDOWN_ERASE);
   cl_assert_equal_s("Lockdown + Erase", s_drawn_title);
 }
@@ -1601,7 +1601,7 @@ void test_settings_security__the_lockdown_rows_are_hidden_while_it_is_off(void) 
   // Only the master switch; nothing here locks or erases anything.
   cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
   prv_draw(ROW_ENABLED);
-  cl_assert(strcmp("Lockdown", s_drawn_title) != 0);
+  cl_assert(strcmp("Lock", s_drawn_title) != 0);
   cl_assert(strcmp("Lockdown + Erase", s_drawn_title) != 0);
 }
 
@@ -1609,7 +1609,7 @@ void test_settings_security__lockdown_confirms_before_engaging(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
-  prv_select(ROW_LOCKDOWN);
+  prv_select(ROW_LOCK);
   cl_assert(s_dialog_confirm != NULL);
   cl_assert_equal_i(0, s_engage_calls_any_funnel);
   cl_assert(s_deferred_callback == NULL);
@@ -1633,7 +1633,7 @@ void test_settings_security__does_nothing_when_the_confirmation_cannot_be_shown(
   prv_open_settings();
   s_dialog_create_fails = true;
 
-  prv_select(ROW_LOCKDOWN);
+  prv_select(ROW_LOCK);
   cl_assert_equal_i(0, s_dialog_pushes);
   cl_assert(s_dialog_confirm == NULL);
   cl_assert(s_deferred_callback == NULL);
@@ -1647,7 +1647,7 @@ void test_settings_security__does_nothing_when_the_confirmation_cannot_be_shown(
 
   // And nothing about the refusal breaks the ordinary path.
   s_dialog_create_fails = false;
-  prv_select(ROW_LOCKDOWN);
+  prv_select(ROW_LOCK);
   cl_assert_equal_i(1, s_dialog_pushes);
   cl_assert(s_dialog_confirm != NULL);
 }
@@ -1659,7 +1659,7 @@ void test_settings_security__lockdown_starts_a_countdown_rather_than_erasing(voi
   prv_install_pin("1234");
   prv_open_settings();
 
-  prv_select(ROW_LOCKDOWN);
+  prv_select(ROW_LOCK);
   s_dialog_confirm(NULL, &s_expandable_dialog);
   prv_run_deferred();
 
@@ -1687,7 +1687,7 @@ void test_settings_security__the_lockdown_rows_defer_to_the_kernel(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
-  prv_select(ROW_LOCKDOWN);
+  prv_select(ROW_LOCK);
   s_dialog_confirm(NULL, &s_expandable_dialog);
 
   cl_assert_equal_i(1, s_dialog_pops);
@@ -1705,8 +1705,8 @@ void test_settings_security__the_lockdown_row_says_how_long_the_erase_is(void) {
   s_shred_delay_s = 30 * 60;
   prv_open_settings();
 
-  prv_draw(ROW_LOCKDOWN);
-  cl_assert_equal_s("Lockdown", s_drawn_title);
+  prv_draw(ROW_LOCK);
+  cl_assert_equal_s("Lock", s_drawn_title);
   cl_assert(strstr(s_drawn_subtitle, "30 min") != NULL);
 }
 
@@ -1715,7 +1715,7 @@ void test_settings_security__the_lockdown_row_reports_hours_as_hours(void) {
   s_shred_delay_s = 4 * 60 * 60;
   prv_open_settings();
 
-  prv_draw(ROW_LOCKDOWN);
+  prv_draw(ROW_LOCK);
   cl_assert(strstr(s_drawn_subtitle, "4 hr") != NULL);
 }
 
@@ -1727,8 +1727,8 @@ void test_settings_security__the_lockdown_row_says_when_nothing_will_be_erased(v
   s_shred_delay_s = SECURITY_LOCK_SHRED_DELAY_NEVER;
   prv_open_settings();
 
-  prv_draw(ROW_LOCKDOWN);
-  cl_assert_equal_s("Lockdown", s_drawn_title);
+  prv_draw(ROW_LOCK);
+  cl_assert_equal_s("Lock", s_drawn_title);
   cl_assert(strstr(s_drawn_subtitle, "no timed erase") != NULL);
   cl_assert(strstr(s_drawn_subtitle, "min") == NULL);
 }
@@ -1741,11 +1741,11 @@ void test_settings_security__the_lockdown_row_follows_the_erase_after_setting(vo
   prv_open_settings();
 
   prv_choose_shred_delay(SECURITY_LOCK_SHRED_DELAY_NEVER);
-  prv_draw(ROW_LOCKDOWN);
+  prv_draw(ROW_LOCK);
   cl_assert(strstr(s_drawn_subtitle, "no timed erase") != NULL);
 
   prv_choose_shred_delay(60 * 60);
-  prv_draw(ROW_LOCKDOWN);
+  prv_draw(ROW_LOCK);
   cl_assert(strstr(s_drawn_subtitle, "1 hr") != NULL);
 }
 
@@ -1799,11 +1799,11 @@ void test_settings_security__hiding_the_row_does_not_rewrite_the_pref(void) {
   prv_install_pin("1234");
   prv_open_settings();
   prv_select(ROW_SHOW_IN_LAUNCHER);
-  cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
+  cl_assert(!shell_prefs_get_lock_app_in_launcher());
 
   prv_disable_with_pin("1234");
   cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
-  cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
+  cl_assert(!shell_prefs_get_lock_app_in_launcher());
 
   prv_enable_with_pin("4321");
   cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
@@ -1825,10 +1825,10 @@ void test_settings_security__show_in_launcher_toggles(void) {
   prv_open_settings();
 
   prv_select(ROW_SHOW_IN_LAUNCHER);
-  cl_assert(!shell_prefs_get_lockdown_app_in_launcher());
+  cl_assert(!shell_prefs_get_lock_app_in_launcher());
 
   prv_select(ROW_SHOW_IN_LAUNCHER);
-  cl_assert(shell_prefs_get_lockdown_app_in_launcher());
+  cl_assert(shell_prefs_get_lock_app_in_launcher());
 }
 
 // Turning it off is decluttering, not hiding: the app is still there and still
@@ -1852,7 +1852,7 @@ void test_settings_security__show_in_launcher_says_quick_launch_still_works(void
 // change made elsewhere is not shown as its old value.
 void test_settings_security__show_in_launcher_reflects_the_stored_value(void) {
   prv_install_pin("1234");
-  shell_prefs_set_lockdown_app_in_launcher(false);
+  shell_prefs_set_lock_app_in_launcher(false);
   prv_open_settings();
 
   prv_draw(ROW_SHOW_IN_LAUNCHER);

@@ -52,11 +52,11 @@ static char s_dialog_text[128];
 static uint32_t s_dialog_icon;
 static uint32_t s_dialog_timeout;
 
-bool shell_prefs_get_lockdown_app_in_launcher(void) {
+bool shell_prefs_get_lock_app_in_launcher(void) {
   return s_in_launcher;
 }
 
-void shell_prefs_set_lockdown_app_in_launcher(bool enable) {
+void shell_prefs_set_lock_app_in_launcher(bool enable) {
   s_in_launcher = enable;
 }
 
@@ -158,7 +158,7 @@ void i18n_get_with_buffer(const char *string, char *buffer, size_t length) {
 ////////////////////////////////////
 
 static const PebbleProcessMdSystem *prv_md(void) {
-  return (const PebbleProcessMdSystem *)lockdown_app_get_app_info();
+  return (const PebbleProcessMdSystem *)lock_app_get_app_info();
 }
 
 static void prv_run_app(void) {
@@ -210,14 +210,14 @@ void test_lockdown__is_listed_in_the_launcher_by_default(void) {
 // Off is Quick-Launch-only rather than hidden outright: the whole point of the
 // toggle is that a button binding keeps working.
 void test_lockdown__drops_off_the_launcher_list_when_turned_off(void) {
-  shell_prefs_set_lockdown_app_in_launcher(false);
+  shell_prefs_set_lock_app_in_launcher(false);
   cl_assert_equal_i(ProcessVisibilityQuickLaunch, prv_md()->common.visibility);
 }
 
 void test_lockdown__visibility_tracks_the_pref_both_ways(void) {
-  shell_prefs_set_lockdown_app_in_launcher(false);
+  shell_prefs_set_lock_app_in_launcher(false);
   cl_assert_equal_i(ProcessVisibilityQuickLaunch, prv_md()->common.visibility);
-  shell_prefs_set_lockdown_app_in_launcher(true);
+  shell_prefs_set_lock_app_in_launcher(true);
   cl_assert_equal_i(ProcessVisibilityShown, prv_md()->common.visibility);
 }
 
@@ -226,7 +226,7 @@ void test_lockdown__visibility_tracks_the_pref_both_ways(void) {
 // the user had already made.
 void test_lockdown__identity_survives_the_toggle(void) {
   const PebbleProcessMdSystem listed = *prv_md();
-  shell_prefs_set_lockdown_app_in_launcher(false);
+  shell_prefs_set_lock_app_in_launcher(false);
   const PebbleProcessMdSystem unlisted = *prv_md();
 
   cl_assert(uuid_equal(&listed.common.uuid, &unlisted.common.uuid));
@@ -248,9 +248,9 @@ void test_lockdown__is_hidden_everywhere_without_a_pin(void) {
 // not thereby get one for an app that would erase without locking.
 void test_lockdown__no_pin_outranks_the_launcher_pref(void) {
   s_pin_len = 0;
-  shell_prefs_set_lockdown_app_in_launcher(true);
+  shell_prefs_set_lock_app_in_launcher(true);
   cl_assert_equal_i(ProcessVisibilityHidden, prv_md()->common.visibility);
-  shell_prefs_set_lockdown_app_in_launcher(false);
+  shell_prefs_set_lock_app_in_launcher(false);
   cl_assert_equal_i(ProcessVisibilityHidden, prv_md()->common.visibility);
 }
 
@@ -463,9 +463,9 @@ void test_lockdown__erase_is_quick_launch_only(void) {
 
 // Including when the launcher pref is on, which governs the other app alone.
 void test_lockdown__erase_stays_off_the_launcher_whatever_the_pref_says(void) {
-  shell_prefs_set_lockdown_app_in_launcher(true);
+  shell_prefs_set_lock_app_in_launcher(true);
   cl_assert_equal_i(ProcessVisibilityQuickLaunch, prv_erase_md()->common.visibility);
-  shell_prefs_set_lockdown_app_in_launcher(false);
+  shell_prefs_set_lock_app_in_launcher(false);
   cl_assert_equal_i(ProcessVisibilityQuickLaunch, prv_erase_md()->common.visibility);
 }
 

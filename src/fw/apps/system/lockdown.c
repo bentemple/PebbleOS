@@ -55,19 +55,20 @@ static bool prv_erase_is_enabled(void) {
 //! touches it. Silence would leave the user with a chord that stopped working
 //! and no reason given.
 static void prv_show_lock_unavailable(void) {
-  SimpleDialog *simple_dialog = simple_dialog_create(WINDOW_NAME("Lockdown"));
+  SimpleDialog *simple_dialog = simple_dialog_create(WINDOW_NAME("Lock"));
   if (!simple_dialog) {
     // The app exits on an empty window stack, which is still the right outcome.
-    PBL_LOG_ERR("Could not create the Lockdown unavailable message");
+    PBL_LOG_ERR("Could not create the lock unavailable message");
     return;
   }
 
   char text[UNAVAILABLE_MESSAGE_BUF_SIZE];
-  /// Shown when Lockdown is opened while the security lock is off or has no
-  /// PIN. It erases the watch's copy of the phone's content and locks behind
-  /// the PIN, so without either there is nothing to lock and it refuses to run.
-  /// Covers both cases: turning the switch on with no PIN asks for one.
-  i18n_get_with_buffer(i18n_noop("Turn on Security Lock in Settings to use Lockdown"), text,
+  /// Shown when Lock or Lockdown + Erase is opened while the security lock is
+  /// off or has no PIN. Both lock behind the PIN, so without one there is
+  /// nothing to lock and they refuse to run. Names neither, because the same
+  /// message serves both, and covers both cases: turning the switch on with no
+  /// PIN asks for one.
+  i18n_get_with_buffer(i18n_noop("Turn on Security Lock in Settings first"), text,
                        sizeof(text));
 
   Dialog *dialog = simple_dialog_get_dialog(simple_dialog);
@@ -80,12 +81,14 @@ static void prv_show_lock_unavailable(void) {
 //! Runs on KernelMain, which the lock funnel asserts on: it drives the app and
 //! modal stacks.
 //!
-//! The countdown rather than an immediate erase. This app is the one trigger
-//! that can be reached by accident -- a Quick Launch chord in a pocket, a
-//! misremembered binding, the wrong launcher row -- and locking without a timed
-//! erase is not an option either: a user who wants that sets Erase After to
-//! Never, which this path honours by arming nothing. Erasing on the spot is a
-//! separate action and lives in Settings, where it cannot be hit by mistake.
+//! The countdown rather than an immediate erase, which is what being locked
+//! means everywhere else: a disconnect lock leaves the same erase running, from
+//! the same Erase After. This app only brings the lock forward.
+//!
+//! It is the one trigger that can be reached by accident -- a Quick Launch
+//! chord in a pocket, a misremembered binding, the wrong launcher row -- so
+//! everything it does the PIN can call back. Erasing on the spot is a separate
+//! action under a separate name.
 //!
 //! Closing this app is part of what it does -- security_lock_ui_quiesce() calls
 //! app_manager_close_current_app() and lands on the watchface -- so there is
@@ -147,7 +150,7 @@ static void prv_run(const char *window_name, void (*engage)(void *)) {
 }
 
 static void prv_main(void) {
-  prv_run(WINDOW_NAME("Lockdown"), prv_engage_callback);
+  prv_run(WINDOW_NAME("Lock"), prv_engage_callback);
 }
 
 static void prv_erase_main(void) {
@@ -161,14 +164,14 @@ static void prv_erase_main(void) {
 //! They differ only in visibility, and must keep differing only in that: Quick
 //! Launch stores an install id resolved from the UUID, so a binding made while
 //! the app was listed has to survive it being unlisted.
-const PebbleProcessMd *lockdown_app_get_app_info(void) {
+const PebbleProcessMd *lock_app_get_app_info(void) {
   static const PebbleProcessMdSystem s_listed = {
     .common = {
       .main_func = prv_main,
-      .uuid = LOCKDOWN_UUID,
+      .uuid = LOCK_UUID,
       .visibility = ProcessVisibilityShown,
     },
-    .name = i18n_noop("Lockdown"),
+    .name = i18n_noop("Lock"),
     .icon_resource_id = RESOURCE_ID_GENERIC_WARNING_TINY,
   };
 
@@ -176,10 +179,10 @@ const PebbleProcessMd *lockdown_app_get_app_info(void) {
   static const PebbleProcessMdSystem s_unlisted = {
     .common = {
       .main_func = prv_main,
-      .uuid = LOCKDOWN_UUID,
+      .uuid = LOCK_UUID,
       .visibility = ProcessVisibilityQuickLaunch,
     },
-    .name = i18n_noop("Lockdown"),
+    .name = i18n_noop("Lock"),
     .icon_resource_id = RESOURCE_ID_GENERIC_WARNING_TINY,
   };
 
@@ -190,10 +193,10 @@ const PebbleProcessMd *lockdown_app_get_app_info(void) {
   static const PebbleProcessMdSystem s_unavailable = {
     .common = {
       .main_func = prv_main,
-      .uuid = LOCKDOWN_UUID,
+      .uuid = LOCK_UUID,
       .visibility = ProcessVisibilityHidden,
     },
-    .name = i18n_noop("Lockdown"),
+    .name = i18n_noop("Lock"),
     .icon_resource_id = RESOURCE_ID_GENERIC_WARNING_TINY,
   };
 
@@ -203,7 +206,7 @@ const PebbleProcessMd *lockdown_app_get_app_info(void) {
     return &s_unavailable.common;
   }
 
-  return shell_prefs_get_lockdown_app_in_launcher() ? &s_listed.common : &s_unlisted.common;
+  return shell_prefs_get_lock_app_in_launcher() ? &s_listed.common : &s_unlisted.common;
 }
 
 //! Quick Launch or nowhere -- there is deliberately no listed record.

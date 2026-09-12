@@ -37,7 +37,7 @@
 #define SECURITY_LOCK_LOCKOUT_MAX_S (60 * 60)
 
 //! Shred delay meaning "no timed erase". The watch still locks -- when the
-//! phone goes away, and when the user asks for a Lockdown -- and the triggers
+//! phone goes away, and when the user asks for a Lock -- and the triggers
 //! that erase outright still do: Lockdown + Erase, a duress PIN, exhausted
 //! attempts, a reboot while locked. Only the timed erase is disarmed.
 //!
@@ -315,7 +315,7 @@ typedef enum {
   //! The phone went away. Its coming back makes the countdown moot, so a
   //! session opening retires this one.
   SecurityCountdownDisconnect = 1,
-  //! The user asked for it: the Lockdown app, the Quick Launch chord, the
+  //! The user asked for it: the Lock app, the Quick Launch chord, the
   //! Settings row or the phone's LOCK. Only the PIN retires this one. A
   //! Bluetooth blip must not cancel a lockdown someone triggered on purpose,
   //! and the disconnect delays must not shorten, restart or extend it either.

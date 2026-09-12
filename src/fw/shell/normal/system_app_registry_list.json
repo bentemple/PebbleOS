@@ -690,8 +690,8 @@
     },
     {
       "id": -102,
-      "enum": "LOCKDOWN",
-      "md_fn": "lockdown_app_get_app_info",
+      "enum": "LOCK",
+      "md_fn": "lock_app_get_app_info",
       "color_argb8": "GColorRedARGB8",
       "ifdefs": [
         "CONFIG_SERVICE_SECURITY_LOCK"
