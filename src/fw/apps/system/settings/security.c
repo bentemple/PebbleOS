@@ -816,12 +816,12 @@ static void prv_lockdown_erase_push(SettingsSecurityData *data) {
 // Erase Health Data
 //////////////////////////////////////////////////////////////////////////////
 //
-// The only row in this menu that asks before turning something on, and the
-// only setting here whose consequence the watch cannot undo. Everything else
-// the erase destroys comes back from the phone once the watch is unlocked and
-// reconnected -- that invariant is what makes arming the erase on a disconnect
-// reasonable -- and step and sleep history is the one thing the watch generates
-// itself.
+// The only row in this menu that asks before turning something on, because it
+// is the only one whose consequence the phone cannot fully undo. It is a
+// partial exception rather than a total one: the phone is the system of record
+// for health, so reconnecting puts back the typicals and the last six
+// completed days -- but not today's counts, and not the weeks of history
+// beyond the window the phone re-pushes. That gap is what the warning is for.
 //
 // Turning it off asks nothing. A confirmation on the way out of a destructive
 // setting is a confirmation for its own sake.
@@ -838,16 +838,14 @@ static void prv_shred_health_confirm(ClickRecognizerRef recognizer, void *e_dial
 }
 
 static void prv_shred_health_push(SettingsSecurityData *data) {
-  /// Shown before turning on erasing health data. Names what goes, says plainly
-  /// that the phone cannot bring it back, and contrasts that with everything
-  /// else the erase destroys -- which it can.
+  /// Shown before turning on erasing health data. Says exactly how much comes
+  /// back and what does not, rather than overstating the loss: the phone holds
+  /// a copy of most of it, but not today and not the older weeks.
   const char *text = i18n_get(
-      "Your step and sleep history is erased along with everything else, and "
-      "your phone cannot put it back.\n\n"
-      "Notifications, calendar, reminders, contacts and weather all return "
-      "when you unlock and reconnect. This does not.\n\n"
-      "Turn this on only if that history is worth more to you destroyed than "
-      "kept.",
+      "Your step and sleep history is erased along with everything else.\n\n"
+      "Your phone puts back the last six days when you unlock and reconnect. "
+      "Today's counts and anything older than that are gone for good.\n\n"
+      "Everything else the erase destroys comes back in full.",
       data);
 
   prv_push_confirmation("Erase Health Data", i18n_get("Erase Health Data", data), text,
@@ -958,9 +956,9 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       /// the phone cannot put back, which is why it is a row of its own.
       title = i18n_noop("Erase Health Data");
       if (security_lock_get_shred_health()) {
-        /// Subtitle when health data is erased too. Says the part that cannot
-        /// be undone, because "On" alone does not.
-        subtitle = i18n_get(i18n_noop("On, gone for good"), data);
+        /// Subtitle when health data is erased too. Names the part the phone
+        /// cannot hand back, which is the whole reason the row exists.
+        subtitle = i18n_get(i18n_noop("On, keeps 6 days"), data);
       } else {
         /// Subtitle when it is kept. Everything else the erase destroys comes
         /// back from the phone; this is what stays behind instead.

@@ -359,9 +359,8 @@ void test_security_lock_shred__cleanup(void) {}
 // Erasing health data
 ////////////////////////////////////
 //
-// Opt-in, because it is the one target the phone cannot put back. Everything
-// else the wipe destroys returns on the next unlock and reconnect, and that
-// invariant is what the rest of the design rests on.
+// Opt-in, because it is the one target the phone cannot put back in full: it
+// restores the typicals and the last six completed days, and nothing else.
 
 //! Off, and the wipe leaves it alone.
 void test_security_lock_shred__health_data_survives_by_default(void) {
@@ -383,19 +382,24 @@ void test_security_lock_shred__health_data_goes_when_the_wearer_asked(void) {
   cl_assert_equal_i(1, s_trace.activity_shreds);
 }
 
-//! It contributes nothing to the resync bitmap, however it is set. That bitmap
-//! becomes a request to the phone to resend what was destroyed, and asking for
-//! step history the phone never had is a request it cannot satisfy.
-void test_security_lock_shred__erasing_health_data_asks_the_phone_for_nothing(void) {
+//! It claims its resync bit when it runs, and only then. The phone is the
+//! system of record for health -- it aggregates what the watch datalogs up and
+//! pushes the result back down through this very database -- so asking it to
+//! resend is a request it can largely satisfy. Claiming the bit when the
+//! setting is off would ask for a re-push of something nothing destroyed.
+void test_security_lock_shred__erasing_health_data_asks_the_phone_to_resend(void) {
   s_shred_health = true;
-
   const uint32_t with_health = security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert(with_health & SECURITY_SHRED_DB_BIT(BlobDBIdHealth));
 
   s_shred_health = false;
   s_dirty = true;
   const uint32_t without_health = security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert(!(without_health & SECURITY_SHRED_DB_BIT(BlobDBIdHealth)));
 
-  cl_assert_equal_i(without_health, with_health);
+  // And nothing else about the bitmap moved with it.
+  cl_assert_equal_i(without_health,
+                    with_health & ~SECURITY_SHRED_DB_BIT(BlobDBIdHealth));
 }
 
 //! And a wipe with nothing to destroy still destroys nothing, health included.

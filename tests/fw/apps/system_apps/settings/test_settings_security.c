@@ -2196,8 +2196,9 @@ void test_settings_security__delay_pickers_open_on_the_current_choice(void) {
 // Erase Health Data
 ////////////////////////////////////
 //
-// The one setting in this menu whose consequence the watch cannot undo, so the
-// one that asks before turning on.
+// The one setting in this menu the phone cannot fully undo -- it restores the
+// typicals and the last six days, but not today and not the older weeks -- so
+// the one that asks before turning on.
 
 //! Off by default, and the subtitle says what "off" leaves behind rather than
 //! just that it is off.
@@ -2225,16 +2226,22 @@ void test_settings_security__erase_health_warns_before_turning_on(void) {
   cl_assert(!security_lock_get_shred_health());
 }
 
-//! The warning has to name the part that cannot be undone. A confirmation that
+//! The warning has to say how much survives, not just that something is lost.
+//! The phone restores most of this, so a warning claiming otherwise would be
+//! talking someone out of a setting on false grounds -- and a confirmation that
 //! only says "are you sure" is a confirmation nobody reads.
-void test_settings_security__the_erase_health_warning_says_it_cannot_be_undone(void) {
+void test_settings_security__the_erase_health_warning_says_what_comes_back(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
   prv_select(ROW_ERASE_HEALTH);
 
-  cl_assert(strstr(s_dialog_text, "cannot put it back") != NULL);
   cl_assert(strstr(s_dialog_text, "step and sleep history") != NULL);
+  // What returns, and the two things that do not.
+  cl_assert(strstr(s_dialog_text, "puts back the last six days") != NULL);
+  cl_assert(strstr(s_dialog_text, "Today's counts") != NULL);
+  // And it must not claim the loss is total.
+  cl_assert(strstr(s_dialog_text, "cannot put it back") == NULL);
 }
 
 //! And taking the warning is what turns it on.
@@ -2250,7 +2257,7 @@ void test_settings_security__taking_the_erase_health_warning_turns_it_on(void) {
 
   s_module->appear(s_module);
   prv_draw(ROW_ERASE_HEALTH);
-  cl_assert_equal_s("On, gone for good", s_drawn_subtitle);
+  cl_assert_equal_s("On, keeps 6 days", s_drawn_subtitle);
 }
 
 //! Walking away from the warning changes nothing. The row is one press from

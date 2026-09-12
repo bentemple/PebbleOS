@@ -303,8 +303,9 @@ bool activity_is_initialized(void);
 //! Destroy the stored step and sleep history, and the day in progress with it.
 //!
 //! For the security lock's erase, and only when the wearer has opted into
-//! erasing health data: the phone cannot put this back, which is why that is a
-//! separate switch from the erase itself.
+//! erasing health data, which is a separate switch from the erase itself
+//! because the phone cannot put all of this back: it re-pushes the last six
+//! completed days, and neither today's counts nor anything older.
 //!
 //! Tracking is not stopped and the service is not torn down -- it simply counts
 //! up again from zero.

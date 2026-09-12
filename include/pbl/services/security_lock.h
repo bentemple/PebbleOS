@@ -341,19 +341,22 @@ status_t security_lock_set_alarms_when_locked(bool allowed);
 
 //! Whether the erase also destroys step and sleep history.
 //!
-//! Off, and it has to ship off. Everything else the erase destroys comes back
-//! from the phone when the watch is unlocked and reconnected -- that invariant
-//! is what makes triggering the erase aggressively reasonable, and it is the
-//! reason the feature can be armed on a disconnect at all. Health data is the
-//! one thing the watch generates itself, so this is the one target the phone
-//! cannot put back.
+//! Off, and it has to ship off, because it is the one target the phone cannot
+//! put back in full. Not that it cannot put it back at all: the phone is the
+//! system of record for health -- the watch datalogs raw samples up, the phone
+//! aggregates them and pushes the result back down through the health BlobDB --
+//! so reconnecting restores the typicals, the 30-day averages, and the last six
+//! completed days of step and sleep history.
 //!
-//! So it is opt-in and the Settings row warns before turning it on, and the
-//! wipe keeps it out of the resync request it sends afterwards: asking the
-//! phone to resend step history it never had would be a request it cannot
-//! satisfy. Everything about it is deliberately separate from
-//! security_lock_shred_covers_db(), which still means "destroyed, and
-//! restorable".
+//! What does not come back is today's counts, which the phone deliberately
+//! never sends (it would freeze the watch's live counter at an incomplete
+//! value), and the history beyond the phone's six-day push window, which the
+//! watch keeps 30 days of.
+//!
+//! That gap is the whole reason this is a switch rather than part of the erase:
+//! it is opt-in, and the Settings row states the six days before turning it on.
+//! It does claim its resync bit, because asking the phone to resend is a
+//! request the phone can largely satisfy.
 bool security_lock_get_shred_health(void);
 status_t security_lock_set_shred_health(bool enabled);
 

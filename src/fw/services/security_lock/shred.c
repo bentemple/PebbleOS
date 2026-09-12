@@ -387,19 +387,23 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
       task_watchdog_bit_set(pebble_task_get_current());
     }
 
-    // Health data, only if the wearer asked for it, and deliberately not in the
-    // list above: every entry there carries the promise the rest of this design
-    // rests on -- destroyed, and restorable from the phone -- and this is the
-    // one thing the watch generates itself. So it contributes no bit to
-    // `wiped`, because the resync request that bitmap becomes would be asking
-    // the phone for step history it never had.
+    // Health data, only if the wearer asked for it.
     //
-    // Each module destroys its own, rather than this walking two more
-    // filenames: the activity service has a day's worth of counters in RAM that
-    // the next minute handler would write straight back to a fresh file.
+    // Not an entry in the list above because each module has to destroy its own
+    // rather than have two more filenames walked here: the activity service
+    // holds a day's worth of counters in RAM that the next minute handler would
+    // write straight back to a fresh file.
+    //
+    // It does claim its resync bit, though. The phone is the system of record
+    // for health -- the watch datalogs raw samples up, the phone aggregates
+    // them and pushes the result back down through this very BlobDB -- so
+    // asking it to resend is a request it can largely satisfy. What it resends
+    // is the last six completed days plus the typicals, not today and not the
+    // weeks beyond that, which is why this is still opt-in and still warns.
     if (security_lock_get_shred_health()) {
       health_db_shred();
       activity_shred();
+      wiped |= SECURITY_SHRED_DB_BIT(BlobDBIdHealth);
       task_watchdog_bit_set(pebble_task_get_current());
     }
   }

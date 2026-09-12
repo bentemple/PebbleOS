@@ -83,9 +83,9 @@ the picker has nowhere to put one.
   compaction, but the flash translation layer can remap and retain physical
   pages beneath both. Against a determined chip-off adversary this is
   best-effort.
-- Installed apps and Bluetooth bonding always survive by design, and health
-  data survives unless the wearer opts in — see "What the erase destroys"
-  below.
+- Installed apps and Bluetooth bonding always survive by design. Health data
+  survives unless the wearer opts in, and even then the phone restores most of
+  it — see "What the erase destroys" below.
 
 ## One switch, and it ships off
 
@@ -118,7 +118,7 @@ With no PIN set the menu is one row. Once a PIN exists it is eleven:
 | Change PIN | Asks for the current PIN, then the length, then sets a new one. |
 | Lock After | Grace period from an unexpected disconnect to the lock. |
 | Erase After | Countdown from a lockdown to the erase. **Ships as `Never`.** |
-| Erase Health Data | Whether the erase also destroys step and sleep history. **Ships off,** and warns before turning on. |
+| Erase Health Data | Whether the erase also destroys step and sleep history. **Ships off,** and warns before turning on — the phone restores only the last six days. |
 | Duress PIN | A second PIN that unlocks and wipes. |
 | Block Notifications | Whether a notification arriving while locked is discarded or kept. **Ships off.** |
 | Alarms When Locked | Whether an alarm still goes off while locked. **Ships on.** |
@@ -274,22 +274,55 @@ wiping them would destroy data the phone does *not* have.
 
 ### Health data, on request
 
-Step and sleep history is the one target that breaks the invariant above: the
-watch generates it, so the phone has nothing to hand back. `Settings > Security
-> Erase Health Data` turns it on, and everything about it is shaped by that one
-asymmetry:
+`Settings > Security > Erase Health Data` adds step and sleep history to the
+wipe. It ships **off** and warns before turning on, because it is the one
+target the invariant above holds for only *partly*.
 
-- **It ships off.** A default that destroys unrestorable data is not a default.
-- **Turning it on warns first,** naming what goes and saying plainly that the
-  phone cannot put it back. Turning it off asks nothing.
-- **It lives under its own settings key** (`hd`), not in the runtime record —
-  see "The two stored records".
-- **It is not in `shred_targets.c` and not in `security_lock_shred_covers_db()`.**
-  Both of those still mean "destroyed, and restorable": the first feeds the
-  resync bitmap the watch sends the phone afterwards, and the second is what
-  refuses inbound writes while locked. Health contributes to neither, because
-  asking the phone to resend step history it never had is a request it cannot
-  satisfy.
+**How much the phone can restore.** More than it first looks. The phone is the
+system of record for health: the watch datalogs raw samples up, the phone
+aggregates them in its own database, and pushes the result back down through
+the health BlobDB (`BlobDBIdHealth` / `BlobDatabase.HealthStats`, id 10 on both
+sides). On a reconnect after a wipe it re-pushes:
+
+| Record | Lands in | Restores |
+|---|---|---|
+| `average_dailySteps`, `average_sleepDuration` | `healthdb` | the 30-day averages |
+| `<day>_steps` | `healthdb` | the typicals |
+| `<day>_movementData`, `<day>_sleepData` | the **`activity`** file | six completed days of history |
+
+The third row is the surprising one. `health_db_insert()` does not store
+`_movementData` at all — it forwards it to `activity_metrics_prv_set_metric()`,
+which writes straight into the history arrays in the `activity` settings file.
+So the phone's push rebuilds part of the very file the wipe zeroed.
+
+**What is gone for good**, and what the warning is about:
+
+- **Today's counts.** The phone deliberately never sends today's data — the
+  day-of-week keys would make the watch treat an incomplete count as final and
+  stop accumulating. See the note at the top of `HealthStatsSync.kt`.
+- **History older than six days.** The phone pushes a rolling window of six
+  completed days; the watch keeps `ACTIVITY_HISTORY_DAYS` = 30.
+- Minute-level detail and in-flight sessions, which were never uploaded.
+
+**What makes the restore happen** is the existing unfaithful flag, not new
+protocol. Every non-clean, non-duress wipe calls
+`bt_persistent_storage_set_unfaithful(true)`; the companion app reads that from
+the version response and, in `BlobDB.init()`, marks every local record
+unsynced and re-pushes it. Health rides along with everything else. The
+`SecurityShredReasonWritesRefused` resync message is belt-and-braces — no
+companion app parses the security-lock endpoint today.
+
+**The rest of the shape:**
+
+- It lives under its own settings key (`hd`), not in the runtime record — see
+  "The two stored records".
+- It **claims its resync bit** when it runs, since the phone can act on it.
+- It is **not** in `shred_targets.c`, and stays out of
+  `security_lock_shred_covers_db()`. The first because destroying it takes more
+  than zeroing two files (below); the second because that function gates
+  refusing inbound writes while locked, and letting a setting change which of
+  the phone's writes get refused mid-lock buys nothing — those records are
+  re-pushed on the next reconnect regardless.
 - **Each module destroys its own** — `health_db_shred()` for the typicals,
   `activity_shred()` for the history. The activity service keeps a day's worth
   of counters in RAM that the next minute handler would write straight back to
@@ -516,11 +549,11 @@ permanently locked out by a forgotten four-digit PIN.
 ## Not built, deliberately
 
 - **A menu to choose what gets erased**, target by target. One switch for
-  health data exists (above) because that is the one target the phone cannot
-  restore, and it carries the warning an unrestorable target needs. A full
-  menu would make every other target look optional when the invariant — that
-  everything the shred destroys comes back from the phone — is exactly what
-  makes triggering it aggressively reasonable.
+  health data exists (above) because that is the only target the phone restores
+  incompletely, and it carries the warning that gap needs. A full menu would
+  make every other target look optional when the invariant — that everything
+  the shred destroys comes back from the phone — is exactly what makes
+  triggering it aggressively reasonable.
 - **A watch-initiated phone lockdown**, for the symmetric case — see the
   Gadgetbridge section above for why Android does not permit it.
 
