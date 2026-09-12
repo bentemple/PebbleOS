@@ -99,14 +99,15 @@ static void send_timeout_msg(void *session_id_param) {
     return;
   }
 
-  DataLoggingSession *logging_session = dls_list_find_by_session_id(session_id);
-
+  // No lookup: the id we were handed is the session's own, so finding the session only to read
+  // it back said nothing -- and said it by dereferencing a pointer that was never NULL-checked
+  // and was no longer protected by anything.
   struct PBL_PACKED {
     uint8_t command;
     uint8_t session_id;
   } msg = {
     .command = DataLoggingEndpointCmdTimeout,
-    .session_id = logging_session->comm.session_id,
+    .session_id = session_id,
   };
 
   comm_session_send_data(session, ENDPOINT_ID_DATA_LOGGING, (uint8_t *)&msg, sizeof(msg),
@@ -312,7 +313,9 @@ bool dls_endpoint_send_data(DataLoggingSession *logging_session, const uint8_t *
 }
 
 static void prv_dls_endpoint_handle_ack(uint8_t session_id) {
-  DataLoggingSession *session = dls_list_find_by_session_id(session_id);
+  // Held for the whole handler. The sends and the storage consume below deliberately run with
+  // the endpoint mutex dropped, so without a hold the session could be freed under them.
+  DataLoggingSession *session = dls_list_find_and_ref_by_session_id(session_id);
   if (session == NULL) {
     PBL_LOG_D_WRN(LOG_DOMAIN_DATA_LOGGING, "Received ack for non-existent session id: %" PRIu8,
                   session_id);
@@ -327,12 +330,13 @@ static void prv_dls_endpoint_handle_ack(uint8_t session_id) {
   switch (session->comm.state) {
     case DataLoggingSessionCommStateIdle:
       PBL_LOG_ERR("Unexpected ACK");
+      pbl_mutex_unlock(&s_endpoint_data.mutex);
       break;
     case DataLoggingSessionCommStateOpening:
       update_session_state(session, DataLoggingSessionCommStateIdle, true /*reschedule*/);
       pbl_mutex_unlock(&s_endpoint_data.mutex);
       dls_private_send_session(session, true);
-      return;
+      break;
     case DataLoggingSessionCommStateSending:
       session->comm.nack_count = 0;
       update_session_state(session, DataLoggingSessionCommStateIdle, true /*reschedule*/);
@@ -345,16 +349,21 @@ static void prv_dls_endpoint_handle_ack(uint8_t session_id) {
 
       // the bt session is likely already active so continue to flush data
       dls_private_send_session(session, true);
-      return;
+      break;
+    default:
+      pbl_mutex_unlock(&s_endpoint_data.mutex);
+      break;
   }
 
-  pbl_mutex_unlock(&s_endpoint_data.mutex);
+  dls_list_release_session(session);
 }
 
 static void prv_dls_endpoint_handle_nack(uint8_t session_id) {
   PBL_LOG_D_DBG(LOG_DOMAIN_DATA_LOGGING, "Received NACK for id: %" PRIu8, session_id);
 
-  DataLoggingSession *logging_session = dls_list_find_by_session_id(session_id);
+  // Held past the endpoint mutex and the reopen below, both of which touch the session with
+  // that mutex dropped.
+  DataLoggingSession *logging_session = dls_list_find_and_ref_by_session_id(session_id);
   if (!logging_session) {
     PBL_LOG_D_WRN(LOG_DOMAIN_DATA_LOGGING, "Received nack for non-existent session id: %" PRIu8,
                   session_id);
@@ -393,6 +402,8 @@ static void prv_dls_endpoint_handle_nack(uint8_t session_id) {
   if (s_unexpected_nacks < MAX_UNEXPECTED_NACK_COUNT) {
     dls_endpoint_open_session(logging_session);
   }
+
+  dls_list_release_session(logging_session);
 }
 
 //! System task callback executed which reopens the next session in the list built up by
@@ -464,12 +475,11 @@ static void prv_handle_report_cmd(const uint8_t *session_ids, size_t num_session
   for (size_t i = 0; i < num_sessions; ++i) {
     const uint8_t session_id = session_ids[i];
 
-    DataLoggingSession *logging_session = dls_list_find_by_session_id(session_id);
-
     PBL_LOG_D_DBG(LOG_DOMAIN_DATA_LOGGING, "Phone reported session %u opened", session_id);
 
-    // If the phone thinks we're open and we're not, send a close message.
-    if (logging_session == NULL) {
+    // If the phone thinks we're open and we're not, send a close message. Asked as a question
+    // rather than by taking a pointer: the session itself is never touched here.
+    if (!dls_list_has_session_id(session_id)) {
       dls_endpoint_close_session(session_id);
     }
   }
@@ -487,9 +497,10 @@ static void prv_handle_report_cmd(const uint8_t *session_ids, size_t num_session
 //! Empty a session by session id
 static void prv_empty_session(uint8_t session_id) {
   PBL_LOG_D_DBG(LOG_DOMAIN_DATA_LOGGING, "Phone requested empty of session %u", session_id);
-  DataLoggingSession *logging_session = dls_list_find_by_session_id(session_id);
+  DataLoggingSession *logging_session = dls_list_find_and_ref_by_session_id(session_id);
   if (logging_session) {
     dls_private_send_session(logging_session, true /*empty_all_data*/);
+    dls_list_release_session(logging_session);
   }
 }
 

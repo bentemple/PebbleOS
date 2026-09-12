@@ -164,11 +164,19 @@ typedef struct DataLoggingSession {
   //! This pointer only allocated for active sessions
   DataLoggingActiveState *data;
 
-  //! Unlinked from the list while someone still held it, so the last
-  //! dls_unlock_session() owns the free rather than whoever unlinked it.
+  //! Unlinked from the list while someone still held it, so the last holder
+  //! owns the free rather than whoever unlinked it.
   //!
   //! Read and written only under the list mutex, like status and open_count.
   bool free_when_unlocked;
+
+  //! Plain holds taken by dls_list_find_and_ref_*(), which keep the session
+  //! alive without taking data->mutex.
+  //!
+  //! Separate from data->open_count because that lives in the active state,
+  //! which an inactive session does not have -- and an inactive session is just
+  //! as freeable underneath a holder. Also under the list mutex.
+  uint8_t ref_count;
 } DataLoggingSession;
 
 bool dls_private_send_session(DataLoggingSession *logging_session, bool empty);

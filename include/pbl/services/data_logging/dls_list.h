@@ -9,9 +9,35 @@
 #include <stdint.h>
 #include <time.h>
 
-DataLoggingSession *dls_list_find_by_session_id(uint8_t session_id);
+//! Find a session by id and take a hold on it, under one lock.
+//!
+//! The hold is what makes the returned pointer safe to dereference at all. Finding and then
+//! using are two operations, and between them the list mutex is not held -- so without a hold,
+//! whoever frees the session next turns the caller's pointer into freed heap. The wipe and the
+//! `dls clear` console command both free from a different task than these callers run on.
+//!
+//! A hold, deliberately, and not dls_lock_session(): that also takes the session's own mutex,
+//! which serialises the holder against writers and cannot be held across the send and storage
+//! calls these callers make, since those take it themselves. All that is wanted is for the
+//! memory to stay put.
+//!
+//! @return NULL if there is no such session. Release every non-NULL return with
+//!         dls_list_release_session(), on every path out.
+DataLoggingSession *dls_list_find_and_ref_by_session_id(uint8_t session_id);
 
-DataLoggingSession *dls_list_find_active_session(uint32_t tag, const Uuid *app_uuid);
+//! As above, for the active session matching a tag and app.
+DataLoggingSession *dls_list_find_and_ref_active_session(uint32_t tag, const Uuid *app_uuid);
+
+//! Whether a session with this id exists, for callers that only want the answer.
+//!
+//! No pointer, so nothing to hold and nothing to release. Prefer this wherever the session
+//! itself is never touched.
+bool dls_list_has_session_id(uint8_t session_id);
+
+//! Drop a hold taken by dls_list_find_and_ref_*().
+//!
+//! Frees the session if it was unlinked while held and this was the last hold on it.
+void dls_list_release_session(DataLoggingSession *session);
 
 //! Unlink a session and free it.
 //!

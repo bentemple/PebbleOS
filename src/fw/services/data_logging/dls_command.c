@@ -27,7 +27,7 @@ void command_dls_list(void) {
 #if 0
 void command_dls_show(const char *id) {
   uint8_t session_id = strtol(id, NULL, 0);
-  DataLoggingSession *logging_session = dls_list_find_by_session_id(session_id);
+  DataLoggingSession *logging_session = dls_list_find_and_ref_by_session_id(session_id);
 
   if (logging_session == NULL) {
     prompt_send_response("LoggingSession not found");
@@ -54,6 +54,8 @@ void command_dls_show(const char *id) {
   WRITE_LINE("  w offset %"PRIu32, logging_session->storage.write_offset);
 
 #undef WRITE_LINE
+
+  dls_list_release_session(logging_session);
 }
 #endif
 

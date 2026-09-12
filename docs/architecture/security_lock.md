@@ -285,6 +285,12 @@ the queue is not a health store — any app can write to it.
 Both lockdown confirmations say so: *"Anything the watch has not sent it yet is
 lost."*
 
+Tearing the queue down from KernelMain is what made the data logging service's
+session lifetimes worth fixing: `dls_list_remove_all()` used to free sessions
+another task was inside. Sessions are now held — by `open_count` for a
+`dls_lock_session()` holder, by `ref_count` for a
+`dls_list_find_and_ref_*()` caller — and the free falls to the last holder out.
+
 Not destroyed: installed apps and the app database, and Bluetooth bonding. The
 phone cannot restore those, and what they hold is the wearer's own installed
 software rather than the phone's content, which is what the lock protects.

@@ -490,6 +490,68 @@ void test_data_logging__removing_one_spares_a_locked_session(void) {
   dls_unlock_session(doomed, false /* inactivate */);
 }
 
+//! A plain reference defers the free just as a session lock does.
+//!
+//! This is the hold the endpoint handlers take: they read and write comm state and then make
+//! send and storage calls with the endpoint mutex dropped, so they need the memory to stay put
+//! without taking the session's own mutex -- which those calls take themselves.
+void test_data_logging__removing_all_spares_a_referenced_session(void) {
+  DataLoggingSessionRef logging_session = data_logging_create(1, DATA_LOGGING_UINT, 1, false);
+  cl_assert(logging_session);
+  const uint8_t session_id = ((DataLoggingSession *)logging_session)->comm.session_id;
+
+  DataLoggingSession *found = dls_list_find_and_ref_by_session_id(session_id);
+  cl_assert(found == logging_session);
+
+  dls_list_remove_all();
+
+  cl_assert(dls_list_get_next(NULL) == NULL);
+  cl_assert(!dls_list_has_session_id(session_id));
+  // Still ours to read, which is the whole point of the hold.
+  cl_assert_equal_i(session_id, found->comm.session_id);
+
+  dls_list_release_session(found);
+}
+
+//! And the find is refused once the session has left the list, so a handler that arrives late
+//! gets NULL rather than a session nothing can reach any more.
+void test_data_logging__a_removed_session_cannot_be_found_again(void) {
+  DataLoggingSessionRef logging_session = data_logging_create(1, DATA_LOGGING_UINT, 1, false);
+  cl_assert(logging_session);
+  const uint8_t session_id = ((DataLoggingSession *)logging_session)->comm.session_id;
+
+  DataLoggingSession *held = dls_list_find_and_ref_by_session_id(session_id);
+  cl_assert(held);
+
+  dls_list_remove_all();
+
+  cl_assert(dls_list_find_and_ref_by_session_id(session_id) == NULL);
+
+  dls_list_release_session(held);
+}
+
+//! Two kinds of hold at once, and the last one out does the free. The counts live in different
+//! places -- ref_count on the session, open_count in its active state -- so a free that
+//! consulted only one of them would run while the other holder was still inside.
+void test_data_logging__the_last_of_two_holds_frees_the_session(void) {
+  DataLoggingSessionRef logging_session = data_logging_create(1, DATA_LOGGING_UINT, 1, false);
+  cl_assert(logging_session);
+  const uint8_t session_id = ((DataLoggingSession *)logging_session)->comm.session_id;
+
+  DataLoggingSession *held = dls_list_find_and_ref_by_session_id(session_id);
+  cl_assert(held);
+  cl_assert(dls_lock_session(held));
+
+  dls_list_remove_all();
+
+  // Dropping the lock leaves the reference, so nothing is freed yet -- the read below would be
+  // freed heap if it were.
+  dls_unlock_session(held, false /* inactivate */);
+  cl_assert_equal_i(session_id, held->comm.session_id);
+
+  dls_list_release_session(held);
+}
+
 //! Nothing held, nothing deferred: the ordinary path still frees on the spot rather than
 //! waiting for an unlock that is never coming.
 void test_data_logging__removing_all_frees_unlocked_sessions_immediately(void) {

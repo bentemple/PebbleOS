@@ -12,6 +12,7 @@
 #include "pbl/util/uuid.h"
 
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 PBL_LOG_MODULE_DECLARE(service_data_logging, CONFIG_SERVICE_DATA_LOGGING_LOG_LEVEL);
@@ -99,6 +100,17 @@ static void prv_free_session(DataLoggingSession *session) {
 
 
 // ---------------------------------------------------------------------------------------
+// Whether anyone is inside this session. Caller owns the list mutex.
+//
+// Two kinds of hold, and either is enough: a dls_lock_session() holder, which also owns
+// data->mutex, and a plain reference from dls_list_find_and_ref_*(), which does not.
+static bool prv_session_is_held(const DataLoggingSession *session) {
+  dls_assert_own_list_mutex();
+  return (session->ref_count > 0) || (session->data && (session->data->open_count > 0));
+}
+
+
+// ---------------------------------------------------------------------------------------
 // Unlink a session, and say whether the caller may free it. Caller owns the list mutex.
 //
 // A session with holders is not the unlinker's to free: they are sitting inside
@@ -112,7 +124,7 @@ static void prv_free_session(DataLoggingSession *session) {
 static bool prv_unlinked_session_is_ours_to_free(DataLoggingSession *session) {
   dls_assert_own_list_mutex();
   session->next = NULL;
-  if (session->data && (session->data->open_count > 0)) {
+  if (prv_session_is_held(session)) {
     session->free_when_unlocked = true;
     session->status = DataLoggingStatusInactive;
     return false;
@@ -135,7 +147,9 @@ void dls_unlock_session(DataLoggingSession *session, bool inactivate) {
   session->data->open_count--;
   const bool last_holder = (session->data->open_count == 0);
   // Read here rather than after the unlock below: the unlinker sets it under this same mutex.
-  const bool ours_to_free = last_holder && session->free_when_unlocked;
+  // Not merely "we were the last lock holder" -- someone may hold a plain reference too, in
+  // which case the free is theirs.
+  const bool ours_to_free = session->free_when_unlocked && !prv_session_is_held(session);
 
   if (session->data->inactivate_pending && last_holder) {
     session->status = DataLoggingStatusInactive;
@@ -168,7 +182,37 @@ DataLoggingStatus dls_get_session_status(DataLoggingSession *session) {
   return status;
 }
 
-DataLoggingSession *dls_list_find_by_session_id(uint8_t session_id) {
+// ---------------------------------------------------------------------------------------
+// Take a plain hold on a session. Caller owns the list mutex.
+//
+// Deliberately not dls_lock_session(): that also takes data->mutex, which serialises the holder
+// against writers and -- worse -- cannot be held across the send and storage calls these
+// callers make, because those take it themselves. All that is wanted here is for the memory to
+// stay put.
+static void prv_ref_session(DataLoggingSession *session) {
+  dls_assert_own_list_mutex();
+  PBL_ASSERTN(session->ref_count < UINT8_MAX);
+  session->ref_count++;
+}
+
+
+// ---------------------------------------------------------------------------------------
+void dls_list_release_session(DataLoggingSession *session) {
+  pbl_mutex_lock(&s_list_mutex, PBL_FOREVER);
+  PBL_ASSERTN(session->ref_count > 0);
+  session->ref_count--;
+  const bool ours_to_free = session->free_when_unlocked && !prv_session_is_held(session);
+  pbl_mutex_unlock(&s_list_mutex);
+
+  // Unlinked while we held it and we were the last one out, so the free came to us.
+  if (ours_to_free) {
+    prv_free_session(session);
+  }
+}
+
+
+// ---------------------------------------------------------------------------------------
+DataLoggingSession *dls_list_find_and_ref_by_session_id(uint8_t session_id) {
   pbl_mutex_lock(&s_list_mutex, PBL_FOREVER);
   DataLoggingSession *iter = s_logging_sessions;
   while (iter != NULL) {
@@ -176,6 +220,9 @@ DataLoggingSession *dls_list_find_by_session_id(uint8_t session_id) {
       break;
     }
     if (iter->comm.session_id == session_id) {
+      // Under the same lock as the search, which is the whole point: a pointer handed out and
+      // then referenced is a pointer that could have been freed in between.
+      prv_ref_session(iter);
       pbl_mutex_unlock(&s_list_mutex);
       return (iter);
     }
@@ -186,12 +233,35 @@ DataLoggingSession *dls_list_find_by_session_id(uint8_t session_id) {
   return (NULL);
 }
 
-DataLoggingSession *dls_list_find_active_session(uint32_t tag, const Uuid *app_uuid) {
+
+// ---------------------------------------------------------------------------------------
+bool dls_list_has_session_id(uint8_t session_id) {
+  pbl_mutex_lock(&s_list_mutex, PBL_FOREVER);
+  DataLoggingSession *iter = s_logging_sessions;
+  bool found = false;
+  while (iter != NULL) {
+    if (iter->comm.session_id > session_id) {
+      break;
+    }
+    if (iter->comm.session_id == session_id) {
+      found = true;
+      break;
+    }
+    iter = iter->next;
+  }
+  pbl_mutex_unlock(&s_list_mutex);
+  return found;
+}
+
+
+// ---------------------------------------------------------------------------------------
+DataLoggingSession *dls_list_find_and_ref_active_session(uint32_t tag, const Uuid *app_uuid) {
   pbl_mutex_lock(&s_list_mutex, PBL_FOREVER);
   DataLoggingSession *iter = s_logging_sessions;
   while (iter != NULL) {
     if (iter->tag == tag && uuid_equal(&(iter->app_uuid), app_uuid) &&
         iter->status == DataLoggingStatusActive) {
+      prv_ref_session(iter);
       pbl_mutex_unlock(&s_list_mutex);
       return (iter);
     }
@@ -291,7 +361,7 @@ uint8_t dls_list_add_new_session(DataLoggingSession *logging_session) {
     session_id = rand_r(&seed) % 255;
     // FIXME better way to avoid infinite loop? or tune this
     PBL_ASSERTN(++loops < 100);
-  } while (dls_list_find_by_session_id(session_id));
+  } while (dls_list_has_session_id(session_id));
   logging_session->comm.session_id = session_id;
 
   // insert in the spool list

@@ -395,11 +395,21 @@ static DataLoggingSession *prv_dls_create(uint32_t tag, DataLoggingItemType item
     }
   }
 
-  DataLoggingSession *logging_session = dls_list_find_active_session(tag, uuid);
+  // Held across the finish below: without a hold, this pointer is one a concurrent teardown can
+  // free before we reach it.
+  DataLoggingSession *logging_session = dls_list_find_and_ref_active_session(tag, uuid);
 
-  if (!resume && logging_session != NULL) {
-    dls_finish(logging_session);
-    logging_session = NULL;
+  if (logging_session != NULL) {
+    if (!resume) {
+      dls_finish(logging_session);
+    }
+    // Dropped before the pointer is returned on the resume path, which is safe: a
+    // DataLoggingSessionRef is not held by a count, it is checked against the list by
+    // dls_list_is_session_valid() on every use.
+    dls_list_release_session(logging_session);
+    if (!resume) {
+      logging_session = NULL;
+    }
   }
 
   if (logging_session == NULL) {
