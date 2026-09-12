@@ -26,6 +26,16 @@ bool health_db_set_typical_values(ActivityMetric metric, DayInWeek day, uint16_t
 
 void health_db_init(void);
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+//! Destroy the stored typicals and averages outright.
+//!
+//! For the security lock's erase, and only when the wearer has opted into
+//! erasing health data: the phone cannot put this back. Zeroes the payload
+//! rather than deleting the file, which would leave it readable until the next
+//! compaction.
+status_t health_db_shred(void);
+#endif
+
 status_t health_db_insert(const uint8_t *key, int key_len, const uint8_t *val, int val_len);
 
 int health_db_get_len(const uint8_t *key, int key_len);

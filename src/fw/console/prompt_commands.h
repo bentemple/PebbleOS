@@ -60,6 +60,7 @@ extern void command_security_lock(void);
 extern void command_security_lockdown(void);
 extern void command_security_unlock(const char *);
 extern void command_security_alarms(const char *);
+extern void command_security_health(const char *);
 extern void command_security_delays(const char *, const char *);
 extern void command_security_deadlines(const char *, const char *);
 extern void command_security_session(const char *);

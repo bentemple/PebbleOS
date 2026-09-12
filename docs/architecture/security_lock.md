@@ -83,8 +83,9 @@ the picker has nowhere to put one.
   compaction, but the flash translation layer can remap and retain physical
   pages beneath both. Against a determined chip-off adversary this is
   best-effort.
-- Health/step data, installed apps, and Bluetooth bonding all survive by
-  design — see "What the erase destroys" below.
+- Installed apps and Bluetooth bonding always survive by design, and health
+  data survives unless the wearer opts in — see "What the erase destroys"
+  below.
 
 ## One switch, and it ships off
 
@@ -109,7 +110,7 @@ lock). **The PIN never goes over the air**, in either direction.
 
 ## Settings > Security
 
-With no PIN set the menu is one row. Once a PIN exists it is ten:
+With no PIN set the menu is one row. Once a PIN exists it is eleven:
 
 | Row | What it does |
 |---|---|
@@ -117,6 +118,7 @@ With no PIN set the menu is one row. Once a PIN exists it is ten:
 | Change PIN | Asks for the current PIN, then the length, then sets a new one. |
 | Lock After | Grace period from an unexpected disconnect to the lock. |
 | Erase After | Countdown from a lockdown to the erase. **Ships as `Never`.** |
+| Erase Health Data | Whether the erase also destroys step and sleep history. **Ships off,** and warns before turning on. |
 | Duress PIN | A second PIN that unlocks and wipes. |
 | Block Notifications | Whether a notification arriving while locked is discarded or kept. **Ships off.** |
 | Alarms When Locked | Whether an alarm still goes off while locked. **Ships on.** |
@@ -260,15 +262,40 @@ waiting — and the `Lock` confirmation says so in as many words.
 
 The invariant the rest of the design rests on: **everything the shred destroys
 comes back from the phone.** That is what makes triggering it aggressively
-reasonable.
+reasonable, and it is the reason the erase can be armed by something as
+ordinary as a Bluetooth disconnect.
 
 Destroyed (`shred_targets.c`): notification store, pins, reminders, contacts,
 weather, iOS notification preferences, app glances.
 
-Not destroyed: step and sleep history, installed apps and the app database,
-Bluetooth bonding, and the datalogging queue — `dls` files are the outbound
-watch-to-phone queue, so wiping them would destroy data the phone does *not*
-have.
+Not destroyed: installed apps and the app database, Bluetooth bonding, and the
+datalogging queue — `dls` files are the outbound watch-to-phone queue, so
+wiping them would destroy data the phone does *not* have.
+
+### Health data, on request
+
+Step and sleep history is the one target that breaks the invariant above: the
+watch generates it, so the phone has nothing to hand back. `Settings > Security
+> Erase Health Data` turns it on, and everything about it is shaped by that one
+asymmetry:
+
+- **It ships off.** A default that destroys unrestorable data is not a default.
+- **Turning it on warns first,** naming what goes and saying plainly that the
+  phone cannot put it back. Turning it off asks nothing.
+- **It lives under its own settings key** (`hd`), not in the runtime record —
+  see "The two stored records".
+- **It is not in `shred_targets.c` and not in `security_lock_shred_covers_db()`.**
+  Both of those still mean "destroyed, and restorable": the first feeds the
+  resync bitmap the watch sends the phone afterwards, and the second is what
+  refuses inbound writes while locked. Health contributes to neither, because
+  asking the phone to resend step history it never had is a request it cannot
+  satisfy.
+- **Each module destroys its own** — `health_db_shred()` for the typicals,
+  `activity_shred()` for the history. The activity service keeps a day's worth
+  of counters in RAM that the next minute handler would write straight back to
+  a fresh file, so zeroing the file alone would leave today's steps on a watch
+  whose history had just been erased. Tracking is not stopped; it counts up
+  again from zero.
 
 Nothing on the watch is encrypted. This protects the screen, not the flash.
 
@@ -488,15 +515,14 @@ permanently locked out by a forgotten four-digit PIN.
 
 ## Not built, deliberately
 
-- **A menu to choose what gets erased**, including health data and apps. Asked
-  for and then withdrawn: it would break the invariant the rest of this design
-  rests on — that everything the shred destroys comes back from the phone —
-  which is what makes triggering it aggressively reasonable. Revisiting it
-  means revisiting "locking almost always ends in a shred" at the same time,
-  and an unrestorable target needs a warning the user cannot miss.
-- **Shredding health/step data**, for the same reason. A watch-initiated phone
-  lockdown was considered too, for the symmetric case — see the Gadgetbridge
-  section above for why Android does not permit it.
+- **A menu to choose what gets erased**, target by target. One switch for
+  health data exists (above) because that is the one target the phone cannot
+  restore, and it carries the warning an unrestorable target needs. A full
+  menu would make every other target look optional when the invariant — that
+  everything the shred destroys comes back from the phone — is exactly what
+  makes triggering it aggressively reasonable.
+- **A watch-initiated phone lockdown**, for the symmetric case — see the
+  Gadgetbridge section above for why Android does not permit it.
 
 ## Where the code lives
 

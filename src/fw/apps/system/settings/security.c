@@ -813,6 +813,47 @@ static void prv_lockdown_erase_push(SettingsSecurityData *data) {
                         prv_lockdown_erase_confirm);
 }
 
+// Erase Health Data
+//////////////////////////////////////////////////////////////////////////////
+//
+// The only row in this menu that asks before turning something on, and the
+// only setting here whose consequence the watch cannot undo. Everything else
+// the erase destroys comes back from the phone once the watch is unlocked and
+// reconnected -- that invariant is what makes arming the erase on a disconnect
+// reasonable -- and step and sleep history is the one thing the watch generates
+// itself.
+//
+// Turning it off asks nothing. A confirmation on the way out of a destructive
+// setting is a confirmation for its own sake.
+//
+// Nothing refreshes the menu by hand: popping the dialog re-shows the menu
+// window, and its appear handler is what redraws the rows.
+
+//! Written before the pop, not after. The pop is what brings the menu back, and
+//! the menu draws this row from the setting -- so doing it the other way round
+//! risks a row that still says Off.
+static void prv_shred_health_confirm(ClickRecognizerRef recognizer, void *e_dialog) {
+  security_lock_set_shred_health(true);
+  expandable_dialog_pop(e_dialog);
+}
+
+static void prv_shred_health_push(SettingsSecurityData *data) {
+  /// Shown before turning on erasing health data. Names what goes, says plainly
+  /// that the phone cannot bring it back, and contrasts that with everything
+  /// else the erase destroys -- which it can.
+  const char *text = i18n_get(
+      "Your step and sleep history is erased along with everything else, and "
+      "your phone cannot put it back.\n\n"
+      "Notifications, calendar, reminders, contacts and weather all return "
+      "when you unlock and reconnect. This does not.\n\n"
+      "Turn this on only if that history is worth more to you destroyed than "
+      "kept.",
+      data);
+
+  prv_push_confirmation("Erase Health Data", i18n_get("Erase Health Data", data), text,
+                        prv_shred_health_confirm);
+}
+
 // Menu
 //////////////////////////////////////////////////////////////////////////////
 
@@ -822,6 +863,9 @@ enum SettingsSecurityItem {
   SettingsSecurityPin,
   SettingsSecurityLockDelay,
   SettingsSecurityShredDelay,
+  //! Directly under Erase After, because it changes what that erase destroys
+  //! rather than when it runs.
+  SettingsSecurityShredHealth,
   SettingsSecurityDuressPin,
   SettingsSecurityBlockNotifications,
   SettingsSecurityAlarmsWhenLocked,
@@ -908,6 +952,20 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       /// phone's content. Measured from the disconnect, not from the lock.
       title = i18n_noop("Erase After");
       subtitle = data->shred_delay_subtitle;
+      break;
+    case SettingsSecurityShredHealth:
+      /// Whether the erase also destroys step and sleep history. The one target
+      /// the phone cannot put back, which is why it is a row of its own.
+      title = i18n_noop("Erase Health Data");
+      if (security_lock_get_shred_health()) {
+        /// Subtitle when health data is erased too. Says the part that cannot
+        /// be undone, because "On" alone does not.
+        subtitle = i18n_get(i18n_noop("On, gone for good"), data);
+      } else {
+        /// Subtitle when it is kept. Everything else the erase destroys comes
+        /// back from the phone; this is what stays behind instead.
+        subtitle = i18n_get(i18n_noop("Off, history is kept"), data);
+      }
       break;
     case SettingsSecurityDuressPin:
       title = i18n_noop("Duress PIN");
@@ -1004,6 +1062,15 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
       break;
     case SettingsSecurityShredDelay:
       prv_shred_delay_menu_push(data);
+      break;
+    case SettingsSecurityShredHealth:
+      if (security_lock_get_shred_health()) {
+        // Turning it off destroys nothing, so it asks nothing.
+        security_lock_set_shred_health(false);
+        prv_refresh(data);
+      } else {
+        prv_shred_health_push(data);
+      }
       break;
     case SettingsSecurityDuressPin:
       // Always straight to setting a new one. Asking "set or clear?" would

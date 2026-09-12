@@ -855,7 +855,7 @@ void command_security_status(void) {
   // the countdown, which is otherwise invisible from the deadlines alone.
   snprintf(buf, sizeof(buf),
            "enabled=%d state=%d pin_len=%u attempts=%u shred_pending=%d dirty=%d lock_in=%d "
-           "shred_in=%d countdown=%d lock_delay=%u shred_delay=%u alarms=%d",
+           "shred_in=%d countdown=%d lock_delay=%u shred_delay=%u alarms=%d health=%d",
            (int)security_lock_is_enabled(), (int)security_lock_get_state(),
            (unsigned)security_lock_get_pin_len(), (unsigned)security_lock_get_failed_attempts(),
            (int)security_lock_is_shred_pending(), (int)security_lock_is_dirty_since_shred(),
@@ -863,7 +863,8 @@ void command_security_status(void) {
            (shred_deadline == 0) ? -1 : (int)(shred_deadline - now),
            (int)security_lock_get_countdown_source(), (unsigned)security_lock_get_lock_delay_s(),
            (unsigned)security_lock_get_shred_delay_s(),
-           (int)security_lock_get_alarms_when_locked());
+           (int)security_lock_get_alarms_when_locked(),
+           (int)security_lock_get_shred_health());
   prompt_send_response(buf);
 }
 

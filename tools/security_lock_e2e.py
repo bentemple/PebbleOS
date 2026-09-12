@@ -72,6 +72,7 @@ SECURITY_ROWS_WITH_PIN = [
     "Change PIN",
     "Lock After",
     "Erase After",
+    "Erase Health Data",
     "Duress PIN",
     "Block Notifications",
     "Alarms When Locked",
@@ -600,7 +601,10 @@ def security_row(name, pin_set):
 
 
 def select_security_row(name, pin_set):
-    press(*(["up"] * 8), settle=0.1)
+    # Enough UPs to reach the top from anywhere in the menu, whichever row set
+    # is showing. Derived rather than a literal: a row added below is a row the
+    # old count could no longer climb past.
+    press(*(["up"] * len(SECURITY_ROWS_WITH_PIN)), settle=0.1)
     press(*(["down"] * security_row(name, pin_set)), settle=0.12)
     press("select", settle=0.4)
 

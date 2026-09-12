@@ -273,6 +273,19 @@ bool security_lock_get_alarms_when_locked(void) {
   return s_alarms_when_locked;
 }
 
+//! Mirrors the production default: off. Nothing the phone cannot restore is
+//! destroyed until the wearer says so.
+static bool s_shred_health;
+
+bool security_lock_get_shred_health(void) {
+  return s_shred_health;
+}
+
+status_t security_lock_set_shred_health(bool enabled) {
+  s_shred_health = enabled;
+  return S_SUCCESS;
+}
+
 status_t security_lock_set_alarms_when_locked(bool allowed) {
   s_alarms_when_locked = allowed;
   return S_SUCCESS;
@@ -401,6 +414,10 @@ static ExpandableDialog s_expandable_dialog;
 //! without having said what it costs.
 static bool s_dialog_create_fails;
 
+//! What the confirmation actually said. A warning is only worth having if it
+//! names the consequence, so the text is asserted on rather than its presence.
+static const char *s_dialog_text;
+
 ExpandableDialog *expandable_dialog_create_with_params(const char *dialog_name, ResourceId icon,
                                                        const char *text, GColor text_color,
                                                        GColor background_color,
@@ -411,6 +428,7 @@ ExpandableDialog *expandable_dialog_create_with_params(const char *dialog_name, 
     return NULL;
   }
   s_dialog_confirm = select_click_handler;
+  s_dialog_text = text;
   return &s_expandable_dialog;
 }
 
@@ -533,13 +551,14 @@ void i18n_free_all(const void *owner) {
 #define ROW_CHANGE_PIN 1
 #define ROW_LOCK_AFTER 2
 #define ROW_ERASE_AFTER 3
-#define ROW_DURESS_PIN 4
-#define ROW_BLOCK_NOTIFICATIONS 5
-#define ROW_ALARMS_WHEN_LOCKED 6
-#define ROW_LOCK 7
-#define ROW_LOCKDOWN_ERASE 8
-#define ROW_SHOW_IN_LAUNCHER 9
-#define ROWS_WHEN_ON 10
+#define ROW_ERASE_HEALTH 4
+#define ROW_DURESS_PIN 5
+#define ROW_BLOCK_NOTIFICATIONS 6
+#define ROW_ALARMS_WHEN_LOCKED 7
+#define ROW_LOCK 8
+#define ROW_LOCKDOWN_ERASE 9
+#define ROW_SHOW_IN_LAUNCHER 10
+#define ROWS_WHEN_ON 11
 
 static void prv_open_settings(void) {
   settings_security_get_info()->init();
@@ -632,6 +651,7 @@ void test_settings_security__initialize(void) {
   s_option_choice = -1;
   s_option_num_rows = 0;
   s_dialog_confirm = NULL;
+  s_dialog_text = NULL;
   s_dialog_pops = 0;
   s_dialog_pushes = 0;
   s_dialog_create_fails = false;
@@ -646,6 +666,8 @@ void test_settings_security__initialize(void) {
   // And the shipped default here: nothing the phone has already handed over is
   // thrown away, it is only held back until the watch is open again.
   s_block_notifications_when_locked = false;
+  // Off, like it ships: the one target the phone cannot put back is opt-in.
+  s_shred_health = false;
 }
 
 void test_settings_security__cleanup(void) {
@@ -2169,6 +2191,108 @@ void test_settings_security__delay_pickers_open_on_the_current_choice(void) {
 
   prv_select(ROW_ERASE_AFTER);
   cl_assert_equal_i(3, s_option_choice);  // 30m, 1h, 2h, 4h
+}
+
+// Erase Health Data
+////////////////////////////////////
+//
+// The one setting in this menu whose consequence the watch cannot undo, so the
+// one that asks before turning on.
+
+//! Off by default, and the subtitle says what "off" leaves behind rather than
+//! just that it is off.
+void test_settings_security__erase_health_defaults_to_off(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_draw(ROW_ERASE_HEALTH);
+
+  cl_assert(!security_lock_get_shred_health());
+  cl_assert_equal_s("Erase Health Data", s_drawn_title);
+  cl_assert_equal_s("Off, history is kept", s_drawn_subtitle);
+}
+
+//! Selecting it does not turn it on. Everything else the erase destroys comes
+//! back from the phone; this does not, so the row says so first.
+void test_settings_security__erase_health_warns_before_turning_on(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_ERASE_HEALTH);
+
+  cl_assert_equal_i(1, s_dialog_pushes);
+  cl_assert(s_dialog_confirm != NULL);
+  cl_assert(!security_lock_get_shred_health());
+}
+
+//! The warning has to name the part that cannot be undone. A confirmation that
+//! only says "are you sure" is a confirmation nobody reads.
+void test_settings_security__the_erase_health_warning_says_it_cannot_be_undone(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_ERASE_HEALTH);
+
+  cl_assert(strstr(s_dialog_text, "cannot put it back") != NULL);
+  cl_assert(strstr(s_dialog_text, "step and sleep history") != NULL);
+}
+
+//! And taking the warning is what turns it on.
+void test_settings_security__taking_the_erase_health_warning_turns_it_on(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_ERASE_HEALTH);
+  s_dialog_confirm(NULL, &s_expandable_dialog);
+
+  cl_assert_equal_i(1, s_dialog_pops);
+  cl_assert(security_lock_get_shred_health());
+
+  s_module->appear(s_module);
+  prv_draw(ROW_ERASE_HEALTH);
+  cl_assert_equal_s("On, gone for good", s_drawn_subtitle);
+}
+
+//! Walking away from the warning changes nothing. The row is one press from
+//! Erase After, so landing on it by accident must cost nothing.
+void test_settings_security__walking_away_from_the_erase_health_warning_changes_nothing(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_ERASE_HEALTH);
+  s_module->appear(s_module);
+
+  cl_assert(!security_lock_get_shred_health());
+  prv_draw(ROW_ERASE_HEALTH);
+  cl_assert_equal_s("Off, history is kept", s_drawn_subtitle);
+}
+
+//! Turning it off asks nothing: a confirmation on the way out of a destructive
+//! setting is a confirmation for its own sake.
+void test_settings_security__turning_erase_health_off_asks_nothing(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  prv_select(ROW_ERASE_HEALTH);
+  s_dialog_confirm(NULL, &s_expandable_dialog);
+  s_module->appear(s_module);
+  s_dialog_pushes = 0;
+
+  prv_select(ROW_ERASE_HEALTH);
+
+  cl_assert_equal_i(0, s_dialog_pushes);
+  cl_assert(!security_lock_get_shred_health());
+}
+
+//! And it is gone with the rest when the feature is off: there is no erase for
+//! it to qualify.
+void test_settings_security__erase_health_is_hidden_when_off(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
+
+  prv_disable_with_pin("1234");
+
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
 }
 
 // Block Notifications

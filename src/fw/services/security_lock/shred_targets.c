@@ -8,12 +8,17 @@
 
 //! Files whose entire contents are destroyed, and the BlobDB each one backs.
 //!
-//! Health/activity ("activity", "healthdb"), app persist storage ("ps<uuid>"),
-//! the app database ("appdb"), the BT bonding store and the datalogging queue
-//! ("dls<session>") are deliberately absent: the phone cannot restore them, so
-//! wiping them would make the feature destructive enough that nobody would turn
-//! it on. That is a conscious trade and it means a seized watch still yields
-//! step and sleep history.
+//! App persist storage ("ps<uuid>"), the app database ("appdb"), the BT bonding
+//! store and the datalogging queue ("dls<session>") are deliberately absent:
+//! the phone cannot restore them, so wiping them would make the feature
+//! destructive enough that nobody would turn it on.
+//!
+//! Health/activity ("activity", "healthdb") is absent for the same reason, but
+//! is reachable through Settings > Security > Erase Health Data. It is not a
+//! conditional entry here because every entry in this list also feeds the
+//! resync bitmap the wipe sends the phone afterwards, and the phone has no step
+//! history to resend. The wipe calls health_db_shred() and activity_shred()
+//! directly instead.
 //!
 //! Datalogging is the sharpest case. It is the outbound watch-to-phone queue,
 //! so by definition it holds the one thing the phone does not have yet, and

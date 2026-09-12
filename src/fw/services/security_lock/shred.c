@@ -15,6 +15,8 @@
 #include "flash_region/flash_region.h"
 #include "kernel/events.h"
 #include "kernel/pebble_tasks.h"
+#include "pbl/services/activity/activity.h"
+#include "pbl/services/blob_db/health_db.h"
 #include "pbl/services/blob_db/pin_db.h"
 #include "pbl/services/blob_db/reminder_db.h"
 #include "pbl/services/filesystem/pfs.h"
@@ -382,6 +384,22 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
       } else {
         PBL_LOG_ERR("Failed to shred %s: %" PRId32, targets[i].filename, (int32_t)rv);
       }
+      task_watchdog_bit_set(pebble_task_get_current());
+    }
+
+    // Health data, only if the wearer asked for it, and deliberately not in the
+    // list above: every entry there carries the promise the rest of this design
+    // rests on -- destroyed, and restorable from the phone -- and this is the
+    // one thing the watch generates itself. So it contributes no bit to
+    // `wiped`, because the resync request that bitmap becomes would be asking
+    // the phone for step history it never had.
+    //
+    // Each module destroys its own, rather than this walking two more
+    // filenames: the activity service has a day's worth of counters in RAM that
+    // the next minute handler would write straight back to a fresh file.
+    if (security_lock_get_shred_health()) {
+      health_db_shred();
+      activity_shred();
       task_watchdog_bit_set(pebble_task_get_current());
     }
   }

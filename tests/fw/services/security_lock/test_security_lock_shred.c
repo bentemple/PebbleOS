@@ -43,6 +43,8 @@ typedef struct {
   int pin_inits;
   int notif_resets;
   int files_shredded;
+  int health_db_shreds;
+  int activity_shreds;
   int region_erases;
   int sweeps_started;
   int unfaithful_marks;
@@ -106,6 +108,13 @@ status_t security_lock_set_state(SecurityLockState state) {
   s_state = state;
   s_locked = (state == SecurityLockStateLocked);
   return S_SUCCESS;
+}
+
+//! Opt-in, and off here like it ships: the tests that care turn it on.
+static bool s_shred_health;
+
+bool security_lock_get_shred_health(void) {
+  return s_shred_health;
 }
 
 uint8_t security_lock_get_pin_len(void) {
@@ -302,6 +311,15 @@ void event_put(void *event) {
   s_trace.events++;
 }
 
+status_t health_db_shred(void) {
+  s_trace.health_db_shreds++;
+  return S_SUCCESS;
+}
+
+void activity_shred(void) {
+  s_trace.activity_shreds++;
+}
+
 // Helpers
 ////////////////////////////////////
 
@@ -333,9 +351,66 @@ void test_security_lock_shred__initialize(void) {
   s_pin_len = 4;
   s_state = SecurityLockStateArmed;
   s_rolled_back = false;
+  s_shred_health = false;
 }
 
 void test_security_lock_shred__cleanup(void) {}
+
+// Erasing health data
+////////////////////////////////////
+//
+// Opt-in, because it is the one target the phone cannot put back. Everything
+// else the wipe destroys returns on the next unlock and reconnect, and that
+// invariant is what the rest of the design rests on.
+
+//! Off, and the wipe leaves it alone.
+void test_security_lock_shred__health_data_survives_by_default(void) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(SHRED_TARGET_COUNT, s_trace.files_shredded);
+  cl_assert_equal_i(0, s_trace.health_db_shreds);
+  cl_assert_equal_i(0, s_trace.activity_shreds);
+}
+
+//! On, and it goes with the rest. Both halves: the typicals the phone holds a
+//! copy of, and the step and sleep history the watch keeps for itself.
+void test_security_lock_shred__health_data_goes_when_the_wearer_asked(void) {
+  s_shred_health = true;
+
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(1, s_trace.health_db_shreds);
+  cl_assert_equal_i(1, s_trace.activity_shreds);
+}
+
+//! It contributes nothing to the resync bitmap, however it is set. That bitmap
+//! becomes a request to the phone to resend what was destroyed, and asking for
+//! step history the phone never had is a request it cannot satisfy.
+void test_security_lock_shred__erasing_health_data_asks_the_phone_for_nothing(void) {
+  s_shred_health = true;
+
+  const uint32_t with_health = security_lock_shred(SecurityShredReasonManualPanic);
+
+  s_shred_health = false;
+  s_dirty = true;
+  const uint32_t without_health = security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(without_health, with_health);
+}
+
+//! And a wipe with nothing to destroy still destroys nothing, health included.
+//! The dirty flag is what stops repeated triggers spending flash on data that
+//! is already gone, and health is not exempt from it.
+void test_security_lock_shred__a_clean_wipe_leaves_health_data_alone(void) {
+  s_shred_health = true;
+  s_dirty = false;
+
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(0, s_trace.files_shredded);
+  cl_assert_equal_i(0, s_trace.health_db_shreds);
+  cl_assert_equal_i(0, s_trace.activity_shreds);
+}
 
 // A wipe with something to destroy
 ////////////////////////////////////

@@ -52,6 +52,9 @@ static const char *ATTEMPT_KEY = "at";
 //! write over BlobDB -- because what a locked watch is allowed to do is not the
 //! phone's to decide.
 static const char *ALARMS_KEY = "al";
+//! Whether the erase also destroys step and sleep history. Its own key too,
+//! and for the same reason: see the layout note on SecurityLockRuntime.
+static const char *SHRED_HEALTH_KEY = "hd";
 
 typedef struct PACKED {
   uint16_t version;
@@ -148,6 +151,11 @@ static time_t s_last_attempt;
 //! leave someone's alarms silently switched off.
 static bool s_alarms_when_locked = true;
 
+//! Mirrors SHRED_HEALTH_KEY. Absent reads as false, which is both the shipped
+//! answer and the safe one: an upgrade must never start destroying data the
+//! phone cannot put back on the strength of a missing key.
+static bool s_shred_health;
+
 static void prv_runtime_defaults(SecurityLockRuntime *rt) {
   *rt = (SecurityLockRuntime){
       .version = RT_RECORD_VERSION,
@@ -240,6 +248,9 @@ void security_lock_init(void) {
   if (prv_read(ALARMS_KEY, &s_alarms_when_locked, sizeof(s_alarms_when_locked)) != S_SUCCESS) {
     s_alarms_when_locked = true;
   }
+  if (prv_read(SHRED_HEALTH_KEY, &s_shred_health, sizeof(s_shred_health)) != S_SUCCESS) {
+    s_shred_health = false;
+  }
   if (rv == S_SUCCESS && rt.version == RT_RECORD_VERSION) {
     s_runtime_cache = rt;
   } else {
@@ -287,6 +298,7 @@ void security_lock_deinit(void) {
   s_initialized = false;
   s_refused_dbs = 0;
   s_alarms_when_locked = true;
+  s_shred_health = false;
   prv_runtime_defaults(&s_runtime_cache);
 }
 
@@ -1005,6 +1017,29 @@ status_t security_lock_set_alarms_when_locked(bool allowed) {
   if (s_alarms_when_locked != allowed) {
     s_alarms_when_locked = allowed;
     rv = prv_write(ALARMS_KEY, &s_alarms_when_locked, sizeof(s_alarms_when_locked));
+  }
+  pbl_mutex_unlock(&s_mutex);
+  return rv;
+}
+
+bool security_lock_get_shred_health(void) {
+  if (!s_initialized) {
+    // The safe answer here is the one that destroys nothing: a caller that
+    // asked before init is a caller that cannot be trusted to have a setting.
+    return false;
+  }
+  return s_shred_health;
+}
+
+status_t security_lock_set_shred_health(bool enabled) {
+  if (!s_initialized) {
+    return E_INVALID_OPERATION;
+  }
+  pbl_mutex_lock(&s_mutex, PBL_FOREVER);
+  status_t rv = S_NO_ACTION_REQUIRED;
+  if (s_shred_health != enabled) {
+    s_shred_health = enabled;
+    rv = prv_write(SHRED_HEALTH_KEY, &s_shred_health, sizeof(s_shred_health));
   }
   pbl_mutex_unlock(&s_mutex);
   return rv;

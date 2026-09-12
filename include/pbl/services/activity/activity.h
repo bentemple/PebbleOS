@@ -299,6 +299,18 @@ bool activity_init(void);
 //! Returns true if the activity service is initialized
 bool activity_is_initialized(void);
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+//! Destroy the stored step and sleep history, and the day in progress with it.
+//!
+//! For the security lock's erase, and only when the wearer has opted into
+//! erasing health data: the phone cannot put this back, which is why that is a
+//! separate switch from the erase itself.
+//!
+//! Tracking is not stopped and the service is not torn down -- it simply counts
+//! up again from zero.
+void activity_shred(void);
+#endif
+
 //! Start the activity tracking service. This starts sampling of the accelerometer
 //! @param test_mode if true, samples must be fed in using activity_feed_samples()
 //! @return true if successfully started

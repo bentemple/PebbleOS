@@ -227,6 +227,17 @@ void command_security_alarms(const char *on_str) {
   prv_sectest_report(buf);
 }
 
+//! Whether the wipe also destroys step and sleep history. Reachable from the
+//! console because the Settings row deliberately asks first, and a harness
+//! cannot take a confirmation.
+void command_security_health(const char *on_str) {
+  char buf[96];
+  const bool enabled = (on_str[0] != '0');
+  const status_t rv = security_lock_set_shred_health(enabled);
+  snprintf(buf, sizeof(buf), "SECTEST health on=%d rv=%" PRId32, (int)enabled, (int32_t)rv);
+  prv_sectest_report(buf);
+}
+
 void command_security_delays(const char *lock_s, const char *shred_s) {
   char buf[96];
   const uint32_t lock_delay = (uint32_t)atoi(lock_s);

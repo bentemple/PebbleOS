@@ -1454,6 +1454,48 @@ bool activity_is_initialized(void) {
   return s_activity_initialized;
 }
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+// ------------------------------------------------------------------------------------------------
+void activity_shred(void) {
+  // The day in progress goes with the history. Everything below is written back
+  // to a fresh settings file by the next minute handler, so shredding the file
+  // alone would leave today's step count on a watch whose history had just been
+  // destroyed -- and today is the most revealing part of it.
+  //
+  // Only the stored data, not the service: tracking carries on from zero. This
+  // runs inside the security lock's wipe, on KernelMain with the watchdog
+  // masked, so it must not wait on another task -- which rules out
+  // activity_test_reset(), whose stop-tracking step blocks on a KernelBG
+  // callback.
+  if (s_activity_initialized) {
+    pbl_mutex_lock(&s_activity_state.mutex, PBL_FOREVER);
+    {
+      s_activity_state.step_data = (ActivityStepData){};
+      s_activity_state.sleep_data = (ActivitySleepData){};
+      s_activity_state.distance_mm = 0;
+      s_activity_state.active_calories = 0;
+      s_activity_state.resting_calories = 0;
+      s_activity_state.activity_sessions_count = 0;
+      memset(s_activity_state.activity_sessions, 0, sizeof(s_activity_state.activity_sessions));
+      // Cleared rather than left set: both mean "there is something worth
+      // writing out", and there is not any more.
+      s_activity_state.need_activities_saved = false;
+      s_activity_state.sleep_sessions_modified = false;
+    }
+    pbl_mutex_unlock(&s_activity_state.mutex);
+  }
+
+  // Outside the lock, and outside the init check: the file is on flash whether
+  // or not the service ever came up, and the service holds no handle on it
+  // between operations. pfs_shred() rather than pfs_remove() because a delete
+  // leaves the payload readable until the next compaction.
+  const status_t rv = pfs_shred(ACTIVITY_SETTINGS_FILE_NAME);
+  if (rv != S_SUCCESS) {
+    PBL_LOG_ERR("Failed to shred %s: %" PRId32, ACTIVITY_SETTINGS_FILE_NAME, (int32_t)rv);
+  }
+}
+#endif
+
 // ------------------------------------------------------------------------------------------------
 bool activity_start_tracking(bool test_mode) {
   if (!s_activity_initialized) {

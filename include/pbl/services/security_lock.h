@@ -339,6 +339,24 @@ status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s)
 bool security_lock_get_alarms_when_locked(void);
 status_t security_lock_set_alarms_when_locked(bool allowed);
 
+//! Whether the erase also destroys step and sleep history.
+//!
+//! Off, and it has to ship off. Everything else the erase destroys comes back
+//! from the phone when the watch is unlocked and reconnected -- that invariant
+//! is what makes triggering the erase aggressively reasonable, and it is the
+//! reason the feature can be armed on a disconnect at all. Health data is the
+//! one thing the watch generates itself, so this is the one target the phone
+//! cannot put back.
+//!
+//! So it is opt-in and the Settings row warns before turning it on, and the
+//! wipe keeps it out of the resync request it sends afterwards: asking the
+//! phone to resend step history it never had would be a request it cannot
+//! satisfy. Everything about it is deliberately separate from
+//! security_lock_shred_covers_db(), which still means "destroyed, and
+//! restorable".
+bool security_lock_get_shred_health(void);
+status_t security_lock_set_shred_health(bool enabled);
+
 //! Why the armed countdown is armed.
 //!
 //! Persisted beside the deadlines, because what may retire a countdown depends

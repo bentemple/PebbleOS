@@ -1169,6 +1169,53 @@ void test_security_lock__a_watch_with_no_stored_answer_allows_alarms(void) {
   cl_assert(security_lock_get_alarms_when_locked());
 }
 
+// Erasing health data
+////////////////////////////////////
+
+//! Off out of the box, and it has to be. Everything else the erase destroys
+//! comes back from the phone -- which is what makes arming the erase on a
+//! disconnect reasonable -- and step and sleep history does not. Nobody gets
+//! that destroyed by a default.
+void test_security_lock__erasing_health_data_is_off_by_default(void) {
+  cl_assert(!security_lock_get_shred_health());
+}
+
+void test_security_lock__erasing_health_data_survives_a_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_shred_health(true));
+  cl_assert(security_lock_get_shred_health());
+
+  prv_simulate_reboot();
+  cl_assert(security_lock_get_shred_health());
+}
+
+//! Its own key, so a discarded runtime record leaves it alone -- in both
+//! directions. Falling back to the default would quietly disarm a wearer's
+//! choice; falling back to "on" would be far worse.
+void test_security_lock__erasing_health_data_survives_a_discarded_runtime_record(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_shred_health(true));
+
+  prv_corrupt_runtime_version();
+  prv_simulate_reboot();
+
+  cl_assert(security_lock_get_shred_health());
+}
+
+//! And a watch that has never stored an answer reads off. A missing key must
+//! never be the reason unrestorable data is destroyed.
+void test_security_lock__a_watch_with_no_stored_answer_keeps_health_data(void) {
+  prv_simulate_reboot();
+
+  cl_assert(!security_lock_get_shred_health());
+}
+
+//! Nothing to write when the answer is already the one stored.
+void test_security_lock__setting_erase_health_to_what_it_already_is_writes_nothing(void) {
+  cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_set_shred_health(false));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_shred_health(true));
+  cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_set_shred_health(true));
+}
+
 // Radio blackout
 ////////////////////////////////////
 

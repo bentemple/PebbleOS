@@ -405,6 +405,18 @@ status_t health_db_flush(void) {
   return rv;
 }
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+status_t health_db_shred(void) {
+  // pfs_shred() rather than the pfs_remove() above: a delete leaves the payload
+  // readable until compaction gets around to it, and this is called to destroy
+  // it. No handle is held between calls, so there is nothing to close first.
+  pbl_mutex_lock(&s_mutex, PBL_FOREVER);
+  status_t rv = pfs_shred(HEALTH_DB_FILE_NAME);
+  pbl_mutex_unlock(&s_mutex);
+  return rv;
+}
+#endif
+
 status_t health_db_compact(void) {
   SettingsFile file;
   status_t rv = prv_file_open_and_lock(&file);
