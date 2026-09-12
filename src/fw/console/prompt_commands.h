@@ -61,6 +61,7 @@ extern void command_security_lockdown(void);
 extern void command_security_unlock(const char *);
 extern void command_security_alarms(const char *);
 extern void command_security_health(const char *);
+extern void command_security_notifs(const char *);
 extern void command_security_delays(const char *, const char *);
 extern void command_security_deadlines(const char *, const char *);
 extern void command_security_session(const char *);
@@ -364,6 +365,8 @@ static const Command s_prompt_commands[] = {
   {"security lock", command_security_lock, 0},
   {"security unlock", command_security_unlock, 1},
   {"security alarms", command_security_alarms, 1},
+  {"security health", command_security_health, 1},
+  {"security notifs", command_security_notifs, 1},
   {"security delays", command_security_delays, 2},
   {"security deadlines", command_security_deadlines, 2},
   {"security session", command_security_session, 1},

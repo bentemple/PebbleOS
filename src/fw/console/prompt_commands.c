@@ -39,7 +39,9 @@
 #include "pbl/util/string.h"
 
 #if defined(CONFIG_SERVICE_SECURITY_LOCK_TEST_HOOKS)
+#include "pbl/services/notifications/notification_storage.h"
 #include "pbl/services/security_lock.h"
+#include "shell/prefs.h"
 #include "pbl/services/security_lock_shred.h"
 #endif
 
@@ -855,7 +857,8 @@ void command_security_status(void) {
   // the countdown, which is otherwise invisible from the deadlines alone.
   snprintf(buf, sizeof(buf),
            "enabled=%d state=%d pin_len=%u attempts=%u shred_pending=%d dirty=%d lock_in=%d "
-           "shred_in=%d countdown=%d lock_delay=%u shred_delay=%u alarms=%d health=%d",
+           "shred_in=%d countdown=%d lock_delay=%u shred_delay=%u alarms=%d health=%d "
+           "block_notifs=%d unread=%u",
            (int)security_lock_is_enabled(), (int)security_lock_get_state(),
            (unsigned)security_lock_get_pin_len(), (unsigned)security_lock_get_failed_attempts(),
            (int)security_lock_is_shred_pending(), (int)security_lock_is_dirty_since_shred(),
@@ -864,7 +867,13 @@ void command_security_status(void) {
            (int)security_lock_get_countdown_source(), (unsigned)security_lock_get_lock_delay_s(),
            (unsigned)security_lock_get_shred_delay_s(),
            (int)security_lock_get_alarms_when_locked(),
-           (int)security_lock_get_shred_health());
+           (int)security_lock_get_shred_health(),
+           // Reported together because the pair is the whole of what Block Notifications
+           // decides: whether a notification arriving behind the lock is thrown away, or kept
+           // for whoever unlocks. The count is the only way a test can tell "kept, not shown"
+           // from "discarded" -- both look like an empty screen.
+           (int)shell_prefs_get_block_notifications_when_locked(),
+           (unsigned)notification_storage_get_unread_count());
   prompt_send_response(buf);
 }
 

@@ -27,6 +27,7 @@
 #include "kernel/events.h"
 #include "kernel/ui/modals/modal_manager.h"
 #include "pbl/services/security_lock.h"
+#include "shell/prefs.h"
 #include "pbl/services/security_lock_endpoint.h"
 #include "pbl/services/security_lock_shred.h"
 #include "pbl/services/security_lock_ui.h"
@@ -224,6 +225,19 @@ void command_security_alarms(const char *on_str) {
   const bool allowed = (on_str[0] != '0');
   const status_t rv = security_lock_set_alarms_when_locked(allowed);
   snprintf(buf, sizeof(buf), "SECTEST alarms on=%d rv=%" PRId32, (int)allowed, (int32_t)rv);
+  prv_sectest_report(buf);
+}
+
+//! Whether a notification arriving behind the lock is discarded or kept.
+//!
+//! In shell prefs rather than the lock's own record, so this goes through the same setter the
+//! Settings row uses. Reachable from the console because a test has to drive both branches and
+//! the row is several presses deep.
+void command_security_notifs(const char *on_str) {
+  char buf[96];
+  const bool block = (on_str[0] != '0');
+  shell_prefs_set_block_notifications_when_locked(block);
+  snprintf(buf, sizeof(buf), "SECTEST notifs block=%d", (int)block);
   prv_sectest_report(buf);
 }
 

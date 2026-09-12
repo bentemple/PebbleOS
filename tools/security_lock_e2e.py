@@ -1180,6 +1180,97 @@ def test_alarm_rings_while_locked(console, pad):
     check("it unlocks and the setting goes back", console.status()["state"] == 1)
 
 
+def test_notification_hidden_while_locked(console, pad):
+    """A notification arriving behind the lock is kept, and never drawn.
+
+    The two are separate promises and the second one used to have a hole in it.
+    Blocking pop-ups is reference counted, and the count is taken by
+    security_lock_ui_lockout() -- which a watch that rebooted straight into the
+    locked state has never run, because nothing raises the pad until the first
+    button press. So this test reboots into the lock rather than locking from a
+    running watch: the interesting window is the one before that first press,
+    and locking normally never enters it.
+
+    The unread count is what tells "kept, unshown" apart from "discarded". Both
+    look like an empty screen, which is exactly why the hole survived review.
+    """
+    if console.status()["pin_len"] == 0:
+        set_or_change_pin(console, pad, "1234")
+
+    console.command("security notifs 0")
+    if not check("notifications are set to be kept",
+                 console.status()["block_notifs"] == 0):
+        return
+
+    console.command("security lock")
+    time.sleep(3.0)
+    if not check("the watch is locked", console.status()["state"] == 2):
+        return
+
+    # Rebooting while locked comes back locked, and re-runs the wipe on the way
+    # -- so this waits out a shred, not just a boot.
+    console.command("reset")
+    time.sleep(2.0)
+    if not check("it reboots", assert_booted(console)):
+        return
+    if not check("it comes back locked", console.status()["state"] == 2,
+                 f"state={console.status()['state']}"):
+        return
+
+    # The window this test exists for: locked, but nothing has raised the pad,
+    # so no pop-up block has been taken.
+    ui = console.ui()
+    if not check("the pad is down after the reboot", ui["visible"] == "0",
+                 f"visible={ui['visible']} top_modal={ui['top_modal']}"):
+        return
+
+    before = console.status()["unread"]
+    console.command("notif test")
+    time.sleep(2.5)
+
+    ui = console.ui()
+    screenshot("13-notification-while-locked")
+    check("nothing is drawn for it", ui["top_modal"] != "Notification Window",
+          f"top_modal={ui['top_modal']}")
+    check("the pad is still down", ui["visible"] == "0",
+          f"visible={ui['visible']}")
+    check("but it was kept", console.status()["unread"] == before + 1,
+          f"unread {before} -> {console.status()['unread']}")
+
+    # And it is still there once the watch is open, which is the whole point of
+    # keeping it.
+    press("select")
+    time.sleep(1.5)
+    type_pin(console, pad, "1234")
+    time.sleep(2.0)
+    if not check("it unlocks", console.status()["state"] == 1):
+        return
+    check("the notification survived the unlock",
+          console.status()["unread"] == before + 1,
+          f"unread={console.status()['unread']}")
+
+    # The other branch: on, and the notification is discarded rather than kept.
+    console.command("security notifs 1")
+    console.command("security lock")
+    time.sleep(3.0)
+    before = console.status()["unread"]
+    console.command("notif test")
+    time.sleep(2.5)
+    ui = console.ui()
+    check("with blocking on it is not drawn either",
+          ui["top_modal"] != "Notification Window", f"top_modal={ui['top_modal']}")
+    check("and it is discarded rather than kept",
+          console.status()["unread"] == before,
+          f"unread {before} -> {console.status()['unread']}")
+
+    press("select")
+    time.sleep(1.5)
+    type_pin(console, pad, "1234")
+    time.sleep(2.0)
+    console.command("security notifs 0")
+    check("it unlocks and the setting goes back", console.status()["state"] == 1)
+
+
 TESTS = [
     ("starts_clean", test_starts_clean),
     ("status_over_the_wire", test_status_over_the_wire),
@@ -1192,6 +1283,9 @@ TESTS = [
     ("wrong_pin_counts_up", test_wrong_pin_counts_up),
     ("alarm_rings_while_locked", test_alarm_rings_while_locked),
     ("turning_it_off_clears_the_pin", test_turning_it_off_clears_the_pin),
+    # Last, because it reboots the watch: the console socket goes with it and
+    # the log stream does not reconnect, so anything after it loses console.saw().
+    ("notification_hidden_while_locked", test_notification_hidden_while_locked),
 ]
 
 
