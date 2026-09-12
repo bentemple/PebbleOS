@@ -36,7 +36,7 @@ void security_lock_engage_lock_only(SecurityShredReason reason);
 
 //! Enter the locked state and start the erase countdown. KernelMain only.
 //!
-//! What every manual trigger does: the Lockdown app, the Quick Launch chord,
+//! What every manual trigger does: the Lock app, the Quick Launch chord,
 //! the Settings row and the phone's LOCK. The watch locks at once and erases
 //! at the configured Erase After unless the PIN is entered first, exactly as a
 //! disconnect countdown behaves -- so a lockdown hit by accident costs a PIN

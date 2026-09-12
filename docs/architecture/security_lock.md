@@ -21,6 +21,40 @@ the applib event-service state accessors survive into a PRF build. Adding the
 guard would make the Kconfig say what the runtime already does; it has not been
 added, so this is written down instead.
 
+## Vocabulary
+
+Settled after an audit of every user-facing string, and written down because
+the question has come up twice.
+
+| Word | Means | Where |
+|---|---|---|
+| **Security Lock** | the feature, and its master switch | Settings row |
+| **Locked** | the state: the PIN gates input | lock screen, `Alarms When Locked` |
+| **Lock** | the action: lock now. Whatever `Erase After` says goes on counting, exactly as it does under any other lock | Quick Launch, the app, the Settings row |
+| **Lockdown** | locking *and* erasing. Only ever appears as `Lockdown + Erase` | Quick Launch, the Settings row, the phone's `LOCK_ERASE` |
+| **Erase** | destroying the watch's copy of the phone's content | `Erase After`, every subtitle |
+
+The rule that holds it together: **a lock is a lock however it was reached.** A
+disconnect lock and the manual action produce the same watch — locked, with the
+configured erase counting down — so they share a word. The only thing that
+earns the word *Lockdown* is erasing, which is the one outcome the PIN cannot
+call back.
+
+That is why the manual action is `Lock` and not `Lockdown`. It was originally
+the latter, on the reasoning that starting the erase clock was something extra
+it did. It is not extra: a disconnect lock leaves the same clock running, from
+the same setting. What the manual action adds is only that the lock happens now
+instead of at `Lock After`, and `Lock` says that.
+
+The phone's two commands line up with the same pair: `LOCK` is a Lock, and
+`LOCK_ERASE` is a Lockdown + Erase. A disconnect must never be described as the
+latter.
+
+Known rough edge: the Quick Launch picker shows the name alone, so `Lock` reads
+identically whether `Erase After` is `Never` (it only locks) or set (it locks,
+and the erase is running). The Settings row carries a subtitle that says which;
+the picker has nowhere to put one.
+
 ## Threat model
 
 1. **Border / device seizure.** Adversary holds both phone and watch and may
@@ -80,9 +114,9 @@ With no PIN set the menu is one row. Once a PIN exists it is eight:
 | Lock After | Grace period from an unexpected disconnect to the lock. |
 | Erase After | Countdown from a lockdown to the erase. **Ships as `Never`.** |
 | Duress PIN | A second PIN that unlocks and wipes. |
-| Lockdown | Lock now; erase at `Erase After`, which the PIN cancels. |
+| Lock | Lock now; erase at `Erase After`, which the PIN cancels. |
 | Lockdown + Erase | Lock now and erase now. No countdown. |
-| Show in Launcher | Whether the Lockdown app is listed. |
+| Show in Launcher | Whether the Lock app is listed. |
 
 `Lock After` offers 1 minute to 1 hour. `Erase After` offers 30 minutes to 24
 hours plus `Never`, and `Never` is listed last because it is the weakest choice
@@ -90,9 +124,9 @@ on the list, not the one to land on by accident. An `Erase After` shorter than
 `Lock After` is filtered out of the menu — it would erase a watch that had not
 locked yet.
 
-The `Lockdown` row states its own consequence in its subtitle, recomputed from
-`Erase After` as the menu is drawn: *"Locks, erases in 4 hr"*, or *"Locks, no
-timed erase"* when `Erase After` is `Never`.
+The `Lock` row states its own consequence in its subtitle, recomputed from
+`Erase After` as the menu is drawn: *"Locks now, erases in 4 hr"*, or *"Locks
+now, no timed erase"* when `Erase After` is `Never`.
 
 The `Security Lock` row deliberately carries **no** subtitle. Any state shown
 there is the state that has to stay hidden — whether the watch is protected is
@@ -104,8 +138,8 @@ Source: `src/fw/apps/system/settings/security.c`.
 
 | Trigger | Result |
 |---|---|
-| Lockdown app, or its Quick Launch chord | Lock now, erase at `Erase After` |
-| Settings > Lockdown | Lock now, erase at `Erase After` |
+| Lock app, or its Quick Launch chord | Lock now, erase at `Erase After` |
+| Settings > Lock | Lock now, erase at `Erase After` |
 | Phone sends `LOCK` | Lock now, erase at `Erase After` |
 | Settings > Lockdown + Erase | Lock **and erase**, immediately |
 | Lockdown + Erase Quick Launch chord | Lock **and erase**, immediately |
@@ -127,7 +161,7 @@ the first group. A mistaken tap costs a PIN entry, not data.
 
 ## The two Quick Launch apps
 
-`Lockdown` and `Lockdown + Erase` are separate system apps with separate UUIDs,
+`Lock` and `Lockdown + Erase` are separate system apps with separate UUIDs,
 so Quick Launch — which binds an install id resolved from the UUID — can bind
 them to different buttons.
 
@@ -135,7 +169,7 @@ They differ in reach as well as in effect:
 
 | | Launcher | Quick Launch | Available when |
 |---|---|---|---|
-| `Lockdown` | `Show in Launcher` | always | the lock is usable |
+| `Lock` | `Show in Launcher` | always | the lock is usable |
 | `Lockdown + Erase` | **never** | when erasing is on | `Erase After` is not `Never` |
 
 `Lockdown + Erase` is deliberately never listed in the launcher. The launcher is
@@ -151,7 +185,7 @@ that erases with no timer at all.
 
 A binding outlives the setting — nothing about moving `Erase After` to `Never`
 clears the install id Quick Launch stored — so the app stays reachable through a
-stale binding. In that case it **degrades to a plain `Lockdown`** rather than
+stale binding. In that case it **degrades to a plain `Lock`** rather than
 refusing: locking is never the wrong half to do, and a panic chord that did
 nothing would be the worst reading of it.
 
@@ -182,11 +216,11 @@ the deadlines it describes, so it cannot be flushed separately from them or
 outlive them.
 
 Arming a manual countdown takes the **earlier** of the configured delay and any
-countdown already pending, so pressing `Lockdown` can bring an erase forward but
+countdown already pending, so pressing `Lock` can bring an erase forward but
 never postpone one.
 
 Rebooting does not cancel anything — restarting must never be cheaper than
-waiting — and the `Lockdown` confirmation says so in as many words.
+waiting — and the `Lock` confirmation says so in as many words.
 
 ## What the erase destroys
 
@@ -380,7 +414,7 @@ permanently locked out by a forgotten four-digit PIN.
 | `src/fw/services/security_lock/pin_hash.c`, `sha256.c` | PIN hashing |
 | `src/fw/popups/security/` | Lock screen and PIN pad |
 | `src/fw/apps/system/settings/security.c` | Settings > Security |
-| `src/fw/apps/system/lockdown.c` | The Lockdown app |
+| `src/fw/apps/system/lockdown.c` | The Lock and Lockdown + Erase apps |
 | `include/pbl/services/security_lock*.h` | Public interfaces |
 
 ## Testing

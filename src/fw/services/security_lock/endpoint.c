@@ -401,7 +401,7 @@ void security_lock_endpoint_arm_manual_countdown(void) {
 
   // A lockdown may only ever bring an erase forward. A disconnect countdown
   // already closer than the configured delay is kept rather than replaced, so
-  // reaching for Lockdown cannot buy time -- and it is promoted to manual
+  // reaching for Lock cannot buy time -- and it is promoted to manual
   // either way, which takes it out of reach of the reconnect that would
   // otherwise have cancelled it.
   const time_t pending = security_lock_get_shred_deadline();

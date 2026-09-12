@@ -143,37 +143,42 @@ void command_security_clear_pin(void) {
 //! Deliberately not blocked on: engage() runs the shred inline and holds the
 //! launcher task for seconds, which would leave the console's own task parked
 //! long enough to look hung itself. The completion line is the signal.
-static void prv_security_lock_cb(void *unused) {
+static void prv_security_lockdown_cb(void *unused) {
   char buf[96];
   security_lock_engage(SecurityShredReasonPhoneLockdown);
-  snprintf(buf, sizeof(buf), "SECTEST lock done state=%d", (int)security_lock_get_state());
+  snprintf(buf, sizeof(buf), "SECTEST lockdown done state=%d", (int)security_lock_get_state());
   PBL_LOG_INFO("%s", buf);
 }
 
-//! Lock and erase on the spot: what the Settings Lockdown + Erase row does.
-void command_security_lock(void) {
-  prv_sectest_report("SECTEST lock queued");
+//! Lock and erase on the spot: what the Settings Lockdown + Erase row, the
+//! Quick Launch chord of the same name and the phone's LOCK_ERASE all do.
+void command_security_lockdown(void) {
+  prv_sectest_report("SECTEST lockdown queued");
   prompt_command_finish();
-  launcher_task_add_callback(prv_security_lock_cb, NULL);
+  launcher_task_add_callback(prv_security_lockdown_cb, NULL);
 }
 
-//! Lock and start the erase countdown: what the Lockdown app, the Quick Launch
-//! chord, the Settings Lockdown row and the phone's LOCK all do.
-static void prv_security_lockdown_cb(void *unused) {
+static void prv_security_lock_cb(void *unused) {
   char buf[96];
   security_lock_engage_with_countdown(SecurityShredReasonManualPanic);
   const time_t now = rtc_get_time();
   const time_t shred_deadline = security_lock_get_shred_deadline();
-  snprintf(buf, sizeof(buf), "SECTEST lockdown done state=%d shred_in=%d countdown=%d",
+  snprintf(buf, sizeof(buf), "SECTEST lock done state=%d shred_in=%d countdown=%d",
            (int)security_lock_get_state(), (shred_deadline == 0) ? -1 : (int)(shred_deadline - now),
            (int)security_lock_get_countdown_source());
   PBL_LOG_INFO("%s", buf);
 }
 
-void command_security_lockdown(void) {
-  prv_sectest_report("SECTEST lockdown queued");
+//! Lock and leave the erase running: what the Lock app, the Quick Launch chord,
+//! the Settings Lock row and the phone's LOCK all do.
+//!
+//! The two commands used to mean the opposite of their names -- `lock` erased
+//! and `lockdown` did not -- which was the console half of the vocabulary this
+//! feature has since settled. See docs/proposals/security-lockdown.md.
+void command_security_lock(void) {
+  prv_sectest_report("SECTEST lock queued");
   prompt_command_finish();
-  launcher_task_add_callback(prv_security_lockdown_cb, NULL);
+  launcher_task_add_callback(prv_security_lock_cb, NULL);
 }
 
 typedef struct SecurityUnlockInfo {

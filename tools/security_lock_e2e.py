@@ -73,7 +73,7 @@ SECURITY_ROWS_WITH_PIN = [
     "Lock After",
     "Erase After",
     "Duress PIN",
-    "Lockdown",
+    "Lock",
     "Lockdown + Erase",
     "Show in Launcher",
 ]
