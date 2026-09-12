@@ -35,7 +35,7 @@ PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LE
 //! discarding the config record throws the PIN away. Sharing one number meant a
 //! runtime-only field could disarm the lock on upgrade; these cannot.
 #define CFG_RECORD_VERSION 4
-#define RT_RECORD_VERSION 7
+#define RT_RECORD_VERSION 6
 
 //! Config: written rarely (only when the PIN changes).
 static const char *CFG_KEY = "cfg";
@@ -47,6 +47,11 @@ static const char *RT_KEY = "rt";
 //! record is read whole, and growing it would make every already-installed
 //! watch fail the read and come back unlocked on the upgrade that added it.
 static const char *ATTEMPT_KEY = "at";
+//! Whether an alarm may still ring while locked. Its own key for the same
+//! reason as the one above, and kept out of shell prefs -- which the phone can
+//! write over BlobDB -- because what a locked watch is allowed to do is not the
+//! phone's to decide.
+static const char *ALARMS_KEY = "al";
 
 typedef struct PACKED {
   uint16_t version;
@@ -86,12 +91,27 @@ typedef struct PACKED {
   //! would be lost and unlocking would restore the wrong state.
   bool radio_blackout;
   bool airplane_was_on;
-  //! Whether an alarm may still ring while locked. Here rather than in shell
-  //! prefs, which the phone can write over BlobDB: what a locked watch is
-  //! allowed to do is not the phone's to decide, and the delays beside it are
-  //! kept out of the phone's reach for the same reason.
-  bool alarms_when_locked;
 } SecurityLockRuntime;
+
+//! Freeze the layout. Adding a field here is not a local change.
+//!
+//! The record is read whole, into a buffer the size of this struct, and
+//! settings_file_get() returns E_RANGE when the stored value is shorter than
+//! the read. So growing it -- or bumping RT_RECORD_VERSION, which the version
+//! check rejects just as hard -- makes every already-installed watch fail that
+//! read at boot and fall back to the defaults. The fallback comes back Armed,
+//! deliberately, which means a firmware install quietly opens a watch that was
+//! shut. It has happened twice.
+//!
+//! Anything new goes under its own settings key, the way ATTEMPT_KEY and
+//! ALARMS_KEY do: a missing key is a value to default, not a record to discard.
+//!
+//! Spelled out by field rather than as a byte count so it holds wherever time_t
+//! is a different width. Update it only alongside a migration.
+_Static_assert(sizeof(SecurityLockRuntime) == sizeof(uint16_t) + (3 * sizeof(uint8_t)) +
+                                                  (4 * sizeof(bool)) + (3 * sizeof(time_t)) +
+                                                  (2 * sizeof(uint32_t)),
+               "The runtime record grew; see the note above before changing this");
 
 #if defined(CONFIG_RNG_STUB)
 //! Keeps two salts derived in the same tick from coming out identical.
@@ -123,6 +143,11 @@ static uint32_t s_refused_dbs;
 //! which reads as zero: the full delay, never a free guess.
 static time_t s_last_attempt;
 
+//! Mirrors ALARMS_KEY. Absent on a watch upgrading from before the exemption,
+//! which reads as true: the permissive answer, and a missing record must not
+//! leave someone's alarms silently switched off.
+static bool s_alarms_when_locked = true;
+
 static void prv_runtime_defaults(SecurityLockRuntime *rt) {
   *rt = (SecurityLockRuntime){
       .version = RT_RECORD_VERSION,
@@ -141,9 +166,6 @@ static void prv_runtime_defaults(SecurityLockRuntime *rt) {
       // locks, and the triggers that erase outright still erase.
       .shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S,
       .countdown_source = SecurityCountdownNone,
-      // The permissive answer, which is also what the fallback path wants: a
-      // discarded record must not leave someone's alarms silently switched off.
-      .alarms_when_locked = true,
   };
 }
 
@@ -215,6 +237,9 @@ void security_lock_init(void) {
   if (prv_read(ATTEMPT_KEY, &s_last_attempt, sizeof(s_last_attempt)) != S_SUCCESS) {
     s_last_attempt = 0;
   }
+  if (prv_read(ALARMS_KEY, &s_alarms_when_locked, sizeof(s_alarms_when_locked)) != S_SUCCESS) {
+    s_alarms_when_locked = true;
+  }
   if (rv == S_SUCCESS && rt.version == RT_RECORD_VERSION) {
     s_runtime_cache = rt;
   } else {
@@ -261,6 +286,7 @@ void security_lock_deinit(void) {
   }
   s_initialized = false;
   s_refused_dbs = 0;
+  s_alarms_when_locked = true;
   prv_runtime_defaults(&s_runtime_cache);
 }
 
@@ -968,7 +994,7 @@ bool security_lock_get_alarms_when_locked(void) {
   if (!s_initialized) {
     return true;
   }
-  return s_runtime_cache.alarms_when_locked;
+  return s_alarms_when_locked;
 }
 
 status_t security_lock_set_alarms_when_locked(bool allowed) {
@@ -977,9 +1003,9 @@ status_t security_lock_set_alarms_when_locked(bool allowed) {
   }
   pbl_mutex_lock(&s_mutex, PBL_FOREVER);
   status_t rv = S_NO_ACTION_REQUIRED;
-  if (s_runtime_cache.alarms_when_locked != allowed) {
-    s_runtime_cache.alarms_when_locked = allowed;
-    rv = prv_flush_runtime();
+  if (s_alarms_when_locked != allowed) {
+    s_alarms_when_locked = allowed;
+    rv = prv_write(ALARMS_KEY, &s_alarms_when_locked, sizeof(s_alarms_when_locked));
   }
   pbl_mutex_unlock(&s_mutex);
   return rv;

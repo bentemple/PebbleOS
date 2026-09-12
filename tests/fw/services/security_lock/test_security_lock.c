@@ -162,6 +162,18 @@ static void prv_corrupt_runtime_version(void) {
   prv_corrupt_record_version("rt");
 }
 
+//! The version the stored record actually carries, read the way the service
+//! reads it: the first field of the record.
+static uint16_t prv_stored_record_version(const char *key) {
+  SettingsFile file;
+  cl_assert_equal_i(S_SUCCESS, settings_file_open(&file, "seclock", KiBYTES(2)));
+  uint16_t version = 0;
+  cl_assert_equal_i(S_SUCCESS,
+                    settings_file_get(&file, key, strlen(key), &version, sizeof(version)));
+  settings_file_close(&file);
+  return version;
+}
+
 //! Replace the runtime record with a shorter one, which is what a record
 //! written by a build with fewer fields actually looks like -- the real upgrade
 //! path, where the length rather than the version is what rejects it.
@@ -1135,13 +1147,23 @@ void test_security_lock__setting_alarms_to_what_they_already_are_writes_nothing(
   cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_set_alarms_when_locked(false));
 }
 
-//! A discarded record must not leave someone's alarms silently switched off:
-//! the fallback is the permissive answer, same as the shipped one.
-void test_security_lock__an_unreadable_record_leaves_alarms_allowed(void) {
+//! The answer lives under its own key, so a discarded runtime record does not
+//! take it with it. Keeping it out of that record is what stops adding this
+//! setting from rejecting every already-installed watch's record at boot --
+//! see the layout note in service.c.
+void test_security_lock__alarms_survive_a_discarded_runtime_record(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_alarms_when_locked(false));
 
   prv_corrupt_runtime_version();
+  prv_simulate_reboot();
+
+  cl_assert(!security_lock_get_alarms_when_locked());
+}
+
+//! And a watch that has never had one written reads the permissive answer: a
+//! missing key must not leave someone's alarms silently switched off.
+void test_security_lock__a_watch_with_no_stored_answer_allows_alarms(void) {
   prv_simulate_reboot();
 
   cl_assert(security_lock_get_alarms_when_locked());
@@ -1323,6 +1345,37 @@ void test_security_lock__a_shorter_runtime_record_keeps_the_pin_and_arms(void) {
   // and the dirty flag reads the safe answer.
   cl_assert_equal_i(SECURITY_LOCK_DEFAULT_LOCK_DELAY_S, security_lock_get_lock_delay_s());
   cl_assert(security_lock_is_dirty_since_shred());
+}
+
+//! What a rejected runtime record costs, stated as behaviour rather than left
+//! implied by the tests above: the fallback is Armed, so a watch that was shut
+//! comes back open. That is the deliberate choice -- locking someone out of
+//! their own watch on an upgrade is the worse failure -- which is exactly why
+//! nothing may cause the record to be rejected in the first place.
+void test_security_lock__a_rejected_runtime_record_unlocks_a_locked_watch(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
+  cl_assert(security_lock_is_locked());
+
+  prv_shorten_runtime_record();
+  prv_simulate_reboot();
+
+  cl_assert(!security_lock_is_locked());
+  cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
+}
+
+//! So the record's version is frozen, and this is the tripwire.
+//!
+//! Bumping it rejects every already-installed watch's record at boot exactly as
+//! growing the struct does, and the test above says what that costs. It has
+//! happened twice: once when the lockout timestamp was added as a field, and
+//! again when the alarms-while-locked switch was. Both live under their own
+//! keys now. A change here is only correct alongside a migration.
+void test_security_lock__the_runtime_record_version_is_frozen(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+
+  cl_assert_equal_i(6, prv_stored_record_version("rt"));
+  cl_assert_equal_i(4, prv_stored_record_version("cfg"));
 }
 
 //! The reverse direction: an unreadable config record leaves no PIN, and a

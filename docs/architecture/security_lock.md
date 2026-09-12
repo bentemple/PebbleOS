@@ -204,6 +204,27 @@ on, and swaps them when it is off.
 Source: `src/fw/apps/system/lockdown.c`, registered in
 `src/fw/shell/normal/system_app_registry_list.json`.
 
+## The two stored records
+
+Everything persistent lives in one settings file under two records: `cfg` (the
+PIN verifiers, written only when a PIN changes) and `rt` (state, deadlines,
+delays, failed attempts — written often). They version separately so a
+runtime-only change cannot throw the PIN away.
+
+**Neither record may grow, and neither version may be bumped, without a
+migration.** Both are read whole into a buffer the size of the current struct,
+and `settings_file_get()` returns `E_RANGE` when the stored value is shorter
+than the read — so a new field makes every already-installed watch fail that
+read at boot and fall back to defaults. The fallback comes back `Armed`, on
+purpose: locking someone out of their own watch on a firmware install is the
+worse failure. The cost is that a watch that was **shut comes back open**.
+
+This has happened twice — once for the lockout timestamp, once for
+`Alarms When Locked` — so new state goes under **its own key** instead, where a
+missing key is a value to default rather than a record to discard. A
+`_Static_assert` on `sizeof(SecurityLockRuntime)` and
+`test_security_lock__the_runtime_record_version_is_frozen` are the tripwires.
+
 ## The erase countdown
 
 Deadlines are absolute wall-clock timestamps in the lock record, re-checked on a
