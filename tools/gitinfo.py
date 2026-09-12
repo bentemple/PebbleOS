@@ -30,7 +30,9 @@ def get_git_revision():
     timestamp, commit = _git("log", "-1", "--format=%ct%n%h", "HEAD").split("\n")
 
     try:
-        tag = _git("describe")
+        # Only version tags. The check below rejects anything else outright,
+        # so an unrelated tag on a nearby commit would fail the build.
+        tag = _git("describe", "--match", "v*")
         if _is_dirty():
             tag += "-dirty"
     except subprocess.CalledProcessError:
