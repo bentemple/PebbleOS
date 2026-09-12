@@ -565,6 +565,27 @@ void test_pin_entry_window__submits_a_six_digit_pin(void) {
   cl_assert_equal_s("135792", s_submitted);
 }
 
+//! The longest offered length, which is also the width the digit buffer is
+//! sized to: an off-by-one here either truncates the PIN or runs off the end of
+//! the buffer, and both look like a working pad until the PIN is verified.
+void test_pin_entry_window__submits_a_ten_digit_pin(void) {
+  prv_open(10);
+  prv_tap_pin("1357924681");
+  cl_assert_equal_i(1, s_submit_count);
+  cl_assert_equal_i(10, s_submitted_len);
+  cl_assert_equal_s("1357924681", s_submitted);
+}
+
+//! And nothing is submitted a digit early. The bar draws one segment per digit
+//! still wanted, so a pad that submitted at nine would leave a segment the user
+//! could never fill.
+void test_pin_entry_window__a_ten_digit_pin_does_not_submit_at_nine(void) {
+  prv_open(10);
+  prv_tap_pin("135792468");
+  cl_assert_equal_i(0, s_submit_count);
+  cl_assert_equal_i(9, s_pin_window.entered);
+}
+
 // The callback may pop and forget the window, so the buffer has to be clear
 // before it runs rather than after.
 void test_pin_entry_window__digits_are_gone_before_the_callback_runs(void) {

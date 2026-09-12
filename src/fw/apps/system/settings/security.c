@@ -111,20 +111,24 @@ typedef struct SettingsSecurityData {
   uint8_t num_shred_rows;
 } SettingsSecurityData;
 
-//! The two lengths a PIN may be. Deliberately a list and not a range:
-//! security_lock_set_pin() rejects anything between them, so offering a five
-//! would be a row that cannot be used.
-static const uint8_t s_pin_lengths[] = {4, 6};
+//! The lengths a PIN may be. Spelled out rather than generated because each
+//! one needs a literal label for the translators to find, and kept in step with
+//! the rule in security_lock.h by the asserts below: security_lock_set_pin()
+//! rejects anything not on this list, so offering a five would be a row that
+//! cannot be used.
+static const uint8_t s_pin_lengths[] = {4, 6, 8, 10};
 
 static const char *s_pin_length_labels[] = {
     i18n_noop("4 digits"),
     i18n_noop("6 digits"),
+    i18n_noop("8 digits"),
+    i18n_noop("10 digits"),
 };
 
 _Static_assert(ARRAY_LENGTH(s_pin_lengths) == ARRAY_LENGTH(s_pin_length_labels),
                "Every offered PIN length needs a label");
-_Static_assert(4 >= SECURITY_LOCK_PIN_MIN_LEN && 6 <= SECURITY_LOCK_PIN_MAX_LEN,
-               "Offered PIN lengths must be ones the lock state store accepts");
+_Static_assert(ARRAY_LENGTH(s_pin_lengths) == SECURITY_LOCK_NUM_PIN_LENGTHS,
+               "The picker must offer exactly the lengths the lock state store accepts");
 
 //! Index into s_pin_lengths, falling back to the first entry for a stored PIN
 //! whose length is no longer offered.
@@ -138,7 +142,11 @@ static uint8_t prv_length_index(uint8_t pin_len) {
 }
 
 static bool prv_pin_is_set(SettingsSecurityData *data) {
-  return data->current_pin_len >= SECURITY_LOCK_PIN_MIN_LEN;
+  // The valid-length test rather than a lower bound: a record carrying a length
+  // no picker ever offered has no PIN anyone could type, so it takes the Set
+  // PIN flow and gets repaired rather than the Change PIN flow and a pad that
+  // can never be satisfied.
+  return security_lock_pin_len_is_valid(data->current_pin_len);
 }
 
 //! Render a delay for a menu row.

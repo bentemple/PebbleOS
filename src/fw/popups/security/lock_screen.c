@@ -106,7 +106,7 @@ void security_lock_screen_push(void) {
   }
 
   const uint8_t pin_len = security_lock_get_pin_len();
-  if (pin_len < SECURITY_LOCK_PIN_MIN_LEN || pin_len > SECURITY_LOCK_PIN_MAX_LEN) {
+  if (!security_lock_pin_len_is_valid(pin_len)) {
     // A screen with no PIN to satisfy is a screen with no way past it. Leave
     // the clock alone rather than bricking the watch.
     PBL_LOG_ERR("Locked with no usable PIN (len %" PRIu8 "); not raising lock screen", pin_len);

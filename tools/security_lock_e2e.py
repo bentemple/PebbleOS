@@ -605,23 +605,34 @@ def select_security_row(name, pin_set):
     press("select", settle=0.4)
 
 
-def choose_pin_length(console, digits, current=4):
-    """Pick 4 or 6 on the length step of the set-PIN flow.
+#: The lengths the picker offers, in order. Mirrors
+#: security_lock_pin_len_is_valid() -- every even width from 4 to 10.
+PIN_LENGTHS = (4, 6, 8, 10)
 
-    The picker opens on the current length, so most of the time this is a
-    single SELECT. It has no row constant because it is a two-item option
-    menu rather than the Security menu.
+
+def choose_pin_length(console, digits, current=4):
+    """Pick a length on the length step of the set-PIN flow.
+
+    The picker opens on the current length, so this walks the distance between
+    the two rows rather than pressing once: 4 to 10 is three presses, and a
+    single one would silently pick 6. It has no row constant because it is its
+    own option menu rather than the Security menu.
 
     Waited for, not slept through: a SELECT sent before the picker is up goes
     to the Security menu instead, which opens the flow a second time and
     leaves every later step one screen out of phase.
     """
+    if digits not in PIN_LENGTHS:
+        raise ValueError(f"{digits} is not a length the picker offers")
     if not wait_for_window(console, OPTION_MENU_WINDOW):
         raise RuntimeError(
             f"the PIN length picker never came up (top: {top_window(console)})"
         )
-    if digits != current:
-        press("down" if digits > current else "up", settle=0.2)
+    # An unknown current length leaves the picker on its first row.
+    opens_on = current if current in PIN_LENGTHS else PIN_LENGTHS[0]
+    steps = PIN_LENGTHS.index(digits) - PIN_LENGTHS.index(opens_on)
+    if steps:
+        press(*(["down" if steps > 0 else "up"] * abs(steps)), settle=0.2)
     press("select", settle=0.3)
     time.sleep(0.8)
 

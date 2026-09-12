@@ -97,8 +97,12 @@ rather than at each caller, so a trigger that forgets to ask is covered anyway.
 "Has a PIN" and "is on" are the same fact. Setting a PIN turns the feature on.
 Turning it off requires the PIN and clears it.
 
-The PIN is exactly 4 or 6 digits — nothing in between — of 1-9, since the pad
-has no 0 key. It is hashed locally with 10,000 rounds of SHA-256
+The PIN is an even number of digits, 4 to 10 — 4, 6, 8 or 10, nothing odd and
+nothing outside that — of 1-9, since the pad has no 0 key. The rule lives in
+`security_lock_pin_len_is_valid()`, and the Settings picker, the store, the pad
+and the hash all ask it rather than testing a range of their own: a length one
+side allowed and another refused is either a row that cannot be used or a PIN
+that cannot be typed. It is hashed locally with 10,000 rounds of SHA-256
 (`pin_hash.c`, `sha256.c` — local to the service, because mbedtls is only built
 under `CONFIG_BT_FW_NIMBLE` and a lock that works on only some boards is not a
 lock). **The PIN never goes over the air**, in either direction.
@@ -110,7 +114,7 @@ With no PIN set the menu is one row. Once a PIN exists it is ten:
 | Row | What it does |
 |---|---|
 | Security Lock | Off/on. Turning it off asks for the PIN and clears it. |
-| Change PIN | Asks for the current PIN, then sets a new one. |
+| Change PIN | Asks for the current PIN, then the length, then sets a new one. |
 | Lock After | Grace period from an unexpected disconnect to the lock. |
 | Erase After | Countdown from a lockdown to the erase. **Ships as `Never`.** |
 | Duress PIN | A second PIN that unlocks and wipes. |

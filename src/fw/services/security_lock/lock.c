@@ -132,7 +132,7 @@ static void prv_engage(SecurityShredReason reason, EngageAction action) {
   }
 
   const uint8_t pin_len = security_lock_get_pin_len();
-  if (pin_len < SECURITY_LOCK_PIN_MIN_LEN || pin_len > SECURITY_LOCK_PIN_MAX_LEN) {
+  if (!security_lock_pin_len_is_valid(pin_len)) {
     // Enabled with an unusable PIN is an inconsistent record, not a state any
     // control produces. Erasing anyway would destroy the content of a watch
     // that was never protected and leave it wide open afterwards.

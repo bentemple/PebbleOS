@@ -98,7 +98,7 @@ status_t security_lock_set_pin(const char *digits, uint8_t len) {
   if (s_set_pin_fails) {
     return E_INTERNAL;
   }
-  if (len < SECURITY_LOCK_PIN_MIN_LEN || len > SECURITY_LOCK_PIN_MAX_LEN) {
+  if (!security_lock_pin_len_is_valid(len)) {
     return E_INVALID_ARGUMENT;
   }
   memcpy(s_stored_pin, digits, len);
@@ -1507,9 +1507,9 @@ void test_settings_security__a_correct_pin_also_leaves_the_counter_clear(void) {
 // stored rather than one the user chose.
 
 //! The lengths the picker must offer, in order. Stated here rather than derived
-//! from the module: "exactly four or six" is the requirement, so the test has
-//! to fail if the module starts offering a five.
-static const uint8_t s_expected_lengths[] = {4, 6};
+//! from the module: "every even width from four to ten" is the requirement, so
+//! the test has to fail if the module starts offering a five.
+static const uint8_t s_expected_lengths[] = {4, 6, 8, 10};
 
 static int prv_length_index(uint8_t len) {
   for (int i = 0; i < (int)ARRAY_LENGTH(s_expected_lengths); ++i) {
@@ -1526,7 +1526,7 @@ static void prv_choose_length(uint8_t len) {
   s_option_select(&s_option_menu, prv_length_index(len), NULL);
 }
 
-void test_settings_security__offers_only_four_or_six_digits(void) {
+void test_settings_security__offers_only_the_even_lengths_from_four_to_ten(void) {
   prv_open_settings();
   prv_select(ROW_ENABLED);
 
@@ -1539,6 +1539,35 @@ void test_settings_security__offers_only_four_or_six_digits(void) {
     s_module->appear(s_module);
     prv_select(ROW_ENABLED);
   }
+}
+
+//! The whole flow at the longest offered length, not just the picker: the
+//! length reaches the pad, the pad collects ten digits, the repeat compares all
+//! ten, and the store keeps them. Every buffer on that path is sized to
+//! SECURITY_LOCK_PIN_MAX_LEN, so this is where a stale one shows up.
+void test_settings_security__a_ten_digit_pin_round_trips(void) {
+  prv_open_settings();
+
+  prv_enable_with_pin("1357924681");
+
+  cl_assert_equal_i(10, s_stored_pin_len);
+  cl_assert_equal_i(0, memcmp(s_stored_pin, "1357924681", 10));
+  prv_draw(ROW_ENABLED);
+  cl_assert_equal_s("On", s_drawn_subtitle);
+}
+
+//! And the mismatch check still compares the whole thing. Two ten-digit PINs
+//! differing only in the last digit must not be taken as a match -- a compare
+//! bounded by the shorter old maximum would accept them.
+void test_settings_security__a_ten_digit_repeat_must_match_every_digit(void) {
+  prv_open_settings();
+
+  prv_select(ROW_ENABLED);
+  prv_choose_length(10);
+  prv_submit("1357924681");
+  prv_submit("1357924682");
+
+  cl_assert_equal_i(0, s_stored_pin_len);
 }
 
 //! The length picked has to reach the pad that collects the new PIN, or a

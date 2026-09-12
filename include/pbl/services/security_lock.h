@@ -16,12 +16,30 @@
 //! be readable from services_normal_early_init(), before blob_db_init_dbs()
 //! has run. See docs/architecture/security_lock.md.
 
-//! A PIN is exactly 4 or 6 digits -- nothing in between. The pad has no 0 key,
-//! so digits are 1-9.
+//! A PIN is an even number of digits, 4 to 10 -- nothing odd and nothing
+//! outside that. The pad has no 0 key, so digits are 1-9.
+//!
+//! The Settings picker offers exactly this set and security_lock_set_pin()
+//! accepts exactly this set, which is why the rule lives here rather than in
+//! either of them: a length one side allowed and the other refused would be a
+//! row that cannot be used, or a PIN that cannot be typed.
 #define SECURITY_LOCK_PIN_MIN_LEN 4
-#define SECURITY_LOCK_PIN_MAX_LEN 6
+#define SECURITY_LOCK_PIN_MAX_LEN 10
+#define SECURITY_LOCK_PIN_LEN_STEP 2
+#define SECURITY_LOCK_NUM_PIN_LENGTHS \
+  (((SECURITY_LOCK_PIN_MAX_LEN - SECURITY_LOCK_PIN_MIN_LEN) / SECURITY_LOCK_PIN_LEN_STEP) + 1)
 #define SECURITY_LOCK_SALT_LEN 16
 #define SECURITY_LOCK_HASH_LEN 32
+
+//! Whether @p len is a length the lock will ever store or ask for.
+//!
+//! Everything that reads a stored length checks it through here, because a
+//! record carrying anything else is inconsistent rather than merely unusual:
+//! the pad would collect digits no verifier could ever match.
+static inline bool security_lock_pin_len_is_valid(uint8_t len) {
+  return (len >= SECURITY_LOCK_PIN_MIN_LEN) && (len <= SECURITY_LOCK_PIN_MAX_LEN) &&
+         (((len - SECURITY_LOCK_PIN_MIN_LEN) % SECURITY_LOCK_PIN_LEN_STEP) == 0);
+}
 
 //! Wrong PINs tolerated before the watch re-shreds and stays locked.
 #define SECURITY_LOCK_MAX_PIN_ATTEMPTS 3

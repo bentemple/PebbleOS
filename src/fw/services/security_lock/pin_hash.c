@@ -19,7 +19,7 @@ status_t security_lock_pin_hash(const char *digits, uint8_t len,
   if (digits == NULL || salt == NULL || hash_out == NULL) {
     return E_INVALID_ARGUMENT;
   }
-  if (len < SECURITY_LOCK_PIN_MIN_LEN || len > SECURITY_LOCK_PIN_MAX_LEN) {
+  if (!security_lock_pin_len_is_valid(len)) {
     return E_INVALID_ARGUMENT;
   }
 

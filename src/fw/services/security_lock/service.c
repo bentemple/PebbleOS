@@ -541,11 +541,10 @@ static bool prv_make_salt(uint8_t salt[SECURITY_LOCK_SALT_LEN]) {
 #endif
 }
 
-//! Exactly 4 or 6 digits of 1-9. '0' is absent from the pad, so a PIN
+//! An offered length, all digits 1-9. '0' is absent from the pad, so a PIN
 //! containing one could never be typed.
 static bool prv_pin_is_well_formed(const char *digits, uint8_t len) {
-  if (digits == NULL ||
-      (len != SECURITY_LOCK_PIN_MIN_LEN && len != SECURITY_LOCK_PIN_MAX_LEN)) {
+  if (digits == NULL || !security_lock_pin_len_is_valid(len)) {
     return false;
   }
   for (uint8_t i = 0; i < len; ++i) {

@@ -34,9 +34,7 @@
 //! engage() refuses on both, so an app that ignored them would do nothing at
 //! all and say nothing about it.
 static bool prv_lock_is_available(void) {
-  const uint8_t pin_len = security_lock_get_pin_len();
-  return security_lock_is_enabled() && (pin_len >= SECURITY_LOCK_PIN_MIN_LEN) &&
-         (pin_len <= SECURITY_LOCK_PIN_MAX_LEN);
+  return security_lock_is_enabled() && security_lock_pin_len_is_valid(security_lock_get_pin_len());
 }
 
 //! Whether the user has opted into erasing at all.

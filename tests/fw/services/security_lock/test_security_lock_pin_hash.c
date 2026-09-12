@@ -181,26 +181,29 @@ void test_security_lock_pin_hash__is_deterministic(void) {
 // Argument handling
 ////////////////////////////////////
 
-//! What this layer accepts is the closed range MIN..MAX, which is 4, 5 and 6.
-//! Exactly 4 or 6 -- the rule the pad and the lock screen are built to -- is
-//! enforced one layer up, by prv_pin_is_well_formed() in service.c, and this
-//! records that the two are not the same test. A 5-digit PIN never reaches
-//! here in the firmware; if that gate is ever removed, 5 will silently start
-//! working rather than being refused.
-void test_security_lock_pin_hash__accepts_the_documented_length_range(void) {
+//! Every length the picker offers, and only those. This layer asks
+//! security_lock_pin_len_is_valid() rather than testing a range of its own, so
+//! there is no width the hash accepts and the store refuses -- a gap where a
+//! length nothing could ever type would still get a plausible digest.
+void test_security_lock_pin_hash__accepts_every_offered_length(void) {
   uint8_t out[SECURITY_LOCK_HASH_LEN];
   cl_assert_equal_i(S_SUCCESS, security_lock_pin_hash("1234", 4, SALT_A, out));
-  cl_assert_equal_i(S_SUCCESS, security_lock_pin_hash("12345", 5, SALT_A, out));
   cl_assert_equal_i(S_SUCCESS, security_lock_pin_hash("123456", 6, SALT_A, out));
+  cl_assert_equal_i(S_SUCCESS, security_lock_pin_hash("12345678", 8, SALT_A, out));
+  cl_assert_equal_i(S_SUCCESS, security_lock_pin_hash("1234567891", 10, SALT_A, out));
 }
 
-//! Both boundaries, one either side. Too short is a weaker PIN than the record
-//! claims; too long would read past the digits the caller supplied and hash
-//! whatever followed them in memory.
-void test_security_lock_pin_hash__rejects_lengths_outside_the_range(void) {
+//! Both boundaries, one either side, and every odd width in between. Too short
+//! is a weaker PIN than the record claims; too long would read past the digits
+//! the caller supplied and hash whatever followed them in memory; an odd one is
+//! a length no pad ever collects.
+void test_security_lock_pin_hash__rejects_lengths_that_are_not_offered(void) {
   uint8_t out[SECURITY_LOCK_HASH_LEN];
   cl_assert_equal_i(E_INVALID_ARGUMENT, security_lock_pin_hash("123", 3, SALT_A, out));
+  cl_assert_equal_i(E_INVALID_ARGUMENT, security_lock_pin_hash("12345", 5, SALT_A, out));
   cl_assert_equal_i(E_INVALID_ARGUMENT, security_lock_pin_hash("1234567", 7, SALT_A, out));
+  cl_assert_equal_i(E_INVALID_ARGUMENT, security_lock_pin_hash("123456789", 9, SALT_A, out));
+  cl_assert_equal_i(E_INVALID_ARGUMENT, security_lock_pin_hash("12345678911", 11, SALT_A, out));
   cl_assert_equal_i(E_INVALID_ARGUMENT, security_lock_pin_hash("", 0, SALT_A, out));
   cl_assert_equal_i(E_INVALID_ARGUMENT, security_lock_pin_hash("1234567890", 255, SALT_A, out));
 }

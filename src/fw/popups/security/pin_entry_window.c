@@ -85,8 +85,9 @@ static int8_t prv_key_at(const GRect *bounds, GPoint point) {
 
 static void prv_draw_progress(const SecurityPinEntryWindow *pin_window, GContext *ctx,
                               GRect bar) {
-  // One segment per digit rather than a continuous fill: at four or six digits
-  // the segments are what tell the user how many are still wanted.
+  // One segment per digit rather than a continuous fill: the segments are what
+  // tell the user how many are still wanted, which matters more the longer the
+  // PIN is. Ten of them still read clearly on the narrowest screen.
   const int16_t seg_w = bar.size.w / pin_window->pin_len;
 
   graphics_context_set_stroke_color(ctx, GColorBlack);
