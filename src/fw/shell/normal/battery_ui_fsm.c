@@ -149,8 +149,11 @@ static void prv_dismiss_warning(void) {
 static void prv_enter_low_power(void *ignored) {
 #ifndef CONFIG_RECOVERY_FW
   watchface_start_low_power();
-  modal_manager_pop_all_below_priority(ModalPriorityAlarm);
-  modal_manager_set_min_priority(ModalPriorityAlarm);
+  // The lock screen's level rather than the alarm's: the alarm sits above it,
+  // so bounding at the alarm would take a locked watch's PIN pad off the
+  // screen. Both survive low power; everything below them does not.
+  modal_manager_pop_all_below_priority(ModalPrioritySecurityLock);
+  modal_manager_set_min_priority(ModalPrioritySecurityLock);
   // Override the vibe intensity to Medium in low-power mode
   vibes_set_default_vibe_strength(get_strength_for_intensity(VibeIntensityMedium));
 #else

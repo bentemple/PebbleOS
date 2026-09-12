@@ -57,6 +57,7 @@
 #include "pbl/services/wakeup.h"
 #include "pbl/services/runlevel.h"
 #if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+#include "popups/alarm_popup.h"
 #include "popups/security/lock_screen.h"
 #include "pbl/services/security_lock.h"
 #include "pbl/services/security_lock_endpoint.h"
@@ -112,6 +113,9 @@ static bool launcher_is_popup_event(PebbleEvent *e) {
 
 static int s_block_popup_count = 0;
 
+//! Held by the security lock alone. See launcher_block_popups_for_lock().
+static int s_lock_block_popup_count = 0;
+
 void launcher_block_popups(bool block) {
   if (block) {
     s_block_popup_count++;
@@ -121,8 +125,51 @@ void launcher_block_popups(bool block) {
   }
 }
 
+void launcher_block_popups_for_lock(bool block) {
+  if (block) {
+    s_lock_block_popup_count++;
+  } else {
+    PBL_ASSERTN(s_lock_block_popup_count > 0);
+    s_lock_block_popup_count--;
+  }
+}
+
 bool launcher_popups_are_blocked(void) {
-  return s_block_popup_count > 0;
+  return s_block_popup_count > 0 || s_lock_block_popup_count > 0;
+}
+
+//! Whether the security lock permits an alarm to go off right now.
+//!
+//! A watch that locked because the phone walked out of range is still the
+//! user's watch, and an alarm that does not go off is a missed flight. The
+//! alarm carries no content the lock is protecting: the pop-up shows the time
+//! it is now and nothing else, and the alarms themselves are not a shred
+//! target because the phone cannot restore them.
+//!
+//! Two things stop it. The user can say so, under Settings > Security; and it
+//! stops unconditionally once the content has actually been erased, because
+//! past that the watch holds nothing and talks to nobody, so there is nothing
+//! left to be useful for. The radio blackout is the persisted record of having
+//! got there.
+//!
+//! Asked of the lock itself rather than of the pop-up block, and asked per
+//! event rather than answered when that block is taken. Both matter:
+//!
+//! - The watch locks first and erases later, so the answer changes mid-lock.
+//! - The block is taken by security_lock_ui_lockout(), which a watch that
+//!   rebooted straight into the locked state has not run -- nothing does until
+//!   the first button press raises the lock screen. Keyed on the block, an
+//!   erased watch would ring through that whole window, and so would one whose
+//!   owner had turned alarms off.
+static bool prv_lock_permits_alarm(void) {
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+  if (!security_lock_is_locked()) {
+    return true;
+  }
+  return security_lock_get_alarms_when_locked() && !security_lock_is_radio_blackout();
+#else
+  return true;
+#endif
 }
 
 // FIRM-425: sometimes, if the system goes out to lunch for a long time when
@@ -167,7 +214,8 @@ static void back_button_force_quit_handler(void *data) {
 //! the freshly pushed window is not handed a button-up it never saw go down.
 static ButtonId s_lock_raise_button = NUM_BUTTONS;
 
-//! While locked, every button means "let me in" and nothing else.
+//! While locked, every button means "let me in" -- or, if an alarm is ringing,
+//! "stop that" -- and nothing else.
 //!
 //! Runs ahead of the rest of launcher_handle_button_event() on purpose. Both
 //! the BACK-held force quit and the 10x-BACK coredump are ways around the lock
@@ -187,6 +235,20 @@ static bool prv_handle_locked_button_event(PebbleEvent *e) {
     light_button_pressed();
   } else {
     light_button_released();
+  }
+
+  // A ringing alarm is the one thing that outranks the lock screen, so it is
+  // the one thing that takes buttons ahead of it -- with the pad up or without
+  // it. An alarm nobody can snooze is worse than one that never rang, and
+  // raising the pad over the clock would pop the alarm and leave no way to.
+  //
+  // Nothing else can be what these buttons reach: the lockout bounds every
+  // stack at the lock screen's level, and the alarm's is the only one above it.
+  // Answering it gets nobody further in either, because what it uncovers is the
+  // pad or the clock.
+  if (alarm_popup_owns_top_window()) {
+    modal_manager_handle_button_event(e);
+    return true;
   }
 
   if (!security_lock_screen_is_visible()) {
@@ -591,10 +653,18 @@ static void PBL_NOINLINE prv_handle_event(PebbleEvent *e) {
   // FIXME: This logic is pretty wacky, but I'm going to leave it as is to refactor later out of
   // fear of breaking something. This should mimic the exact same behaviour as before but
   // flattened.
-  if (s_block_popup_count > 0) {
-    // A service has requested that the launcher block any events that may cause
-    // pop-ups
-    if (launcher_is_popup_event(e)) {
+  // A service has requested that the launcher block any events that may cause
+  // pop-ups
+  if (launcher_is_popup_event(e)) {
+    if (e->type == PEBBLE_ALARM_CLOCK_EVENT) {
+      // An alarm answers to the lock rather than to the lock's block, so that a
+      // locked watch which has not taken the block yet still gets it right. The
+      // shared block has no such exemption: a firmware update or a factory
+      // reset must swallow an alarm like anything else.
+      if (s_block_popup_count > 0 || !prv_lock_permits_alarm()) {
+        return;
+      }
+    } else if (s_block_popup_count > 0 || s_lock_block_popup_count > 0) {
       return;
     }
   }

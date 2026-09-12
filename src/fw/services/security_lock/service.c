@@ -35,7 +35,7 @@ PBL_LOG_MODULE_DEFINE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LE
 //! discarding the config record throws the PIN away. Sharing one number meant a
 //! runtime-only field could disarm the lock on upgrade; these cannot.
 #define CFG_RECORD_VERSION 4
-#define RT_RECORD_VERSION 6
+#define RT_RECORD_VERSION 7
 
 //! Config: written rarely (only when the PIN changes).
 static const char *CFG_KEY = "cfg";
@@ -86,6 +86,11 @@ typedef struct PACKED {
   //! would be lost and unlocking would restore the wrong state.
   bool radio_blackout;
   bool airplane_was_on;
+  //! Whether an alarm may still ring while locked. Here rather than in shell
+  //! prefs, which the phone can write over BlobDB: what a locked watch is
+  //! allowed to do is not the phone's to decide, and the delays beside it are
+  //! kept out of the phone's reach for the same reason.
+  bool alarms_when_locked;
 } SecurityLockRuntime;
 
 #if defined(CONFIG_RNG_STUB)
@@ -136,6 +141,9 @@ static void prv_runtime_defaults(SecurityLockRuntime *rt) {
       // locks, and the triggers that erase outright still erase.
       .shred_delay_s = SECURITY_LOCK_DEFAULT_SHRED_DELAY_S,
       .countdown_source = SecurityCountdownNone,
+      // The permissive answer, which is also what the fallback path wants: a
+      // discarded record must not leave someone's alarms silently switched off.
+      .alarms_when_locked = true,
   };
 }
 
@@ -951,6 +959,27 @@ status_t security_lock_clear_dirty_since_shred(void) {
     // Flash still says dirty. Match it rather than leave RAM claiming clean,
     // which would talk the next shred out of running.
     s_runtime_cache.dirty_since_shred = true;
+  }
+  pbl_mutex_unlock(&s_mutex);
+  return rv;
+}
+
+bool security_lock_get_alarms_when_locked(void) {
+  if (!s_initialized) {
+    return true;
+  }
+  return s_runtime_cache.alarms_when_locked;
+}
+
+status_t security_lock_set_alarms_when_locked(bool allowed) {
+  if (!s_initialized) {
+    return E_INVALID_OPERATION;
+  }
+  pbl_mutex_lock(&s_mutex, PBL_FOREVER);
+  status_t rv = S_NO_ACTION_REQUIRED;
+  if (s_runtime_cache.alarms_when_locked != allowed) {
+    s_runtime_cache.alarms_when_locked = allowed;
+    rv = prv_flush_runtime();
   }
   pbl_mutex_unlock(&s_mutex);
   return rv;

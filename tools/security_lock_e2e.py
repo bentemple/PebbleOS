@@ -73,6 +73,8 @@ SECURITY_ROWS_WITH_PIN = [
     "Lock After",
     "Erase After",
     "Duress PIN",
+    "Block Notifications",
+    "Alarms When Locked",
     "Lock",
     "Lockdown + Erase",
     "Show in Launcher",
@@ -343,6 +345,22 @@ class Console:
                     return {k: int(v) for k, v in fields.items()}
             time.sleep(2.0)
         raise RuntimeError("watch did not answer `security status`")
+
+    def ui(self):
+        """Parse `security ui` into a dict of strings.
+
+        Left as strings because half the fields are quoted text; the numeric
+        ones anybody asks about are flags, which read fine as "0" and "1".
+
+        Each value runs to the next `key=`, not to the next space: the modal
+        debug names have spaces in them and are not quoted, so splitting on
+        whitespace silently truncates "Alarm Popup" to "Alarm".
+        """
+        for line in self.command("security ui"):
+            if "top_modal=" in line:
+                return {k: v.strip().strip('"') for k, v in
+                        re.findall(r'(\w+)=(.*?)(?=\s+\w+=|$)', line.strip())}
+        raise RuntimeError("watch did not answer `security ui`")
 
     def mark(self):
         """Remember where the log is now, so a test can look only at what follows."""
@@ -1041,6 +1059,111 @@ def test_turning_it_off_clears_the_pin(console, pad):
     check("turning it off disables the lock", st["state"] == 0, f"state={st['state']}")
 
 
+def test_alarm_rings_while_locked(console, pad):
+    """A locked watch still wakes the user; a shredded one does not.
+
+    Locking because the phone walked out of range does not stop the watch
+    being a watch. Once the content has actually been erased it does: nothing
+    is left to be useful for, and the radio is down.
+    """
+    if console.status()["pin_len"] == 0:
+        set_or_change_pin(console, pad, "1234")
+
+    # Lock, which is what a disconnect produces too: locked, with whatever
+    # Erase After says still running. Asserted on the log rather than on the
+    # dirty flag, which stays clear after an earlier test's wipe until the phone
+    # writes something and so cannot tell a re-run anything.
+    marker = console.mark()
+    console.command("security lock")
+    time.sleep(3.0)
+    st = console.status()
+    if not check("Lock locks without erasing",
+                 st["state"] == 2 and not console.saw(marker, "Shredding:"),
+                 f"state={st['state']}"):
+        return
+
+    console.command("alarm")
+    time.sleep(2.5)
+    ui = console.ui()
+    screenshot("12-alarm-while-locked")
+    check("the alarm rings while locked", ui["top_modal"] == "Alarm Popup",
+          f"top_modal={ui['top_modal']}")
+
+    # UP is snooze. It has to reach the popup rather than raise the lock
+    # screen, or a locked watch is one the user cannot silence.
+    press("up")
+    time.sleep(2.5)
+    ui = console.ui()
+    check("snooze reaches the alarm, not the lock screen", ui["visible"] == "0",
+          f"visible={ui['visible']} top_modal={ui['top_modal']}")
+
+    # And the next press still raises the lock screen, as it always did.
+    press("select")
+    time.sleep(1.5)
+    check("a press after that still raises the lock screen",
+          console.ui()["visible"] == "1")
+
+    # The alarm outranks the PIN pad, and is the only thing that does. With the
+    # pad up it still comes to the front, because an alarm that cannot be
+    # snoozed is worse than one that never rang.
+    console.command("alarm")
+    time.sleep(2.5)
+    check("a ringing alarm comes up over the PIN pad",
+          console.ui()["top_modal"] == "Alarm Popup",
+          f"top_modal={console.ui()['top_modal']}")
+
+    # And answering it gets nobody further in: what it uncovers is the pad it
+    # was covering, still locked.
+    press("down")
+    time.sleep(3.0)
+    ui = console.ui()
+    check("dismissing it uncovers the pad, still locked",
+          ui["visible"] == "1" and console.status()["state"] == 2,
+          f"visible={ui['visible']} top_modal={ui['top_modal']}")
+
+    console.command("alarm")
+    time.sleep(2.5)
+
+    marker = console.mark()
+    console.command("security shred")
+    if not check("the wipe finishes", wait_until_responsive(console)):
+        return
+    check("the radio goes down", console.saw(marker, "taking the radio down"),
+          " | ".join(console.since(marker))[:160])
+    check("the wipe silences the alarm with everything else",
+          console.ui()["top_modal"] != "Alarm Popup",
+          f"top_modal={console.ui()['top_modal']}")
+
+    console.command("alarm")
+    time.sleep(2.5)
+    ui = console.ui()
+    check("a shredded watch stays silent", ui["top_modal"] != "Alarm Popup",
+          f"top_modal={ui['top_modal']}")
+
+    type_pin(console, pad, "1234")
+    time.sleep(2.0)
+    if not check("it unlocks afterwards", console.status()["state"] == 1):
+        return
+
+    # And the switch that turns the whole exemption off.
+    console.command("security alarms 0")
+    check("the setting is recorded", console.status()["alarms"] == 0)
+    console.command("security lock")
+    time.sleep(3.0)
+    console.command("alarm")
+    time.sleep(2.5)
+    ui = console.ui()
+    check("Alarms When Locked off keeps a locked watch silent",
+          ui["top_modal"] != "Alarm Popup", f"top_modal={ui['top_modal']}")
+
+    press("select")
+    time.sleep(1.5)
+    type_pin(console, pad, "1234")
+    time.sleep(2.0)
+    console.command("security alarms 1")
+    check("it unlocks and the setting goes back", console.status()["state"] == 1)
+
+
 TESTS = [
     ("starts_clean", test_starts_clean),
     ("status_over_the_wire", test_status_over_the_wire),
@@ -1051,6 +1174,7 @@ TESTS = [
     ("lock_and_unlock", test_lock_and_unlock),
     ("phone_lock_erase", test_phone_lock_erase),
     ("wrong_pin_counts_up", test_wrong_pin_counts_up),
+    ("alarm_rings_while_locked", test_alarm_rings_while_locked),
     ("turning_it_off_clears_the_pin", test_turning_it_off_clears_the_pin),
 ]
 

@@ -219,6 +219,14 @@ void command_security_unlock(const char *digits) {
   prv_sectest_report(buf);
 }
 
+void command_security_alarms(const char *on_str) {
+  char buf[96];
+  const bool allowed = (on_str[0] != '0');
+  const status_t rv = security_lock_set_alarms_when_locked(allowed);
+  snprintf(buf, sizeof(buf), "SECTEST alarms on=%d rv=%" PRId32, (int)allowed, (int32_t)rv);
+  prv_sectest_report(buf);
+}
+
 void command_security_delays(const char *lock_s, const char *shred_s) {
   char buf[96];
   const uint32_t lock_delay = (uint32_t)atoi(lock_s);

@@ -105,7 +105,7 @@ lock). **The PIN never goes over the air**, in either direction.
 
 ## Settings > Security
 
-With no PIN set the menu is one row. Once a PIN exists it is eight:
+With no PIN set the menu is one row. Once a PIN exists it is ten:
 
 | Row | What it does |
 |---|---|
@@ -114,6 +114,8 @@ With no PIN set the menu is one row. Once a PIN exists it is eight:
 | Lock After | Grace period from an unexpected disconnect to the lock. |
 | Erase After | Countdown from a lockdown to the erase. **Ships as `Never`.** |
 | Duress PIN | A second PIN that unlocks and wipes. |
+| Block Notifications | Whether a notification arriving while locked is discarded or kept. **Ships on.** |
+| Alarms When Locked | Whether an alarm still goes off while locked. **Ships on.** |
 | Lock | Lock now; erase at `Erase After`, which the PIN cancels. |
 | Lockdown + Erase | Lock now and erase now. No countdown. |
 | Show in Launcher | Whether the Lock app is listed. |
@@ -260,6 +262,68 @@ resets the counter.
 
 There is deliberately no `UNLOCK` command and no countdown display: the screen
 says `Locked` and nothing else.
+
+### Alarms still ring
+
+The lockout's pop-up block is `launcher_block_popups_for_lock()`, a reference
+count of its own rather than the shared `launcher_block_popups()`, and it lets
+`PEBBLE_ALARM_CLOCK_EVENT` through. A watch that locked because the phone
+walked out of range is still the user's watch, and an alarm that does not go
+off is a missed flight. The exemption is not the general blocker's to grant — a
+firmware update or a factory reset must still swallow an alarm — which is why
+the count is separate.
+
+Binding the modal stack at `ModalPriorityAlarm` is necessary but not
+sufficient, and for a while only the first half was done: the event is dropped
+in `prv_handle_event()` before a pop-up is ever built, so the priority bound
+had nothing to let through.
+
+Nothing leaks. The pop-up shows the current time and nothing else, and alarms
+are not a shred target because the phone cannot restore them.
+
+The alarm gets its own buttons, ahead of the raise-the-lock-screen rule, so
+snooze and dismiss work without the PIN — otherwise a locked watch is one the
+user cannot silence, and raising the lock screen would pop the pop-up and
+silence the alarm by destroying it. The check compares the actual top window
+rather than trusting the alarm's own "am I up" flag: this hands button events
+to a modal on a locked watch, so *something is showing* is not good enough.
+
+That does open one hole, and it is a deliberate trade: whoever holds a locked
+watch can silence tomorrow's alarm. Nothing is read and nothing unlocks.
+
+It stops once the content has actually been erased — past that the watch holds
+nothing and talks to nobody — and `Settings > Security > Alarms When Locked`,
+which ships on, turns the exemption off outright.
+
+Both are asked of the lock itself, per event, rather than of the pop-up block.
+The watch locks first and erases later, so the answer changes mid-lock; and the
+block is taken by `security_lock_ui_lockout()`, which a watch that rebooted
+straight into the locked state has not run — nothing does until the first
+button press raises the lock screen. Keyed on the block, an erased watch would
+ring through that whole window, and so would one whose owner had turned alarms
+off.
+
+A ringing alarm outranks the PIN pad, and is **the only thing that does**.
+`ModalPriorityAlarm` sits one level above `ModalPrioritySecurityLock`, which is
+itself above every other modal — so the pad covers everything except an alarm,
+and an alarm covers the pad.
+
+That way round because an alarm nobody can snooze or dismiss is worse than one
+that never rang, and because it costs nothing: what answering it uncovers is
+the pad it was covering, or the clock, both still locked. The app task never
+sees the buttons either (`task_mask`), and the lockout bounds every stack at
+the pad's level, so the alarm's is the only one that can be above it.
+
+`security_lock_ui_lockout()` therefore bounds at `ModalPrioritySecurityLock`
+rather than at the alarm's level: the bound has to admit the pad, and admitting
+the pad admits the one level above it. The same applies to low power, which
+clamps the same bound — a locked watch entering low power keeps its pad and its
+alarms, and leaving low power cannot lower the clamp, because the lock holds it
+as a *floor* and the effective bound is the higher of the two.
+
+One consequence: the wipe cannot reach a ringing alarm by priority, since it
+spares the pad and the alarm is above the pad. `security_lock_ui_quiesce()`
+closes it by name instead.
 
 ### Two display shapes
 

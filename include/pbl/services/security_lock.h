@@ -301,6 +301,26 @@ uint32_t security_lock_get_shred_delay_s(void);
 //!         SECURITY_LOCK_SHRED_DELAY_NEVER is exempt: it schedules no erase.
 status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s);
 
+//! Whether an alarm may still ring while the watch is locked. Persisted, on out
+//! of the box, configurable under Settings > Security.
+//!
+//! On: the alarm rings, and goes on ringing for as long as the watch has
+//! anything left to protect. A watch that locked because the phone walked out
+//! of range is still the user's watch, and an alarm that does not go off is a
+//! missed flight. What it shows is the current time and nothing else, and the
+//! alarms themselves are not a shred target -- the phone cannot restore them --
+//! so nothing the lock is protecting reaches the screen either way.
+//!
+//! Off: silent from the moment the watch locks, for the user who would rather
+//! a locked watch drew no attention at all.
+//!
+//! Either way an erased watch stays silent: past that it holds nothing and
+//! talks to nobody, so there is nothing left to be useful for. That half is not
+//! configurable, which is why this is a plain switch rather than a choice of
+//! three.
+bool security_lock_get_alarms_when_locked(void);
+status_t security_lock_set_alarms_when_locked(bool allowed);
+
 //! Why the armed countdown is armed.
 //!
 //! Persisted beside the deadlines, because what may retire a countdown depends

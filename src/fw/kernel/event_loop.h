@@ -20,6 +20,16 @@ bool launcher_task_is_current_task(void);
 //! to block pop-ups; used by getting started and firmware update
 void launcher_block_popups(bool ignore);
 
+//! The security lock's own pop-up block, which still lets an alarm ring.
+//!
+//! A separate reference count rather than a flag on launcher_block_popups(),
+//! because the exemption is not a blocker's to grant: a firmware update or a
+//! factory reset must still swallow an alarm, and only this holder wants one
+//! raised. Whether the alarm gets through is decided per event, not when the
+//! block is taken -- a watch locks first and erases later, and once it has
+//! erased it goes quiet.
+void launcher_block_popups_for_lock(bool block);
+
 //! Returns true if popups are currently being blocked
 bool launcher_popups_are_blocked(void);
 

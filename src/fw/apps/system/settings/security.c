@@ -816,6 +816,7 @@ enum SettingsSecurityItem {
   SettingsSecurityShredDelay,
   SettingsSecurityDuressPin,
   SettingsSecurityBlockNotifications,
+  SettingsSecurityAlarmsWhenLocked,
   //! The recoverable one first: it is the row to land on by accident.
   SettingsSecurityLock,
   SettingsSecurityLockdownErase,
@@ -905,6 +906,19 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       // No subtitle, deliberately: any state shown here is the state that has
       // to stay hidden, and "Off" versus "On" is the whole secret.
       break;
+    case SettingsSecurityAlarmsWhenLocked:
+      /// Whether an alarm still goes off while the watch is locked. An erased
+      /// watch stays silent either way, so this is only about the state in
+      /// between.
+      title = i18n_noop("Alarms When Locked");
+      if (security_lock_get_alarms_when_locked()) {
+        /// Subtitle when alarms are allowed through the lock. Says where the
+        /// permission ends, because it does end: the erase silences them.
+        subtitle = i18n_get(i18n_noop("Ring until erased"), data);
+      } else {
+        subtitle = i18n_get(i18n_noop("Silent while locked"), data);
+      }
+      break;
     case SettingsSecurityLock:
       /// Lock now, erase at the configured Erase After unless the PIN is
       /// entered first -- which is what a disconnect lock leaves running too.
@@ -987,6 +1001,10 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
       // Always straight to setting a new one. Asking "set or clear?" would
       // answer the question the menu exists to refuse to answer.
       prv_push_pin_prompt(data, PinStageAuthorizeSet, PinTargetDuress);
+      break;
+    case SettingsSecurityAlarmsWhenLocked:
+      security_lock_set_alarms_when_locked(!security_lock_get_alarms_when_locked());
+      prv_refresh(data);
       break;
     case SettingsSecurityLock:
       prv_lock_push(data);

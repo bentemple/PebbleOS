@@ -326,6 +326,25 @@ static void prv_cleanup_alarm_popup(void *callback_context) {
 
 // ----------------------------------------------------------------------------------------------
 //! API
+bool alarm_popup_owns_top_window(void) {
+  if (s_alarm_popup_data == NULL) {
+    return false;
+  }
+  Dialog *dialog = actionable_dialog_get_dialog(s_alarm_popup_data->alarm_popup);
+  return modal_manager_get_top_window() == &dialog->window;
+}
+
+void alarm_popup_close(void) {
+  if (s_alarm_popup_data == NULL) {
+    return;
+  }
+  // Through the dialog rather than by freeing: popping runs the unload
+  // callback, which is what stops the vibe and the sound and clears the
+  // pointer. Nothing is snoozed or dismissed, because the alarm is not being
+  // answered -- the watch it would have woken someone to is gone.
+  actionable_dialog_pop(s_alarm_popup_data->alarm_popup);
+}
+
 void alarm_popup_push_window(PebbleAlarmClockEvent *event) {
   if (s_alarm_popup_data) {
     // The window is already visible, don't show another one

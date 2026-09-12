@@ -10,6 +10,7 @@
 #include <pbl/logging/logging.h>
 #include "kernel/event_loop.h"
 #include "kernel/ui/modals/modal_manager.h"
+#include "popups/alarm_popup.h"
 #include "popups/security/lock_screen.h"
 #include "process_management/app_manager.h"
 #include "pbl/services/compositor/compositor.h"
@@ -21,9 +22,9 @@
 
 PBL_LOG_MODULE_DECLARE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LEVEL);
 
-//! Tracks the launcher_block_popups() reference we hold. That count asserts on
-//! underflow and engage() is documented as safe to call twice, so the lockout
-//! has to be idempotent in both directions.
+//! Tracks the launcher_block_popups_for_lock() reference we hold. That count
+//! asserts on underflow and engage() is documented as safe to call twice, so
+//! the lockout has to be idempotent in both directions.
 static bool s_ui_lockout_held;
 
 void security_lock_ui_lockout(void) {
@@ -32,13 +33,15 @@ void security_lock_ui_lockout(void) {
   }
   s_ui_lockout_held = true;
 
-  // Read by the phone UI and nothing else; what keeps notification, alarm and
-  // battery popups off a locked watch is the priority bound below.
-  launcher_block_popups(true);
+  // Keep notification and battery popups off the clock. Alarms are the one
+  // exemption, and only until the content is actually erased -- see
+  // launcher_block_popups_for_lock(). This is also what the phone UI reads.
+  launcher_block_popups_for_lock(true);
 
-  // Bound at the alarm level, not the lock screen's own: an alarm still has to
-  // go off on a locked watch. The lock screen sits a level above it, so it
-  // stays on top and keeps the buttons; everything below the alarm is shut out.
+  // Bound at the lock screen's own level, which lets exactly two things
+  // through: the lock screen, and the alarm one level above it. Everything
+  // below is shut out.
+  //
   // Deliberately not ModalPriorityMax, which the panic and critical-battery
   // paths use: that reports modals as disabled outright, which would stop the
   // lock screen itself from being pushed, rendered or given button events.
@@ -46,7 +49,7 @@ void security_lock_ui_lockout(void) {
   // The floor rather than the plain setter: the battery FSM drops the same
   // bound to ModalPriorityMin on leaving low power, and nothing here would
   // re-assert it.
-  modal_manager_set_min_priority_floor(ModalPriorityAlarm);
+  modal_manager_set_min_priority_floor(SECURITY_LOCK_MODAL_PRIORITY);
 }
 
 void security_lock_ui_quiesce(void) {
@@ -69,6 +72,11 @@ void security_lock_ui_quiesce(void) {
   // rather than a special case.
   if (security_lock_screen_is_visible()) {
     modal_manager_pop_all_below_priority(SECURITY_LOCK_MODAL_PRIORITY);
+    // The bound above spares the lock screen, and the alarm sits above the lock
+    // screen -- so a ringing alarm would carry on buzzing straight through the
+    // wipe and after it. Named rather than popped by priority, because there is
+    // no range that takes the alarm and leaves the pad.
+    alarm_popup_close();
   } else {
     modal_manager_pop_all();
   }
@@ -97,7 +105,7 @@ static void prv_release_ui_lockout(void) {
     return;
   }
   s_ui_lockout_held = false;
-  launcher_block_popups(false);
+  launcher_block_popups_for_lock(false);
   modal_manager_set_min_priority_floor(ModalPriorityMin);
 }
 

@@ -1107,6 +1107,46 @@ void test_security_lock__duress_pin_can_be_six_digits(void) {
   cl_assert_equal_i(1, s_duress_shreds);
 }
 
+// Alarms while locked
+////////////////////////////////////
+
+//! On out of the box. A watch that locked because the phone walked out of range
+//! is still the user's watch, and an alarm that does not go off is a missed
+//! flight -- so the switch that turns that off is theirs to find, not the
+//! default they get without asking.
+void test_security_lock__alarms_are_allowed_while_locked_by_default(void) {
+  cl_assert(security_lock_get_alarms_when_locked());
+}
+
+void test_security_lock__alarms_while_locked_survives_a_reboot(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_alarms_when_locked(false));
+  cl_assert(!security_lock_get_alarms_when_locked());
+
+  prv_simulate_reboot();
+  cl_assert(!security_lock_get_alarms_when_locked());
+}
+
+//! Nothing to write when the answer is already the one stored. The record is
+//! rewritten whole on every flush, so a setter that flushed regardless would
+//! cost a flash write per redraw of the Settings row.
+void test_security_lock__setting_alarms_to_what_they_already_are_writes_nothing(void) {
+  cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_set_alarms_when_locked(true));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_alarms_when_locked(false));
+  cl_assert_equal_i(S_NO_ACTION_REQUIRED, security_lock_set_alarms_when_locked(false));
+}
+
+//! A discarded record must not leave someone's alarms silently switched off:
+//! the fallback is the permissive answer, same as the shipped one.
+void test_security_lock__an_unreadable_record_leaves_alarms_allowed(void) {
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
+  cl_assert_equal_i(S_SUCCESS, security_lock_set_alarms_when_locked(false));
+
+  prv_corrupt_runtime_version();
+  prv_simulate_reboot();
+
+  cl_assert(security_lock_get_alarms_when_locked());
+}
+
 // Radio blackout
 ////////////////////////////////////
 
