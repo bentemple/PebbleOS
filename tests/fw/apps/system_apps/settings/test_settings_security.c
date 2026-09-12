@@ -267,6 +267,17 @@ status_t security_lock_set_delays(uint32_t lock_delay_s, uint32_t shred_delay_s)
   return S_SUCCESS;
 }
 
+static bool s_alarms_when_locked = true;
+
+bool security_lock_get_alarms_when_locked(void) {
+  return s_alarms_when_locked;
+}
+
+status_t security_lock_set_alarms_when_locked(bool allowed) {
+  s_alarms_when_locked = allowed;
+  return S_SUCCESS;
+}
+
 // Fake launcher visibility pref
 ////////////////////////////////////
 // Deliberately a shell pref rather than part of the lock record: what the
@@ -524,10 +535,11 @@ void i18n_free_all(const void *owner) {
 #define ROW_ERASE_AFTER 3
 #define ROW_DURESS_PIN 4
 #define ROW_BLOCK_NOTIFICATIONS 5
-#define ROW_LOCK 6
-#define ROW_LOCKDOWN_ERASE 7
-#define ROW_SHOW_IN_LAUNCHER 8
-#define ROWS_WHEN_ON 9
+#define ROW_ALARMS_WHEN_LOCKED 6
+#define ROW_LOCK 7
+#define ROW_LOCKDOWN_ERASE 8
+#define ROW_SHOW_IN_LAUNCHER 9
+#define ROWS_WHEN_ON 10
 
 static void prv_open_settings(void) {
   settings_security_get_info()->init();
@@ -629,6 +641,8 @@ void test_settings_security__initialize(void) {
   // The shipped default: the panic action is in the launcher unless asked
   // otherwise.
   s_lock_in_launcher = true;
+  // The shipped default too: a locked watch still wakes its owner.
+  s_alarms_when_locked = true;
 }
 
 void test_settings_security__cleanup(void) {
@@ -1780,6 +1794,37 @@ void test_settings_security__there_is_no_lock_now_row(void) {
 
 // Show in Launcher
 ////////////////////////////////////
+
+// Alarms while locked
+////////////////////////////////////
+
+//! A locked watch still wakes its owner; an erased one does not, and that half
+//! is not this row's to change. The subtitle has to say where the permission
+//! ends, or "On" reads as a promise the erase breaks.
+void test_settings_security__alarms_when_locked_toggles(void) {
+  prv_open_settings();
+  prv_enable_with_pin("1234");
+
+  prv_draw(ROW_ALARMS_WHEN_LOCKED);
+  cl_assert_equal_s("Alarms When Locked", s_drawn_title);
+  cl_assert_equal_s("Ring until erased", s_drawn_subtitle);
+
+  prv_select(ROW_ALARMS_WHEN_LOCKED);
+  cl_assert(!s_alarms_when_locked);
+  prv_draw(ROW_ALARMS_WHEN_LOCKED);
+  cl_assert_equal_s("Silent while locked", s_drawn_subtitle);
+
+  prv_select(ROW_ALARMS_WHEN_LOCKED);
+  cl_assert(s_alarms_when_locked);
+}
+
+//! Nothing to configure about a lock that is off, so the row goes with the rest.
+void test_settings_security__alarms_row_hidden_while_off(void) {
+  prv_open_settings();
+  cl_assert_equal_i(ROWS_WHEN_OFF, prv_num_rows());
+  prv_enable_with_pin("1234");
+  cl_assert_equal_i(ROWS_WHEN_ON, prv_num_rows());
+}
 
 // Gated on the switch like the rows above it. While it is off the Lockdown app
 // is hidden from the launcher and from Quick Launch, so a row offering to show

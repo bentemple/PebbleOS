@@ -361,15 +361,30 @@ void test_lock_screen__push_raises_the_pad(void) {
   cl_assert_equal_i(4, security_pin_entry_window_get_pin_len(prv_pad()));
 }
 
-// A stack of its own, above every other modal. Sharing ModalPriorityAlarm meant
-// sharing the alarm's WindowStack, so an alarm firing on a locked watch covered
-// the pad and took its buttons. Below ModalPriorityMax, which is the "no modals
-// at all" sentinel and would stop the pad being pushed at all.
-void test_lock_screen__the_pad_outranks_every_other_modal(void) {
+// A stack of its own, above every other modal but the alarm. Sharing one with
+// the alarm meant sharing a WindowStack, where push order alone decided which
+// of the two the user could reach.
+//
+// The alarm is deliberately the exception and the only one: an alarm nobody can
+// snooze is worse than one that never rang, and answering it uncovers the pad
+// or the clock rather than anything further in. Below ModalPriorityMax, which
+// is the "no modals at all" sentinel and would stop the pad being pushed at
+// all.
+void test_lock_screen__the_pad_outranks_every_modal_but_the_alarm(void) {
   prv_push();
 
-  cl_assert(s_pushed_priority > ModalPriorityAlarm);
+  cl_assert(s_pushed_priority > ModalPriorityCritical);
+  cl_assert(s_pushed_priority < ModalPriorityAlarm);
   cl_assert(s_pushed_priority < ModalPriorityMax);
+}
+
+//! And the alarm is the *only* thing above it, so "the alarm outranks the pad"
+//! cannot quietly become "several things do".
+void test_lock_screen__only_the_alarm_sits_above_the_pad(void) {
+  prv_push();
+
+  cl_assert_equal_i(ModalPriorityAlarm, s_pushed_priority + 1);
+  cl_assert_equal_i(ModalPriorityMax, ModalPriorityAlarm + 1);
 }
 
 // Anything already on screen is by definition not the lock screen, and the

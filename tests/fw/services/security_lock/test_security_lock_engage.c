@@ -94,7 +94,7 @@ void security_lock_screen_pop(void) {
   s_lock_screen_pops++;
 }
 
-void launcher_block_popups(bool block) {
+void launcher_block_popups_for_lock(bool block) {
   s_lockouts += block ? 1 : -1;
 }
 
@@ -186,6 +186,21 @@ void test_security_lock_engage__lock_only_arms_no_countdown(void) {
   security_lock_engage_lock_only(SecurityShredReasonDisconnectTimeout);
 
   cl_assert_equal_i(0, s_countdowns_armed);
+}
+
+//! The wipe takes a ringing alarm down with everything else, including when
+//! the lock screen is up and the bound spares it.
+//!
+//! The lock screen has a priority of its own, one above the alarm's, so
+//! "everything below the lock screen" is everything -- the alarm included.
+//! That is what stops an erased watch, which holds nothing and talks to
+//! nobody, from carrying on buzzing about it.
+void test_security_lock_engage__quiescing_reaches_the_alarm_under_the_lock_screen(void) {
+  s_lock_screen_visible = true;
+
+  security_lock_engage_lock_only(SecurityShredReasonDisconnectTimeout);
+
+  cl_assert_equal_i(1, s_quiesces);
 }
 
 // The countdown path

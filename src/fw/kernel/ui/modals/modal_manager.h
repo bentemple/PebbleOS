@@ -51,12 +51,18 @@ typedef enum ModalPriority {
   //! on things that may affect the user's watch experience.  However, these should never
   //! prevent an alarm from displaying.
   ModalPriorityCritical,
-  //! Priority used for displaying wake up events such as alarms.
-  ModalPriorityAlarm,
-  //! Priority for the security lock screen. Its own level, above everything
-  //! else: sharing one with the alarm meant sharing its WindowStack, so an
-  //! alarm could cover the PIN pad and take its buttons.
+  //! Priority for the security lock screen. A level of its own rather than one
+  //! shared with the alarm: sharing meant sharing a WindowStack, where push
+  //! order alone decided which of the two the user could reach.
   ModalPrioritySecurityLock,
+  //! Priority used for displaying wake up events such as alarms.
+  //!
+  //! Above the lock screen, and the only thing that is. An alarm nobody can
+  //! snooze or dismiss is worse than one that never rang, so it has to be
+  //! reachable on a locked watch. Answering it gets nobody further in: the
+  //! only things underneath are the lock screen and the clock, and the app
+  //! task never sees the buttons either way.
+  ModalPriorityAlarm,
   //! Max priority, all modals are below this priority
   ModalPriorityMax,
   NumModalPriorities = ModalPriorityMax,
