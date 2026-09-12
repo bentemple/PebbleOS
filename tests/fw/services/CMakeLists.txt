@@ -388,6 +388,8 @@ pbl_clar_test(test_app_menu_data_source
     tests/fakes/fake_spi_flash.c
     tests/fakes/fake_system_app_registry_apps.c
     tests/fixtures/resources/builtin_resources.auto.c
+  # For the comparator's bottom-pin rule, which is compiled out otherwise.
+  DEFINES CONFIG_SERVICE_SECURITY_LOCK=1
   OVERRIDES dummy_board fake_app_registry
 )
 

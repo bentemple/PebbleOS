@@ -13,3 +13,8 @@
 #define APP_ID_SPORTS            ((AppInstallId) - 53)
 #define APP_ID_QUIET_TIME_TOGGLE ((AppInstallId) - 92)
 #define APP_ID_WORKOUT           ((AppInstallId) - 95)
+// Ids only, with no APP_RECORDS entry to match: the app menu's comparator pins
+// these two to the bottom of every list and that rule needs testing, while
+// nothing here should start enumerating them as installed apps.
+#define APP_ID_LOCK            ((AppInstallId) - 101)
+#define APP_ID_LOCKDOWN_ERASE  ((AppInstallId) - 102)

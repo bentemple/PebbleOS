@@ -1474,31 +1474,44 @@ void activity_shred(void) {
   // masked, so it must not wait on another task -- which rules out
   // activity_test_reset(), whose stop-tracking step blocks on a KernelBG
   // callback.
-  if (s_activity_initialized) {
+  // Both halves under the service's own mutex when there is one to take.
+  //
+  // The file has to be shredded inside it, not after: the service only ever has the settings
+  // file open while holding this mutex, and pfs_shred() does nothing at all to a file that is
+  // already open -- it fails with E_BUSY. Shredding outside would leave a minute handler free
+  // to open the file in the gap and the wipe reporting an error instead of destroying
+  // anything. Same lock order the service itself uses, this mutex and then the filesystem's,
+  // so it cannot deadlock.
+  //
+  // Taken only if the service came up. The file is on flash either way -- a watch that wiped
+  // before activity ever initialised still has last boot's history to destroy -- and nothing
+  // can have it open in that case.
+  const bool running = s_activity_initialized;
+  if (running) {
     pbl_mutex_lock(&s_activity_state.mutex, PBL_FOREVER);
-    {
-      s_activity_state.step_data = (ActivityStepData){};
-      s_activity_state.sleep_data = (ActivitySleepData){};
-      s_activity_state.distance_mm = 0;
-      s_activity_state.active_calories = 0;
-      s_activity_state.resting_calories = 0;
-      s_activity_state.activity_sessions_count = 0;
-      memset(s_activity_state.activity_sessions, 0, sizeof(s_activity_state.activity_sessions));
-      // Cleared rather than left set: both mean "there is something worth
-      // writing out", and there is not any more.
-      s_activity_state.need_activities_saved = false;
-      s_activity_state.sleep_sessions_modified = false;
-    }
-    pbl_mutex_unlock(&s_activity_state.mutex);
+
+    s_activity_state.step_data = (ActivityStepData){};
+    s_activity_state.sleep_data = (ActivitySleepData){};
+    s_activity_state.distance_mm = 0;
+    s_activity_state.active_calories = 0;
+    s_activity_state.resting_calories = 0;
+    s_activity_state.activity_sessions_count = 0;
+    memset(s_activity_state.activity_sessions, 0, sizeof(s_activity_state.activity_sessions));
+    // Cleared rather than left set: both mean "there is something worth writing out", and
+    // there is not any more.
+    s_activity_state.need_activities_saved = false;
+    s_activity_state.sleep_sessions_modified = false;
   }
 
-  // Outside the lock, and outside the init check: the file is on flash whether
-  // or not the service ever came up, and the service holds no handle on it
-  // between operations. pfs_shred() rather than pfs_remove() because a delete
-  // leaves the payload readable until the next compaction.
+  // pfs_shred() rather than pfs_remove(): a delete leaves the payload readable until the next
+  // compaction.
   const status_t rv = pfs_shred(ACTIVITY_SETTINGS_FILE_NAME);
   if (rv != S_SUCCESS) {
     PBL_LOG_ERR("Failed to shred %s: %" PRId32, ACTIVITY_SETTINGS_FILE_NAME, (int32_t)rv);
+  }
+
+  if (running) {
+    pbl_mutex_unlock(&s_activity_state.mutex);
   }
 }
 #endif

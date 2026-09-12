@@ -285,11 +285,27 @@ the queue is not a health store — any app can write to it.
 Both lockdown confirmations say so: *"Anything the watch has not sent it yet is
 lost."*
 
-Tearing the queue down from KernelMain is what made the data logging service's
-session lifetimes worth fixing: `dls_list_remove_all()` used to free sessions
-another task was inside. Sessions are now held — by `open_count` for a
-`dls_lock_session()` holder, by `ref_count` for a
-`dls_list_find_and_ref_*()` caller — and the free falls to the last holder out.
+`dls_shred()` deliberately does **not** tear the session list down, the way
+`dls_clear()` does. `dls_log()` reads `item_size` and `data->buffer_storage` off
+the session before it checks whether the session is real, and five system
+modules — activity, its algorithm, analytics, `protobuf_log`, the session
+logger — cache the pointer `dls_create()` handed them, as does every app.
+Freeing sessions in the wipe would turn each of those into a use-after-free.
+Instead the sessions live and lose their contents: `dls_list_reset_all_storage()`
+empties their bookkeeping, then the files are shredded.
+
+`pfs_shred()` refuses a file that is already open, so the shred waits a busy one
+out rather than logging past it — a file skipped here is the one thing the call
+exists to destroy. The same reasoning puts `activity_shred()`'s `pfs_shred()`
+*inside* the activity mutex, since that is the only thing the service holds its
+settings file open under.
+
+Reaching data logging from KernelMain is also what made its session lifetimes
+worth fixing: `dls_list_remove_all()` used to free sessions another task was
+inside, and `dls_list_find_by_session_id()` handed out pointers the list mutex
+no longer protected. Sessions are now held — `open_count` for a
+`dls_lock_session()` holder, `ref_count` for a `dls_list_find_and_ref_*()`
+caller — and the free falls to the last holder out.
 
 Not destroyed: installed apps and the app database, and Bluetooth bonding. The
 phone cannot restore those, and what they hold is the wearer's own installed

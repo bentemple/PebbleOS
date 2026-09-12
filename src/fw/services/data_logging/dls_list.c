@@ -427,6 +427,28 @@ DataLoggingSession *dls_list_get_next(DataLoggingSession *cur) {
   return logging_session;
 }
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+// ---------------------------------------------------------------------------------------
+void dls_list_reset_all_storage(void) {
+  // Bookkeeping only -- no pfs calls and no session mutex, so this is safe to run from the
+  // wipe's task and cannot deadlock against a storage operation in flight.
+  //
+  // The same clear dls_storage_delete_logging_storage() performs, which is what makes leaving
+  // the sessions alive correct: their files are about to be destroyed, and a session still
+  // claiming a byte count and a write offset into a file that no longer exists would append at
+  // an offset past the end of the fresh one.
+  pbl_mutex_lock(&s_list_mutex, PBL_FOREVER);
+  for (DataLoggingSession *session = s_logging_sessions; session != NULL;
+       session = session->next) {
+    session->storage = (DataLoggingSessionStorage) {
+      .fd = DLS_INVALID_FILE,
+    };
+  }
+  pbl_mutex_unlock(&s_list_mutex);
+}
+#endif
+
+
 void dls_list_lock(void) {
   pbl_mutex_lock(&s_list_mutex, PBL_FOREVER);
 }

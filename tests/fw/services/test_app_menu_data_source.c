@@ -596,6 +596,69 @@ void test_app_menu_data_source__settings_app_floats_to_top_if_absent_from_storag
 
 int prv_app_node_comparator(void *app_node_ref, void *new_node_ref);
 
+//! The two panic apps sort to the end of every list, Lock directly above
+//! Lockdown + Erase, ahead of every other rule.
+//!
+//! Ahead of every other rule is the part worth pinning down. The two differ only in launcher
+//! visibility, and that is exactly what the Quick Launch grouping sorts by -- so without the
+//! pin the picker puts the destructive one above the recoverable one whenever Lock is listed
+//! in the launcher, and swaps them when it is not. Both arrangements are set up below.
+void test_app_menu_data_source__the_panic_apps_sort_to_the_bottom(void) {
+  // Lock listed in the launcher, Lockdown + Erase Quick-Launch-only: the arrangement in which
+  // the Quick Launch grouping alone would put the destructive one first.
+  AppMenuNode listed_nodes[] = {{
+    .install_id = APP_ID_LOCKDOWN_ERASE,
+    .visibility = ProcessVisibilityQuickLaunch,
+  }, {
+    .install_id = APP_ID_LOCK,
+    .visibility = ProcessVisibilityShown,
+    .record_order = 9,
+  }, {
+    // An ordinary Quick-Launch-only app, which must still outrank both.
+    .install_id = APP_ID_QUIET_TIME_TOGGLE,
+    .visibility = ProcessVisibilityQuickLaunch,
+  }, {
+    .install_id = APP_ID_SETTINGS,
+    .storage_order = 1,
+  }};
+
+  // And with Show in Launcher off, which flips Lock into the Quick Launch group.
+  AppMenuNode unlisted_nodes[] = {{
+    .install_id = APP_ID_LOCKDOWN_ERASE,
+    .visibility = ProcessVisibilityQuickLaunch,
+  }, {
+    .install_id = APP_ID_LOCK,
+    .visibility = ProcessVisibilityQuickLaunch,
+  }, {
+    .install_id = APP_ID_QUIET_TIME_TOGGLE,
+    .visibility = ProcessVisibilityQuickLaunch,
+  }, {
+    .install_id = APP_ID_SETTINGS,
+    .storage_order = 1,
+  }};
+
+  // Same answer either way, which is the whole point of the pin.
+  const AppInstallId desired_order[] = {
+    APP_ID_QUIET_TIME_TOGGLE,
+    APP_ID_SETTINGS,
+    APP_ID_LOCK,
+    APP_ID_LOCKDOWN_ERASE,
+  };
+
+  AppMenuNode *arrangements[] = { listed_nodes, unlisted_nodes };
+  for (uint16_t a = 0; a < ARRAY_LENGTH(arrangements); a++) {
+    AppMenuNode *app_list = NULL;
+    for (uint16_t i = 0; i < ARRAY_LENGTH(desired_order); i++) {
+      app_list = (AppMenuNode *)list_sorted_add(&app_list->node, &arrangements[a][i].node,
+                                                prv_app_node_comparator, true /* ascending */);
+    }
+    for (uint16_t i = 0; i < ARRAY_LENGTH(desired_order); i++) {
+      AppMenuNode *node = (AppMenuNode *)list_get_at(&app_list->node, i);
+      cl_assert_equal_i(node->install_id, desired_order[i]);
+    }
+  }
+}
+
 void test_app_menu_data_source__app_node_comparator_equality_cases(void) {
   // Test handling of storage and record equality cases
   AppMenuNode app_menu_nodes[] = {

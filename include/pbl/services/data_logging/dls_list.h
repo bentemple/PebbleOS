@@ -101,6 +101,16 @@ DataLoggingStatus dls_get_session_status(DataLoggingSession *session);
 void dls_assert_own_list_mutex(void);
 
 //! Lock the list mutex (recursive lock).
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+//! Reset every session's storage bookkeeping to empty, without touching the sessions.
+//!
+//! For the security lock's erase, which destroys the files out from under them. Deliberately
+//! not a teardown: dls_log() reads item_size and data->buffer_storage off the session before it
+//! checks anything, and five system modules plus every app cache the pointer it was handed --
+//! so freeing sessions here would turn each of those into a use-after-free.
+void dls_list_reset_all_storage(void);
+#endif
+
 void dls_list_lock(void);
 
 //! Unlock the list mutex (recursive unlock)

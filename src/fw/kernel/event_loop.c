@@ -161,6 +161,25 @@ bool launcher_popups_are_blocked(void) {
 //!   the first button press raises the lock screen. Keyed on the block, an
 //!   erased watch would ring through that whole window, and so would one whose
 //!   owner had turned alarms off.
+//! Whether the security lock permits any other pop-up right now.
+//!
+//! Asked of the lock rather than of the lock's block, for exactly the reason the alarm above is:
+//! a watch that rebooted straight into the locked state has taken no block, because nothing
+//! runs security_lock_ui_lockout() until the first button press raises the pad. Keyed on the
+//! block alone, a notification arriving in that window is drawn over the watchface of a locked
+//! watch -- no PIN, no lock screen on top of it, the body on screen.
+//!
+//! This is about *showing* a notification, which a locked watch never does. Whether one is kept
+//! at all is Settings > Security > Block Notifications, applied in
+//! notifications_add_notification(): off stores it, unshown, for whoever unlocks.
+static bool prv_lock_permits_popup(void) {
+#if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
+  return !security_lock_is_locked();
+#else
+  return true;
+#endif
+}
+
 static bool prv_lock_permits_alarm(void) {
 #if defined(CONFIG_SERVICE_SECURITY_LOCK) && !defined(CONFIG_RECOVERY_FW)
   if (!security_lock_is_locked()) {
@@ -664,7 +683,8 @@ static void PBL_NOINLINE prv_handle_event(PebbleEvent *e) {
       if (s_block_popup_count > 0 || !prv_lock_permits_alarm()) {
         return;
       }
-    } else if (s_block_popup_count > 0 || s_lock_block_popup_count > 0) {
+    } else if (s_block_popup_count > 0 || s_lock_block_popup_count > 0 ||
+               !prv_lock_permits_popup()) {
       return;
     }
   }

@@ -228,6 +228,8 @@ pbl_clar_test(test_data_logging
     src/fw/applib/data_logging.c
     src/fw/util/rand/rand.c
     third_party/tinymt/TinyMT/tinymt/tinymt32.c
+  # For dls_shred(), the security lock's erase path, which is compiled out otherwise.
+  DEFINES CONFIG_SERVICE_SECURITY_LOCK=1
   OVERRIDES dummy_board
 )
 

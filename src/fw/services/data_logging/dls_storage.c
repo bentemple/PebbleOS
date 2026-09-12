@@ -532,6 +532,14 @@ void dls_storage_invalidate_all(void) {
 
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
 // -----------------------------------------------------------------------------------------
+//! Attempts per file before giving up, and the wait between them.
+//!
+//! A busy file has one holder at most: the session list is torn down before this runs, so
+//! nothing new can start a write, and dls_list_remove_all() only spares a session that was
+//! locked mid-write. That write is over in milliseconds.
+#define SHRED_BUSY_ATTEMPTS 10
+#define SHRED_BUSY_WAIT_MS 10
+
 void dls_storage_shred_all(void) {
   // pfs_shred() per file rather than pfs_remove_files(): a delete unlinks the file and leaves
   // its payload sitting in deleted pages, readable until a garbage collect happens to reach
@@ -541,7 +549,20 @@ void dls_storage_shred_all(void) {
   PFSFileListEntry *dir_list = pfs_create_file_list(prv_filename_filter_cb);
   PFSFileListEntry *head = dir_list;
   while (head) {
-    const status_t rv = pfs_shred(head->name);
+    status_t rv = E_BUSY;
+    for (int attempt = 0; (attempt < SHRED_BUSY_ATTEMPTS) && (rv == E_BUSY); attempt++) {
+      // Waiting out E_BUSY is the point of the loop, not politeness. pfs_shred() does nothing
+      // whatever to a file that is already open -- it fails before it writes a byte -- so
+      // taking the first answer would leave the one thing this call exists to destroy sitting
+      // readable on flash, with only a log line to say so.
+      //
+      // Never reached at early boot, where this runs before any session exists and so before
+      // anything can hold a file open.
+      if (attempt > 0) {
+        psleep(SHRED_BUSY_WAIT_MS);
+      }
+      rv = pfs_shred(head->name);
+    }
     if (rv != S_SUCCESS) {
       PBL_LOG_ERR("Error %d shredding %s", (int)rv, head->name);
     }

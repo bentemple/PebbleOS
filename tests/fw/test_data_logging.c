@@ -552,6 +552,47 @@ void test_data_logging__the_last_of_two_holds_frees_the_session(void) {
   dls_list_release_session(held);
 }
 
+// The security lock's erase
+// ----------------------------------------------------------------------------------------
+
+//! The wipe destroys the queue without destroying the sessions.
+//!
+//! dls_log() reads item_size and data->buffer_storage off the session before it checks whether
+//! the session is real, and five system modules plus every app cache the pointer dls_create()
+//! gave them. Tearing the list down here -- which is what dls_clear() does -- turns every one
+//! of those into a use-after-free the next time anything logs.
+void test_data_logging__the_wipe_keeps_sessions_usable(void) {
+  DataLoggingSessionRef logging_session = data_logging_create(7, DATA_LOGGING_UINT, 1, false);
+  cl_assert(logging_session);
+  prv_log_random_data(logging_session, 1, 100);
+
+  dls_shred();
+
+  // Still on the list, and still the session the caller is holding.
+  cl_assert(dls_list_get_next(NULL) == logging_session);
+  cl_assert_equal_i(DataLoggingStatusActive, dls_get_session_status(logging_session));
+
+  // And still usable, which is the property the cached pointers depend on.
+  const uint32_t value = 0x5a;
+  cl_assert_equal_i(DATA_LOGGING_SUCCESS, data_logging_log(logging_session, &value, 1));
+}
+
+//! The queued bytes are gone, and the bookkeeping says so.
+//!
+//! A session left claiming a byte count and a write offset into a file that no longer exists
+//! would append past the end of its replacement.
+void test_data_logging__the_wipe_empties_the_queue(void) {
+  DataLoggingSessionRef logging_session = data_logging_create(7, DATA_LOGGING_UINT, 1, false);
+  cl_assert(logging_session);
+  prv_log_random_data(logging_session, 1, 100);
+  cl_assert(((DataLoggingSession *)logging_session)->storage.num_bytes > 0);
+
+  dls_shred();
+
+  cl_assert_equal_i(0, ((DataLoggingSession *)logging_session)->storage.num_bytes);
+  cl_assert_equal_i(0, ((DataLoggingSession *)logging_session)->storage.write_offset);
+}
+
 //! Nothing held, nothing deferred: the ordinary path still frees on the spot rather than
 //! waiting for an unlock that is never coming.
 void test_data_logging__removing_all_frees_unlocked_sessions_immediately(void) {

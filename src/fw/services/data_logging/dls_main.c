@@ -284,18 +284,24 @@ void dls_clear(void) {
 #ifdef CONFIG_SERVICE_SECURITY_LOCK
 // ----------------------------------------------------------------------------------------
 void dls_shred(void) {
-  // Same shape as dls_clear(), destroying the contents rather than unlinking them. Sessions go
-  // first so nothing re-creates a file behind the shred; whatever was queued in them is gone,
-  // which is the point -- the queue holds exactly what the phone has not received, and a wipe
-  // that leaves it readable is not a wipe.
+  // The queue holds exactly what the phone has not received, and a wipe that leaves it readable
+  // is not a wipe. So the contents are destroyed rather than unlinked.
   //
-  // Runs on KernelMain while the system task may be part way through a session it has locked.
-  // dls_list_remove_all() spares such a session and leaves the free to whoever holds it, so
-  // this cannot pull memory out from under a flush in progress. What it does not do is wait:
-  // the holder may still append to its file after the shred below has zeroed it. That is
-  // content written after the wipe rather than a survivor of it, and waiting is not available
-  // -- the system task would be waiting on the filesystem locks this very call holds.
-  dls_list_remove_all();
+  // Deliberately NOT dls_clear(): that tears the session list down, and dls_log() reads
+  // item_size and data->buffer_storage off the session before it checks whether the session is
+  // still real. Five system modules -- activity, its algorithm, analytics, protobuf_log, the
+  // session logger -- cache the pointer dls_create() handed them, as does every app, so
+  // freeing sessions here would turn each of those into a use-after-free the moment anything
+  // logged again.
+  //
+  // Instead the sessions live and lose their contents. Bookkeeping first, so that a write
+  // landing in the gap creates a fresh file the enumeration below still catches; a session left
+  // claiming an offset into a destroyed file would append past the end of its replacement.
+  //
+  // Runs on KernelMain, so a storage operation on the system task can be in flight. What the
+  // shred cannot destroy is a file that task has open -- pfs_shred() refuses a busy file
+  // outright -- which is why dls_storage_shred_all() waits one out rather than logging past it.
+  dls_list_reset_all_storage();
   dls_storage_shred_all();
 }
 #endif
@@ -395,21 +401,17 @@ static DataLoggingSession *prv_dls_create(uint32_t tag, DataLoggingItemType item
     }
   }
 
-  // Held across the finish below: without a hold, this pointer is one a concurrent teardown can
-  // free before we reach it.
+  // Held across everything we do with it: without a hold, this pointer is one a concurrent
+  // teardown can free out from under us. Released at the single exit below rather than here,
+  // because the resume path goes on to use it.
   DataLoggingSession *logging_session = dls_list_find_and_ref_active_session(tag, uuid);
+  bool release_on_exit = (logging_session != NULL);
 
-  if (logging_session != NULL) {
-    if (!resume) {
-      dls_finish(logging_session);
-    }
-    // Dropped before the pointer is returned on the resume path, which is safe: a
-    // DataLoggingSessionRef is not held by a count, it is checked against the list by
-    // dls_list_is_session_valid() on every use.
+  if (!resume && logging_session != NULL) {
+    dls_finish(logging_session);
     dls_list_release_session(logging_session);
-    if (!resume) {
-      logging_session = NULL;
-    }
+    release_on_exit = false;
+    logging_session = NULL;
   }
 
   if (logging_session == NULL) {
@@ -450,6 +452,13 @@ static DataLoggingSession *prv_dls_create(uint32_t tag, DataLoggingItemType item
 
   // send an open message
   dls_endpoint_open_session(logging_session);
+
+  // The last use of the pointer, so the hold has done its job. What the caller gets back is an
+  // ordinary DataLoggingSessionRef: not held by a count, checked against the list by
+  // dls_list_is_session_valid() on every use.
+  if (release_on_exit) {
+    dls_list_release_session(logging_session);
+  }
 
   return (logging_session);
 }
