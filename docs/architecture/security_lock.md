@@ -194,6 +194,13 @@ nothing would be the worst reading of it.
 Neither app asks for confirmation. A panic button that asks is a worse panic
 button, and reaching either takes a deliberate binding or a chosen launcher row.
 
+Both sort to the end of every list they appear in, `Lock` directly above
+`Lockdown + Erase`, pinned in `app_menu_data_source.c` rather than left to the
+ordinary rules. Without the pin the Quick Launch picker would order the two by
+launcher visibility — the only thing that differs between them — which puts the
+destructive one above the recoverable one for as long as `Show in Launcher` is
+on, and swaps them when it is off.
+
 Source: `src/fw/apps/system/lockdown.c`, registered in
 `src/fw/shell/normal/system_app_registry_list.json`.
 

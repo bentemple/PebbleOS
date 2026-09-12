@@ -68,6 +68,35 @@ static int prv_app_override_comparator(AppInstallId app_id, AppInstallId new_id)
   return (prv_override_index(app_id) - prv_override_index(new_id));
 }
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+//! Pinned to the end of every list they appear in, in this order.
+//!
+//! Both lock the watch behind the PIN and the second erases on the spot, so
+//! neither belongs where a thumb lands on the way to something else.
+//!
+//! Order matters as much as position: the two differ only in launcher
+//! visibility, which is what the Quick Launch picker would otherwise sort them
+//! by -- putting the destructive one above the recoverable one for as long as
+//! Lock is listed in the launcher, and flipping them when it is not.
+static const AppInstallId s_bottom_table[] = {
+  APP_ID_LOCK,
+  APP_ID_LOCKDOWN_ERASE,
+};
+#endif
+
+//! 0 for everything else, which is what sorts first. Otherwise the rank within
+//! the table, lowest index first.
+static int prv_bottom_index(AppInstallId app_id) {
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+  for (uint32_t i = 0; i < ARRAY_LENGTH(s_bottom_table); i++) {
+    if (s_bottom_table[i] == app_id) {
+      return i + 1;
+    }
+  }
+#endif
+  return 0;
+}
+
 static int prv_comparator_ascending_zero_last(unsigned int a, unsigned int b) {
   return ((a != 0) && (b != 0)) ? (b - a) : // Sort in ascending order
              (a - b);                       // 0 should be sorted last so invert the sort
@@ -81,7 +110,14 @@ PBL_T_STATIC int prv_app_node_comparator(void *app_node_ref, void *new_node_ref)
   const bool is_new_quick_launch = (new_node->visibility == ProcessVisibilityQuickLaunch);
   const int override_cmp_rv =
       prv_app_override_comparator(app_node->install_id, new_node->install_id);
-  if (is_app_quick_launch != is_new_quick_launch) {
+  const int app_bottom = prv_bottom_index(app_node->install_id);
+  const int new_bottom = prv_bottom_index(new_node->install_id);
+
+  if (app_bottom != new_bottom) {
+    // Ahead of every other rule, including the Quick Launch grouping below:
+    // these go last wherever they are listed, and in their own order.
+    return (new_bottom - app_bottom);
+  } else if (is_app_quick_launch != is_new_quick_launch) {
     // Quick Launch only apps are first
     return (is_app_quick_launch ? 1 : 0) - (is_new_quick_launch ? 1 : 0);
   } else if (override_cmp_rv) {
