@@ -1720,6 +1720,46 @@ void test_settings_security__does_nothing_when_the_confirmation_cannot_be_shown(
   cl_assert(s_dialog_confirm != NULL);
 }
 
+//! Neither confirmation may promise the phone restores everything. The wipe
+//! destroys the outbound datalogging queue too, which by definition holds what
+//! the phone has not received -- so a dialog claiming a clean round trip is
+//! making a promise the wipe breaks on every run.
+void test_settings_security__the_lockdown_confirmations_admit_the_unsent_loss(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_LOCK);
+  cl_assert(strstr(s_dialog_text, "has not sent it yet is lost") != NULL);
+
+  s_module->appear(s_module);
+  prv_select(ROW_LOCKDOWN_ERASE);
+  cl_assert(strstr(s_dialog_text, "has not sent it yet is lost") != NULL);
+}
+
+//! And neither may say health survives once Erase Health Data is on. Both said
+//! so unconditionally before that switch existed.
+void test_settings_security__the_lockdown_confirmations_follow_the_health_switch(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_LOCK);
+  cl_assert(strstr(s_dialog_text, "Step and sleep history is kept") != NULL);
+
+  s_module->appear(s_module);
+  prv_select(ROW_ERASE_HEALTH);
+  s_dialog_confirm(NULL, &s_expandable_dialog);
+  s_module->appear(s_module);
+
+  prv_select(ROW_LOCK);
+  cl_assert(strstr(s_dialog_text, "Step and sleep history goes too") != NULL);
+  cl_assert(strstr(s_dialog_text, "history is kept") == NULL);
+
+  s_module->appear(s_module);
+  prv_select(ROW_LOCKDOWN_ERASE);
+  cl_assert(strstr(s_dialog_text, "Step and sleep history goes too") != NULL);
+  cl_assert(strstr(s_dialog_text, "history is kept") == NULL);
+}
+
 //! The row that must not erase. Reaching the erase-now funnel from here would
 //! destroy the content of a user who chose the recoverable action, and nothing
 //! on screen would have said so.

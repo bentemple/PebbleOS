@@ -4,6 +4,7 @@
 #include "pbl/services/data_logging/data_logging_service.h"
 #include "pbl/services/data_logging/dls_storage.h"
 #include "pbl/services/data_logging/dls_list.h"
+#include "pbl/util/list.h"
 
 #include <pbl/drivers/flash.h>
 #include "kernel/pbl_malloc.h"
@@ -528,6 +529,28 @@ void dls_storage_invalidate_all(void) {
   // deleting them.
   pfs_remove_files(prv_filename_filter_cb);
 }
+
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+// -----------------------------------------------------------------------------------------
+void dls_storage_shred_all(void) {
+  // pfs_shred() per file rather than pfs_remove_files(): a delete unlinks the file and leaves
+  // its payload sitting in deleted pages, readable until a garbage collect happens to reach
+  // them. This is called to destroy the contents, not to free the space.
+  //
+  // No task assert, like invalidate_all() above: the security wipe runs on KernelMain.
+  PFSFileListEntry *dir_list = pfs_create_file_list(prv_filename_filter_cb);
+  PFSFileListEntry *head = dir_list;
+  while (head) {
+    const status_t rv = pfs_shred(head->name);
+    if (rv != S_SUCCESS) {
+      PBL_LOG_ERR("Error %d shredding %s", (int)rv, head->name);
+    }
+    head = (PFSFileListEntry *)list_get_next(&head->list_node);
+  }
+  pfs_delete_file_list(dir_list);
+}
+#endif
+
 
 // -----------------------------------------------------------------------------------------
 void dls_storage_delete_logging_storage(DataLoggingSession *session) {

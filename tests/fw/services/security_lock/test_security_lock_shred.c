@@ -45,6 +45,7 @@ typedef struct {
   int files_shredded;
   int health_db_shreds;
   int activity_shreds;
+  int dls_shreds;
   int region_erases;
   int sweeps_started;
   int unfaithful_marks;
@@ -320,6 +321,10 @@ void activity_shred(void) {
   s_trace.activity_shreds++;
 }
 
+void dls_shred(void) {
+  s_trace.dls_shreds++;
+}
+
 // Helpers
 ////////////////////////////////////
 
@@ -416,6 +421,41 @@ void test_security_lock_shred__a_clean_wipe_leaves_health_data_alone(void) {
   cl_assert_equal_i(0, s_trace.files_shredded);
   cl_assert_equal_i(0, s_trace.health_db_shreds);
   cl_assert_equal_i(0, s_trace.activity_shreds);
+}
+
+// The outbound queue
+////////////////////////////////////
+
+//! Destroyed on every wipe, whatever the health switch says.
+//!
+//! It holds what the phone has not received, so this is the one thing the wipe
+//! destroys that nothing can restore -- and it goes anyway, because after a
+//! wipe there must be nothing left to recover. A queue of notification text and
+//! whatever apps logged through the SDK is exactly something to recover.
+void test_security_lock_shred__the_outbound_queue_always_goes(void) {
+  security_lock_shred(SecurityShredReasonManualPanic);
+  cl_assert_equal_i(1, s_trace.dls_shreds);
+}
+
+//! Including with health erasure off: the queue is not a health store, so a
+//! health setting is the wrong question to key it on.
+void test_security_lock_shred__the_queue_goes_even_with_health_kept(void) {
+  s_shred_health = false;
+
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(1, s_trace.dls_shreds);
+  cl_assert_equal_i(0, s_trace.activity_shreds);
+}
+
+//! But a wipe with nothing to destroy still spares it, like every other target.
+//! Repeated triggers on a watch that is already clean must not spend flash.
+void test_security_lock_shred__a_clean_wipe_leaves_the_queue_alone(void) {
+  s_dirty = false;
+
+  security_lock_shred(SecurityShredReasonManualPanic);
+
+  cl_assert_equal_i(0, s_trace.dls_shreds);
 }
 
 // A wipe with something to destroy

@@ -776,38 +776,84 @@ static void prv_push_confirmation(const char *name, const char *header, const ch
   app_expandable_dialog_push(e_dialog);
 }
 
+// Both confirmations come in two versions rather than assembling a sentence
+// from fragments: whether health data goes is the difference between them, and
+// a translator handed half a sentence cannot place it. Neither may promise the
+// phone puts everything back -- the wipe destroys the outbound queue too, which
+// is by definition what the phone has not received.
+
 static void prv_lock_push(SettingsSecurityData *data) {
-  /// Explanation shown before the watch locks and starts the erase countdown.
-  /// The delay itself is on the row, so this says what stops it rather than
-  /// repeating a number: the countdown is the part users have to know is
-  /// escapable.
-  const char *text = i18n_get(
-      "Locks the watch behind your PIN straight away, then erases its copy of "
-      "your notifications, calendar, reminders, contacts and weather when Erase "
-      "After runs out.\n\n"
-      "Entering your PIN before then cancels the erase. Rebooting does not.\n\n"
-      "Step and sleep history is never erased, and your phone puts the rest "
-      "back when you unlock and reconnect.\n\n"
-      "Nothing on the watch is encrypted. This protects the screen, not the "
-      "flash.",
-      data);
+  const char *text;
+  if (security_lock_get_shred_health()) {
+    /// Shown before Lock when Erase Health Data is on. Same as the version
+    /// below but for the health paragraph, which says what survives rather
+    /// than promising the phone restores it all.
+    text = i18n_get(
+        "Locks the watch behind your PIN straight away, then erases its copy "
+        "of your notifications, calendar, reminders, contacts and weather when "
+        "Erase After runs out.\n\n"
+        "Entering your PIN before then cancels the erase. Rebooting does "
+        "not.\n\n"
+        "Step and sleep history goes too, because Erase Health Data is on. "
+        "Your phone puts back what it already has. Today's counts, and "
+        "anything the watch has not sent it yet, are lost.\n\n"
+        "Nothing on the watch is encrypted. This protects the screen, not the "
+        "flash.",
+        data);
+  } else {
+    /// Explanation shown before the watch locks and starts the erase
+    /// countdown. The delay itself is on the row, so this says what stops it
+    /// rather than repeating a number: the countdown is the part users have to
+    /// know is escapable.
+    text = i18n_get(
+        "Locks the watch behind your PIN straight away, then erases its copy "
+        "of your notifications, calendar, reminders, contacts and weather when "
+        "Erase After runs out.\n\n"
+        "Entering your PIN before then cancels the erase. Rebooting does "
+        "not.\n\n"
+        "Step and sleep history is kept, and your phone puts the rest back "
+        "when you unlock and reconnect. Anything the watch has not sent it "
+        "yet is lost.\n\n"
+        "Nothing on the watch is encrypted. This protects the screen, not the "
+        "flash.",
+        data);
+  }
 
   prv_push_confirmation("Lock", i18n_get("Lock", data), text, prv_lock_confirm);
 }
 
 static void prv_lockdown_erase_push(SettingsSecurityData *data) {
-  /// Explanation shown before the watch locks and erases its copy of the
-  /// phone's content on the spot. Says what goes, what stays, and what this is
-  /// not.
-  const char *text = i18n_get(
-      "Locks the watch behind your PIN and erases its copy of your "
-      "notifications, calendar, reminders, contacts and weather immediately. "
-      "There is no countdown and your PIN will not bring it back.\n\n"
-      "Your phone puts them back when you unlock and reconnect.\n\n"
-      "Step and sleep history is not erased.\n\n"
-      "Nothing on the watch is encrypted. This protects the screen, not the "
-      "flash.",
-      data);
+  const char *text;
+  if (security_lock_get_shred_health()) {
+    /// Shown before Lockdown + Erase when Erase Health Data is on.
+    text = i18n_get(
+        "Locks the watch behind your PIN and erases its copy of your "
+        "notifications, calendar, reminders, contacts and weather "
+        "immediately. There is no countdown and your PIN will not bring it "
+        "back.\n\n"
+        "Your phone puts them back when you unlock and reconnect. Anything "
+        "the watch has not sent it yet is lost.\n\n"
+        "Step and sleep history goes too, because Erase Health Data is "
+        "on.\n\n"
+        "Nothing on the watch is encrypted. This protects the screen, not the "
+        "flash.",
+        data);
+  } else {
+    /// Explanation shown before the watch locks and erases its copy of the
+    /// phone's content on the spot. Says what goes, what stays, and what this
+    /// is not.
+    text = i18n_get(
+        "Locks the watch behind your PIN and erases its copy of your "
+        "notifications, calendar, reminders, contacts and weather "
+        "immediately. There is no countdown and your PIN will not bring it "
+        "back.\n\n"
+        "Your phone puts them back when you unlock and reconnect. Anything "
+        "the watch has not sent it yet is lost.\n\n"
+        "Step and sleep history is kept.\n\n"
+        "Nothing on the watch is encrypted. This protects the screen, not the "
+        "flash.",
+        data);
+  }
 
   prv_push_confirmation("Lockdown + Erase", i18n_get("Lockdown + Erase", data), text,
                         prv_lockdown_erase_confirm);

@@ -268,9 +268,26 @@ ordinary as a Bluetooth disconnect.
 Destroyed (`shred_targets.c`): notification store, pins, reminders, contacts,
 weather, iOS notification preferences, app glances.
 
-Not destroyed: installed apps and the app database, Bluetooth bonding, and the
-datalogging queue — `dls` files are the outbound watch-to-phone queue, so
-wiping them would destroy data the phone does *not* have.
+Also destroyed, outside that list: the coredump and debug-log flash regions,
+and **the datalogging queue** (`dls_shred()`). The queue is the outbound
+watch-to-phone buffer, so by definition it holds the one thing the phone does
+*not* have — and it goes anyway, on every wipe, whatever `Erase Health Data`
+says.
+
+That is a deliberate reversal. It was spared on the grounds that destroying it
+breaks the invariant above, but that inverts the priority: **after a wipe there
+must be nothing left to recover**, and a queue of notification text, health
+samples and whatever apps chose to log through the SDK is exactly something to
+recover. The coredump region was already erased on the same reasoning, and the
+phone does not have that either. It is not keyed on `Erase Health Data` because
+the queue is not a health store — any app can write to it.
+
+Both lockdown confirmations say so: *"Anything the watch has not sent it yet is
+lost."*
+
+Not destroyed: installed apps and the app database, and Bluetooth bonding. The
+phone cannot restore those, and what they hold is the wearer's own installed
+software rather than the phone's content, which is what the lock protects.
 
 ### Health data, on request
 
@@ -310,8 +327,8 @@ So the phone's push rebuilds part of the very file the wipe zeroed.
 - **Captured sessions still waiting on datalogging.** `activity_shred()` zeroes
   `state->activity_sessions[]`, and a session sits there until it ends — a
   sleep session until the wearer is *awake* — so a wipe overnight takes the
-  whole night. What already reached datalogging survives: `dls` files are not a
-  shred target, and the queue still drains on the next connection.
+  whole night. What already reached datalogging goes too, since the queue is
+  shredded on every wipe (above).
 
 **What makes the restore happen** is the existing unfaithful flag, not new
 protocol. Every non-clean, non-duress wipe calls
@@ -580,6 +597,10 @@ permanently locked out by a forgotten four-digit PIN.
 | `src/fw/apps/system/settings/security.c` | Settings > Security |
 | `src/fw/apps/system/lockdown.c` | The Lock and Lockdown + Erase apps |
 | `include/pbl/services/security_lock*.h` | Public interfaces |
+
+Three targets live outside those files, because destroying them takes more than
+zeroing a path: `dls_shred()` (data logging), `activity_shred()` and
+`health_db_shred()`.
 
 ## Testing
 

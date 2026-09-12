@@ -8,13 +8,22 @@
 
 //! Files whose entire contents are destroyed, and the BlobDB each one backs.
 //!
-//! App persist storage ("ps<uuid>"), the app database ("appdb"), the BT bonding
-//! store and the datalogging queue ("dls<session>") are deliberately absent:
-//! the phone cannot restore them, so wiping them would make the feature
-//! destructive enough that nobody would turn it on.
+//! App persist storage ("ps<uuid>"), the app database ("appdb") and the BT
+//! bonding store are deliberately absent: the phone cannot restore them, so
+//! wiping them would make the feature destructive enough that nobody would turn
+//! it on. What they hold is also the wearer's own installed software rather
+//! than the phone's content, which is what the lock exists to protect.
 //!
-//! Health/activity ("activity", "healthdb") is absent because it is opt-in --
-//! Settings > Security > Erase Health Data -- and because destroying it takes
+//! The datalogging queue ("dls<session>") used to be on that list, on the
+//! grounds that it holds by definition the one thing the phone does not have.
+//! That inverted the priority. After a wipe there must be nothing left to
+//! recover, and a queue of notification text, health samples and whatever apps
+//! chose to log through the SDK is exactly something to recover. It is
+//! destroyed by dls_shred() rather than from this list, since the sessions have
+//! to be torn down before their files are zeroed.
+//!
+//! Health/activity ("activity", "healthdb") is likewise absent because it is
+//! opt-in -- Settings > Security > Erase Health Data -- and because destroying it takes
 //! more than zeroing two files: the activity service has a day of counters in
 //! RAM that the next minute handler would write straight back. The wipe calls
 //! health_db_shred() and activity_shred() directly, and ORs in the health bit
@@ -25,10 +34,6 @@
 //! target depends on a setting, and a switch that silently changed which of the
 //! phone's writes get refused mid-lock would buy nothing: those records are
 //! re-pushed on the next reconnect either way.
-//!
-//! Datalogging is the sharpest case. It is the outbound watch-to-phone queue,
-//! so by definition it holds the one thing the phone does not have yet, and
-//! most of what it holds is the activity data this list already spares.
 static const SecurityShredTarget s_shred_targets[] = {
     // Notification bodies and senders mirrored from the phone.
     {"notifstr", BlobDBIdNotifs},

@@ -38,6 +38,17 @@ bool dls_initialized(void);
 //! The nuclear option! Clear out all data logging state in memory as well as on the flash storage.
 void dls_clear(void);
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+//! Destroy every queued record, contents and all.
+//!
+//! For the security lock's erase. The queue holds, by definition, what the
+//! phone has not received yet -- so unlike everything else the wipe destroys,
+//! this does not come back. It goes anyway: a wipe that leaves a readable
+//! queue of notifications, health samples and whatever apps chose to log is
+//! not a wipe. The same reasoning already erases the coredump region.
+void dls_shred(void);
+#endif
+
 //! Pause the data logging service
 void dls_pause(void);
 

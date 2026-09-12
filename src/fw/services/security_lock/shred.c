@@ -18,6 +18,7 @@
 #include "pbl/services/activity/activity.h"
 #include "pbl/services/blob_db/health_db.h"
 #include "pbl/services/blob_db/pin_db.h"
+#include "pbl/services/data_logging/data_logging_service.h"
 #include "pbl/services/blob_db/reminder_db.h"
 #include "pbl/services/filesystem/pfs.h"
 #include "pbl/services/notifications/notification_storage.h"
@@ -406,6 +407,23 @@ static uint32_t prv_shred(SecurityShredReason reason, bool dbs_running, bool fin
       wiped |= SECURITY_SHRED_DB_BIT(BlobDBIdHealth);
       task_watchdog_bit_set(pebble_task_get_current());
     }
+
+    // The outbound queue, unconditionally.
+    //
+    // This one was spared on the grounds that it holds, by definition, the only
+    // thing the phone does not have -- so destroying it breaks the invariant
+    // that everything the wipe destroys comes back. That reasoning inverts the
+    // priority: after a wipe there must be nothing left to recover, and a queue
+    // of notification text, health samples and whatever apps chose to log is
+    // exactly something to recover. The coredump and debug-log regions below
+    // are already erased on the same grounds, and the phone does not have those
+    // either.
+    //
+    // Not gated on Erase Health Data. That switch is about the stored history;
+    // the queue is not a health store -- any app can write to it through the
+    // SDK -- so keying it on a health setting would be the wrong question.
+    dls_shred();
+    task_watchdog_bit_set(pebble_task_get_current());
   }
 
   // A coredump is a snapshot of RAM and can contain notification text or

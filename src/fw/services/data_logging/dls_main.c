@@ -280,6 +280,20 @@ void dls_clear(void) {
   dls_storage_invalidate_all();
 }
 
+
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+// ----------------------------------------------------------------------------------------
+void dls_shred(void) {
+  // Same shape as dls_clear(), destroying the contents rather than unlinking them. Sessions go
+  // first so nothing re-creates a file behind the shred; whatever was queued in them is gone,
+  // which is the point -- the queue holds exactly what the phone has not received, and a wipe
+  // that leaves it readable is not a wipe.
+  dls_list_remove_all();
+  dls_storage_shred_all();
+}
+#endif
+
+
 // ----------------------------------------------------------------------------------------
 // Get the send_enable setting
 bool dls_get_send_enable(void) {

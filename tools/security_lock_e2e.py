@@ -87,9 +87,10 @@ SECURITY_ROWS_WITH_PIN = [
 SETTINGS_OVERSHOOT = 20
 
 #: Nothing the wipe does may take longer than this. The blocking work is seven
-#: small file zeroes plus about ten sector erases for the coredump and debug
-#: regions -- roughly two seconds. Anything approaching this ceiling is a
-#: deadlock, not slow flash, and every hang so far has been one.
+#: small file zeroes, the data logging queue (however many session files exist),
+#: plus about ten sector erases for the coredump and debug regions -- roughly
+#: two seconds. Anything approaching this ceiling is a deadlock, not slow flash,
+#: and every hang so far has been one.
 SHRED_BUDGET_S = 15.0
 
 #: A watch that has not drawn anything new in this long, and is not answering,

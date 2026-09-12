@@ -12,6 +12,14 @@
 //! Invalidate all data logging storage space.
 void dls_storage_invalidate_all(void);
 
+#ifdef CONFIG_SERVICE_SECURITY_LOCK
+//! Destroy the contents of all data logging storage, not merely unlink it.
+//!
+//! For the security lock's erase. Unlike the rest of this file it is safe off
+//! the system task, because the wipe runs on KernelMain.
+void dls_storage_shred_all(void);
+#endif
+
 //! Erase the storage for the given session
 //! @param[in] session pointer to session
 void dls_storage_delete_logging_storage(DataLoggingSession *session);
