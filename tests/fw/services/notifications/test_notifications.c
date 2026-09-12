@@ -110,7 +110,7 @@ void test_notifications__unlocking_resumes_storing(void) {
 
 //! Off keeps them. Nothing has been destroyed while the watch is merely shut,
 //! so there is nothing to write back, and the user gets what arrived while they
-//! were away. Never shown either way: the lock screen outranks the modal.
+//! were away.
 void test_notifications__locked_stores_when_the_setting_is_off(void) {
   TimelineItem *item = prv_create_notification();
 
@@ -119,6 +119,54 @@ void test_notifications__locked_stores_when_the_setting_is_off(void) {
   notifications_add_notification(item);
 
   cl_assert_equal_i(fake_notification_storage_get_store_count(), 1);
+  // The body really is on flash, not merely counted.
+  cl_assert(fake_notification_storage_get_last_notification() != NULL);
+
+  timeline_item_destroy(item);
+}
+
+//! Keeping a notification and showing it are separate decisions, and this
+//! module only makes the first one.
+//!
+//! It stores, and then announces the arrival exactly as it would on an unlocked
+//! watch -- the announcement is what drives the unread count, the vibe, and the
+//! pop-up, and only the last of those must be withheld. Whether anything is
+//! drawn is decided later, by the launcher's event dispatch, which drops
+//! pop-up events while the lock is shut.
+//!
+//! Written down because the tempting fix for "a notification appeared on a
+//! locked watch" is to stop announcing it here, and that fix silently throws
+//! the notification away as well: the store and the announcement share this one
+//! early return. Off would then mean the same thing as on.
+void test_notifications__a_locked_store_still_announces_the_arrival(void) {
+  TimelineItem *item = prv_create_notification();
+
+  fake_security_lock_set_locked(true);
+  fake_security_lock_set_block_notifications(false);
+  notifications_add_notification(item);
+
+  cl_assert_equal_i(fake_notification_storage_get_store_count(), 1);
+  cl_assert_equal_i(fake_event_get_count(), 1);
+
+  const PebbleEvent event = fake_event_get_last();
+  cl_assert_equal_i(event.type, PEBBLE_SYS_NOTIFICATION_EVENT);
+  cl_assert_equal_i(event.sys_notification.type, NotificationAdded);
+
+  timeline_item_destroy(item);
+}
+
+//! And with the setting on it neither stores nor announces. Announcing a
+//! notification that was discarded would leave the unread count claiming
+//! something the store cannot produce.
+void test_notifications__a_dropped_notification_announces_nothing(void) {
+  TimelineItem *item = prv_create_notification();
+
+  fake_security_lock_set_locked(true);
+  fake_security_lock_set_block_notifications(true);
+  notifications_add_notification(item);
+
+  cl_assert_equal_i(fake_notification_storage_get_store_count(), 0);
+  cl_assert_equal_i(fake_event_get_count(), 0);
 
   timeline_item_destroy(item);
 }
