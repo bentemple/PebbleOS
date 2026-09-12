@@ -114,7 +114,7 @@ With no PIN set the menu is one row. Once a PIN exists it is ten:
 | Lock After | Grace period from an unexpected disconnect to the lock. |
 | Erase After | Countdown from a lockdown to the erase. **Ships as `Never`.** |
 | Duress PIN | A second PIN that unlocks and wipes. |
-| Block Notifications | Whether a notification arriving while locked is discarded or kept. **Ships on.** |
+| Block Notifications | Whether a notification arriving while locked is discarded or kept. **Ships off.** |
 | Alarms When Locked | Whether an alarm still goes off while locked. **Ships on.** |
 | Lock | Lock now; erase at `Erase After`, which the PIN cancels. |
 | Lockdown + Erase | Lock now and erase now. No countdown. |

@@ -360,9 +360,11 @@ static bool s_music_show_album_art = false;
 //! A panic action nobody can find is not a panic action.
 static bool s_lock_app_in_launcher = true;
 
-//! On by default: a message arriving while the watch is shut is the case the
-//! lock exists for. Off keeps them, still unshown, for whoever unlocks.
-static bool s_block_notifications_when_locked = true;
+//! Off by default: a locked watch never shows a notification either way, so
+//! the only thing blocking adds is throwing the message away. Losing mail the
+//! phone has already handed over is not a default anyone asked for; on refuses
+//! it outright, for whoever wants nothing kept.
+static bool s_block_notifications_when_locked = false;
 #endif
 
 // ============================================================================================

@@ -289,8 +289,8 @@ bool shell_prefs_get_lock_app_in_launcher(void) {
   return s_lock_in_launcher;
 }
 
-//! Mirrors the production default: on.
-static bool s_block_notifications_when_locked = true;
+//! Mirrors the production default: off.
+static bool s_block_notifications_when_locked;
 
 bool shell_prefs_get_block_notifications_when_locked(void) {
   return s_block_notifications_when_locked;
@@ -643,6 +643,9 @@ void test_settings_security__initialize(void) {
   s_lock_in_launcher = true;
   // The shipped default too: a locked watch still wakes its owner.
   s_alarms_when_locked = true;
+  // And the shipped default here: nothing the phone has already handed over is
+  // thrown away, it is only held back until the watch is open again.
+  s_block_notifications_when_locked = false;
 }
 
 void test_settings_security__cleanup(void) {
@@ -2142,33 +2145,33 @@ void test_settings_security__delay_pickers_open_on_the_current_choice(void) {
 // Block Notifications
 ////////////////////////////////////
 
-//! On by default, and the subtitle says what "on" does to a message rather than
-//! just that it is on.
-void test_settings_security__block_notifications_defaults_to_on(void) {
+//! Off by default, and the subtitle says what "off" does to a message rather
+//! than just that it is off: kept, not shown.
+void test_settings_security__block_notifications_defaults_to_off(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
   prv_draw(ROW_BLOCK_NOTIFICATIONS);
 
-  cl_assert(shell_prefs_get_block_notifications_when_locked());
+  cl_assert(!shell_prefs_get_block_notifications_when_locked());
   cl_assert_equal_s("Block Notifications", s_drawn_title);
-  cl_assert_equal_s("On, discarded while locked", s_drawn_subtitle);
+  cl_assert_equal_s("Off, kept until unlocked", s_drawn_subtitle);
 }
 
-//! Selecting it toggles, and the subtitle states the consequence of off --
-//! kept, not shown, which is the distinction the row exists to make.
+//! Selecting it toggles, and the subtitle states the consequence of on --
+//! discarded, which is the distinction the row exists to make.
 void test_settings_security__block_notifications_toggles(void) {
   prv_install_pin("1234");
   prv_open_settings();
 
   prv_select(ROW_BLOCK_NOTIFICATIONS);
 
-  cl_assert(!shell_prefs_get_block_notifications_when_locked());
+  cl_assert(shell_prefs_get_block_notifications_when_locked());
   prv_draw(ROW_BLOCK_NOTIFICATIONS);
-  cl_assert_equal_s("Off, kept until unlocked", s_drawn_subtitle);
+  cl_assert_equal_s("On, discarded while locked", s_drawn_subtitle);
 
   prv_select(ROW_BLOCK_NOTIFICATIONS);
-  cl_assert(shell_prefs_get_block_notifications_when_locked());
+  cl_assert(!shell_prefs_get_block_notifications_when_locked());
 }
 
 //! And it is gone with the rest when the feature is off: there is no lock for a
