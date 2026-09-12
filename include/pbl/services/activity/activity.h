@@ -305,7 +305,12 @@ bool activity_is_initialized(void);
 //! For the security lock's erase, and only when the wearer has opted into
 //! erasing health data, which is a separate switch from the erase itself
 //! because the phone cannot put all of this back: it re-pushes the last six
-//! completed days, and neither today's counts nor anything older.
+//! completed days, and neither today's counts, nor anything older, nor
+//! anything the watch had not uploaded yet.
+//!
+//! Captured sessions still waiting on datalogging go with it. Anything already
+//! handed to datalogging survives -- that queue is not a shred target -- and
+//! still reaches the phone on the next connection.
 //!
 //! Tracking is not stopped and the service is not torn down -- it simply counts
 //! up again from zero.

@@ -2237,11 +2237,28 @@ void test_settings_security__the_erase_health_warning_says_what_comes_back(void)
   prv_select(ROW_ERASE_HEALTH);
 
   cl_assert(strstr(s_dialog_text, "step and sleep history") != NULL);
-  // What returns, and the two things that do not.
   cl_assert(strstr(s_dialog_text, "puts back the last six days") != NULL);
   cl_assert(strstr(s_dialog_text, "Today's counts") != NULL);
   // And it must not claim the loss is total.
   cl_assert(strstr(s_dialog_text, "cannot put it back") == NULL);
+}
+
+//! The six days are a ceiling, not a promise, and the warning has to say so.
+//! The phone can only resend what it has aggregated -- and an unexpected
+//! disconnect is the most common trigger in the feature, so by the time this
+//! runs the phone is usually behind. A warning that quoted six days and stopped
+//! there would read as a guarantee on exactly the run where it does not hold.
+void test_settings_security__the_erase_health_warning_says_unsynced_data_is_lost(void) {
+  prv_install_pin("1234");
+  prv_open_settings();
+
+  prv_select(ROW_ERASE_HEALTH);
+
+  cl_assert(strstr(s_dialog_text, "had not sent your phone yet") != NULL);
+  // Named concretely, because "unsynced data" means nothing to a wearer.
+  cl_assert(strstr(s_dialog_text, "night of sleep") != NULL);
+  // And it says why to expect it here rather than leaving it as a footnote.
+  cl_assert(strstr(s_dialog_text, "out of range") != NULL);
 }
 
 //! And taking the warning is what turns it on.
@@ -2257,7 +2274,7 @@ void test_settings_security__taking_the_erase_health_warning_turns_it_on(void) {
 
   s_module->appear(s_module);
   prv_draw(ROW_ERASE_HEALTH);
-  cl_assert_equal_s("On, keeps 6 days", s_drawn_subtitle);
+  cl_assert_equal_s("On, 6 days at most", s_drawn_subtitle);
 }
 
 //! Walking away from the warning changes nothing. The row is one press from

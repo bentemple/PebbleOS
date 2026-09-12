@@ -360,7 +360,9 @@ void test_security_lock_shred__cleanup(void) {}
 ////////////////////////////////////
 //
 // Opt-in, because it is the one target the phone cannot put back in full: it
-// restores the typicals and the last six completed days, and nothing else.
+// restores the typicals and at most the last six completed days -- less than
+// that whenever it is behind on what the watch has uploaded, which after an
+// unexpected disconnect it always is.
 
 //! Off, and the wipe leaves it alone.
 void test_security_lock_shred__health_data_survives_by_default(void) {

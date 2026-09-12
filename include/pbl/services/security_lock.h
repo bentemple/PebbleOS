@@ -350,8 +350,11 @@ status_t security_lock_set_alarms_when_locked(bool allowed);
 //!
 //! What does not come back is today's counts, which the phone deliberately
 //! never sends (it would freeze the watch's live counter at an incomplete
-//! value), and the history beyond the phone's six-day push window, which the
-//! watch keeps 30 days of.
+//! value); the history beyond the phone's six-day push window, which the watch
+//! keeps 30 days of; and anything the watch had not uploaded yet -- the phone
+//! can only resend what it has aggregated, and an unexpected disconnect is the
+//! most common trigger there is, so it is usually behind by however long it has
+//! been away.
 //!
 //! That gap is the whole reason this is a switch rather than part of the erase:
 //! it is opt-in, and the Settings row states the six days before turning it on.

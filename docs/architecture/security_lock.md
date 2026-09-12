@@ -84,8 +84,8 @@ the picker has nowhere to put one.
   pages beneath both. Against a determined chip-off adversary this is
   best-effort.
 - Installed apps and Bluetooth bonding always survive by design. Health data
-  survives unless the wearer opts in, and even then the phone restores most of
-  it — see "What the erase destroys" below.
+  survives unless the wearer opts in, and even then the phone restores at most
+  the last six days of it — see "What the erase destroys" below.
 
 ## One switch, and it ships off
 
@@ -118,7 +118,7 @@ With no PIN set the menu is one row. Once a PIN exists it is eleven:
 | Change PIN | Asks for the current PIN, then the length, then sets a new one. |
 | Lock After | Grace period from an unexpected disconnect to the lock. |
 | Erase After | Countdown from a lockdown to the erase. **Ships as `Never`.** |
-| Erase Health Data | Whether the erase also destroys step and sleep history. **Ships off,** and warns before turning on — the phone restores only the last six days. |
+| Erase Health Data | Whether the erase also destroys step and sleep history. **Ships off,** and warns before turning on — the phone restores at most the last six days. |
 | Duress PIN | A second PIN that unlocks and wipes. |
 | Block Notifications | Whether a notification arriving while locked is discarded or kept. **Ships off.** |
 | Alarms When Locked | Whether an alarm still goes off while locked. **Ships on.** |
@@ -295,14 +295,23 @@ The third row is the surprising one. `health_db_insert()` does not store
 which writes straight into the history arrays in the `activity` settings file.
 So the phone's push rebuilds part of the very file the wipe zeroed.
 
-**What is gone for good**, and what the warning is about:
+**What is gone for good**, and what the warning names:
 
 - **Today's counts.** The phone deliberately never sends today's data — the
   day-of-week keys would make the watch treat an incomplete count as final and
   stop accumulating. See the note at the top of `HealthStatsSync.kt`.
 - **History older than six days.** The phone pushes a rolling window of six
   completed days; the watch keeps `ACTIVITY_HISTORY_DAYS` = 30.
-- Minute-level detail and in-flight sessions, which were never uploaded.
+- **Anything the watch had not uploaded yet.** The phone can only resend what
+  it has aggregated, and this is not a corner case: an unexpected disconnect is
+  the most common trigger in the whole feature, so by the time the wipe runs
+  the phone is usually behind by however long it has been away. The six-day
+  restore is a ceiling, not a promise.
+- **Captured sessions still waiting on datalogging.** `activity_shred()` zeroes
+  `state->activity_sessions[]`, and a session sits there until it ends — a
+  sleep session until the wearer is *awake* — so a wipe overnight takes the
+  whole night. What already reached datalogging survives: `dls` files are not a
+  shred target, and the queue still drains on the next connection.
 
 **What makes the restore happen** is the existing unfaithful flag, not new
 protocol. Every non-clean, non-duress wipe calls

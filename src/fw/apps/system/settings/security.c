@@ -820,8 +820,14 @@ static void prv_lockdown_erase_push(SettingsSecurityData *data) {
 // is the only one whose consequence the phone cannot fully undo. It is a
 // partial exception rather than a total one: the phone is the system of record
 // for health, so reconnecting puts back the typicals and the last six
-// completed days -- but not today's counts, and not the weeks of history
-// beyond the window the phone re-pushes. That gap is what the warning is for.
+// completed days.
+//
+// Three things it cannot put back, and the warning names all three: today's
+// counts, which it deliberately never sends; history beyond its six-day push
+// window, against the 30 days the watch keeps; and anything the watch had not
+// uploaded yet. The last one is not a corner case -- an unexpected disconnect
+// is the most common trigger there is, so by the time this runs the phone is
+// usually behind by however long it has been away.
 //
 // Turning it off asks nothing. A confirmation on the way out of a destructive
 // setting is a confirmation for its own sake.
@@ -840,11 +846,16 @@ static void prv_shred_health_confirm(ClickRecognizerRef recognizer, void *e_dial
 static void prv_shred_health_push(SettingsSecurityData *data) {
   /// Shown before turning on erasing health data. Says exactly how much comes
   /// back and what does not, rather than overstating the loss: the phone holds
-  /// a copy of most of it, but not today and not the older weeks.
+  /// a copy of most of it, but not today, not the older weeks, and not
+  /// anything it has not been sent -- which is the likely case here, since a
+  /// phone going out of range is what usually sets the erase off.
   const char *text = i18n_get(
       "Your step and sleep history is erased along with everything else.\n\n"
       "Your phone puts back the last six days when you unlock and reconnect. "
-      "Today's counts and anything older than that are gone for good.\n\n"
+      "Today's counts and anything older are gone for good.\n\n"
+      "So is anything the watch had not sent your phone yet, including a "
+      "night of sleep still being recorded. Expect some of that: the erase is "
+      "usually set off by your phone going out of range.\n\n"
       "Everything else the erase destroys comes back in full.",
       data);
 
@@ -958,7 +969,7 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
       if (security_lock_get_shred_health()) {
         /// Subtitle when health data is erased too. Names the part the phone
         /// cannot hand back, which is the whole reason the row exists.
-        subtitle = i18n_get(i18n_noop("On, keeps 6 days"), data);
+        subtitle = i18n_get(i18n_noop("On, 6 days at most"), data);
       } else {
         /// Subtitle when it is kept. Everything else the erase destroys comes
         /// back from the phone; this is what stays behind instead.

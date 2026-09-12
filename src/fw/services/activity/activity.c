@@ -1462,6 +1462,13 @@ void activity_shred(void) {
   // alone would leave today's step count on a watch whose history had just been
   // destroyed -- and today is the most revealing part of it.
   //
+  // That includes captured sessions that have not reached datalogging yet, and
+  // losing them is the point rather than a cost worth avoiding: a session is
+  // held here until it ends, and a sleep session until the wearer is awake, so
+  // a wipe overnight takes the whole night. Whatever did reach datalogging
+  // survives -- the queue is deliberately not a shred target -- and still goes
+  // up on the next connection.
+  //
   // Only the stored data, not the service: tracking carries on from zero. This
   // runs inside the security lock's wipe, on KernelMain with the watchdog
   // masked, so it must not wait on another task -- which rules out
