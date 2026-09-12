@@ -87,6 +87,41 @@ static void prv_free_storage_buffer(DataLoggingSession *session) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Free a session and its active state. Must be called with the list mutex released -- it
+// deinits the session's own mutex -- and only once nobody holds the session.
+static void prv_free_session(DataLoggingSession *session) {
+  if (session->data) {
+    pbl_mutex_deinit(&session->data->mutex);
+    kernel_free(session->data);
+  }
+  kernel_free(session);
+}
+
+
+// ---------------------------------------------------------------------------------------
+// Unlink a session, and say whether the caller may free it. Caller owns the list mutex.
+//
+// A session with holders is not the unlinker's to free: they are sitting inside
+// dls_lock_session()/dls_unlock_session() holding data->mutex, and pulling the memory and the
+// mutex out from under them is a use-after-free at best. The last unlock does it instead, which
+// is the same deferral open_count already performs for the active state.
+//
+// Marked Inactive on the way out so a caller holding a stale pointer -- dls_list_find_*()
+// returns one with the list mutex released -- is refused by dls_lock_session() rather than
+// handed a session that is no longer on the list.
+static bool prv_unlinked_session_is_ours_to_free(DataLoggingSession *session) {
+  dls_assert_own_list_mutex();
+  session->next = NULL;
+  if (session->data && (session->data->open_count > 0)) {
+    session->free_when_unlocked = true;
+    session->status = DataLoggingStatusInactive;
+    return false;
+  }
+  return true;
+}
+
+
+// ---------------------------------------------------------------------------------------
 // Unlock a session previous locked by dls_lock_session(). If inactive is true, this also marks
 // the session inactive and frees the memory used for maintaining the active state. See the
 // comments above in dls_lock_session() for a description of the locking strategy.
@@ -98,7 +133,11 @@ void dls_unlock_session(DataLoggingSession *session, bool inactivate) {
     session->data->inactivate_pending = true;
   }
   session->data->open_count--;
-  if (session->data->inactivate_pending && session->data->open_count == 0) {
+  const bool last_holder = (session->data->open_count == 0);
+  // Read here rather than after the unlock below: the unlinker sets it under this same mutex.
+  const bool ours_to_free = last_holder && session->free_when_unlocked;
+
+  if (session->data->inactivate_pending && last_holder) {
     session->status = DataLoggingStatusInactive;
     pbl_mutex_unlock(&s_list_mutex);
 
@@ -111,6 +150,12 @@ void dls_unlock_session(DataLoggingSession *session, bool inactivate) {
   } else {
     pbl_mutex_unlock(&s_list_mutex);
     pbl_mutex_unlock(&session->data->mutex);
+  }
+
+  // Unlinked while we were holding it, so the free came to us. Anything left of data goes with
+  // it; the branch above may already have taken it.
+  if (ours_to_free) {
+    prv_free_session(session);
   }
 }
 
@@ -168,12 +213,11 @@ void dls_list_remove_session(DataLoggingSession *logging_session) {
   while (*iter != NULL) {
     if (*iter == logging_session) {
       *iter = (*iter)->next;
+      const bool ours_to_free = prv_unlinked_session_is_ours_to_free(logging_session);
       pbl_mutex_unlock(&s_list_mutex);
-      if (logging_session->data) {
-        pbl_mutex_deinit(&logging_session->data->mutex);
-        kernel_free(logging_session->data);
+      if (ours_to_free) {
+        prv_free_session(logging_session);
       }
-      kernel_free(logging_session);
       return;
     }
     iter = &((*iter)->next);
@@ -183,21 +227,30 @@ void dls_list_remove_session(DataLoggingSession *logging_session) {
 }
 
 void dls_list_remove_all(void) {
+  // Unlink everything under the mutex, sorting out what we may free as we go, then free outside
+  // it: prv_free_session() deinits a mutex, and a session someone is holding is not ours at all.
+  // Reachable from any task -- the security lock's wipe calls it from KernelMain while the
+  // system task may be part way through a flush -- which is the whole reason for the sorting.
   pbl_mutex_lock(&s_list_mutex, PBL_FOREVER);
   DataLoggingSession *cur = s_logging_sessions;
-  DataLoggingSession *next;
+  s_logging_sessions = NULL;
+
+  DataLoggingSession *to_free = NULL;
   while (cur != NULL) {
-    next = cur->next;
-    if (cur->data) {
-      pbl_mutex_deinit(&cur->data->mutex);
-      kernel_free(cur->data);
+    DataLoggingSession *next = cur->next;
+    if (prv_unlinked_session_is_ours_to_free(cur)) {
+      cur->next = to_free;
+      to_free = cur;
     }
-    kernel_free(cur);
     cur = next;
   }
-
-  s_logging_sessions = NULL;
   pbl_mutex_unlock(&s_list_mutex);
+
+  while (to_free != NULL) {
+    DataLoggingSession *next = to_free->next;
+    prv_free_session(to_free);
+    to_free = next;
+  }
 }
 
 //! Insert logging session with known id

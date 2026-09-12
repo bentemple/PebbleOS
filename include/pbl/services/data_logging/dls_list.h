@@ -13,9 +13,18 @@ DataLoggingSession *dls_list_find_by_session_id(uint8_t session_id);
 
 DataLoggingSession *dls_list_find_active_session(uint32_t tag, const Uuid *app_uuid);
 
+//! Unlink a session and free it.
+//!
+//! Safe against a holder: a session someone has dls_lock_session()'d is unlinked and marked
+//! inactive here, and freed by the last dls_unlock_session() instead. Freeing it on the spot
+//! would pull the memory, and the mutex, out from under whoever is inside it.
 void dls_list_remove_session(DataLoggingSession *logging_session);
 
 //! Deletes all session state in memory without changing the flash state.
+//!
+//! Callable from any task -- the security lock's wipe reaches it from KernelMain -- and safe
+//! against a holder in the same way dls_list_remove_session() is. It does not *wait* for one,
+//! though: a locked session outlives this call by however long its holder takes.
 void dls_list_remove_all(void);
 
 //! Add logging_session and assign ID

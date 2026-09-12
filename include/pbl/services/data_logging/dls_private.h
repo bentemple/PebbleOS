@@ -163,6 +163,12 @@ typedef struct DataLoggingSession {
 
   //! This pointer only allocated for active sessions
   DataLoggingActiveState *data;
+
+  //! Unlinked from the list while someone still held it, so the last
+  //! dls_unlock_session() owns the free rather than whoever unlinked it.
+  //!
+  //! Read and written only under the list mutex, like status and open_count.
+  bool free_when_unlocked;
 } DataLoggingSession;
 
 bool dls_private_send_session(DataLoggingSession *logging_session, bool empty);

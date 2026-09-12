@@ -288,6 +288,13 @@ void dls_shred(void) {
   // first so nothing re-creates a file behind the shred; whatever was queued in them is gone,
   // which is the point -- the queue holds exactly what the phone has not received, and a wipe
   // that leaves it readable is not a wipe.
+  //
+  // Runs on KernelMain while the system task may be part way through a session it has locked.
+  // dls_list_remove_all() spares such a session and leaves the free to whoever holds it, so
+  // this cannot pull memory out from under a flush in progress. What it does not do is wait:
+  // the holder may still append to its file after the shred below has zeroed it. That is
+  // content written after the wipe rather than a survivor of it, and waiting is not available
+  // -- the system task would be waiting on the filesystem locks this very call holds.
   dls_list_remove_all();
   dls_storage_shred_all();
 }

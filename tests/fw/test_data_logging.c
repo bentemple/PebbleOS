@@ -441,6 +441,67 @@ static void prv_do_recovery_test(int num_sessions) {
   cl_assert(logging_session == NULL);
 }
 
+// Tearing the list down while a session is held
+// ----------------------------------------------------------------------------------------
+//
+// dls_list_remove_all() is reachable from any task -- the security lock's wipe calls it from
+// KernelMain -- while the system task may be part way through a session it has locked. Freeing
+// a held session pulls the memory, and the mutex, out from under that holder.
+
+//! A locked session survives the teardown and is freed by the unlock instead.
+//!
+//! Asserting on the unlock rather than on the free: if remove_all() had taken the session with
+//! it, dls_unlock_session() would be reading freed memory and deinit-ing a mutex it does not
+//! own, which is the bug. Clar runs under the leak checker, so a session the unlock failed to
+//! free is caught too.
+void test_data_logging__removing_all_spares_a_locked_session(void) {
+  DataLoggingSessionRef logging_session = data_logging_create(1, DATA_LOGGING_UINT, 1, false);
+  cl_assert(logging_session);
+  prv_log_random_data(logging_session, 1, 100);
+
+  cl_assert(dls_lock_session(logging_session));
+
+  dls_list_remove_all();
+
+  // Off the list, so nothing can find it any more...
+  cl_assert(dls_list_get_next(NULL) == NULL);
+  // ...and refused to anyone still holding a pointer to it.
+  cl_assert_equal_i(DataLoggingStatusInactive, dls_get_session_status(logging_session));
+
+  // The holder owns the free now. Anything wrong with that hand-off shows up here.
+  dls_unlock_session(logging_session, false /* inactivate */);
+}
+
+//! And removing one by name defers in the same way, for the same reason: it is the path a
+//! session-full or a nacked send takes, and neither is ordered against a flush.
+void test_data_logging__removing_one_spares_a_locked_session(void) {
+  DataLoggingSessionRef kept = data_logging_create(1, DATA_LOGGING_UINT, 1, false);
+  DataLoggingSessionRef doomed = data_logging_create(2, DATA_LOGGING_UINT, 1, false);
+  cl_assert(kept && doomed);
+
+  cl_assert(dls_lock_session(doomed));
+
+  dls_list_remove_session(doomed);
+
+  // The other one is untouched.
+  cl_assert(dls_list_get_next(NULL) == kept);
+  cl_assert(dls_list_get_next(kept) == NULL);
+
+  dls_unlock_session(doomed, false /* inactivate */);
+}
+
+//! Nothing held, nothing deferred: the ordinary path still frees on the spot rather than
+//! waiting for an unlock that is never coming.
+void test_data_logging__removing_all_frees_unlocked_sessions_immediately(void) {
+  for (int i = 0; i < 3; ++i) {
+    cl_assert(data_logging_create(i, DATA_LOGGING_UINT, 1, false));
+  }
+
+  dls_list_remove_all();
+
+  cl_assert(dls_list_get_next(NULL) == NULL);
+}
+
 void test_data_logging__recover_one(void) {
   prv_do_recovery_test(1);
 }
