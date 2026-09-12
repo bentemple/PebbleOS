@@ -110,6 +110,11 @@ void modal_manager_pop_all_below_priority(ModalPriority priority) {
   s_quiesces++;
 }
 
+static int s_alarm_closes;
+void alarm_popup_close(void) {
+  s_alarm_closes++;
+}
+
 void watchface_reset_click_manager(void) {}
 void watchface_launch_default(const void *animation) {}
 
@@ -143,6 +148,7 @@ void test_security_lock_engage__initialize(void) {
   s_countdowns_armed = 0;
   s_lock_screen_visible = false;
   s_watchface_running = true;
+  s_alarm_closes = 0;
 
   // The UI lockout is reference counted in a static, and clar runs every test
   // in one process. Disengaging is how it is released, which makes this its own
@@ -154,6 +160,7 @@ void test_security_lock_engage__initialize(void) {
   s_state_changed_msgs = 0;
   s_lock_screen_pops = 0;
   s_countdowns_armed = 0;
+  s_alarm_closes = 0;
 }
 
 void test_security_lock_engage__cleanup(void) {}
@@ -189,18 +196,20 @@ void test_security_lock_engage__lock_only_arms_no_countdown(void) {
 }
 
 //! The wipe takes a ringing alarm down with everything else, including when
-//! the lock screen is up and the bound spares it.
+//! the lock screen is up and the priority bound spares it.
 //!
-//! The lock screen has a priority of its own, one above the alarm's, so
-//! "everything below the lock screen" is everything -- the alarm included.
-//! That is what stops an erased watch, which holds nothing and talks to
-//! nobody, from carrying on buzzing about it.
+//! The alarm sits *above* the lock screen -- an alarm nobody can snooze is
+//! worse than one that never rang -- so no priority range takes the alarm and
+//! leaves the pad. It is closed by name instead. That is what stops an erased
+//! watch, which holds nothing and talks to nobody, from carrying on buzzing
+//! about it.
 void test_security_lock_engage__quiescing_reaches_the_alarm_under_the_lock_screen(void) {
   s_lock_screen_visible = true;
 
   security_lock_engage_lock_only(SecurityShredReasonDisconnectTimeout);
 
   cl_assert_equal_i(1, s_quiesces);
+  cl_assert_equal_i(1, s_alarm_closes);
 }
 
 // The countdown path
