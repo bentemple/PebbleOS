@@ -1353,13 +1353,20 @@ void test_security_lock__an_unreadable_runtime_record_keeps_the_pin(void) {
 //! ...and the surviving PIN has to be reflected in the state, or the watch comes
 //! back configured but not watching: every trigger is gated on the state, so
 //! Disabled would be a silently disarmed lock.
-void test_security_lock__an_unreadable_runtime_record_stays_armed(void) {
+//!
+//! Locked rather than Armed. Losing the record is what a firmware install does,
+//! and a watch that has just been off the wrist and on a cable is one that
+//! should be asking for the PIN, not one whose owner is demonstrably holding it.
+void test_security_lock__an_unreadable_runtime_record_comes_back_locked(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
 
   prv_corrupt_runtime_version();
   prv_simulate_reboot();
 
-  cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
+  cl_assert_equal_i(SecurityLockStateLocked, security_lock_get_state());
+  cl_assert(security_lock_is_locked());
+  // The PIN that was set still opens it: locked, not bricked.
+  cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
 }
 
 //! With no PIN to fall back on there is nothing to be armed about.
@@ -1377,14 +1384,16 @@ void test_security_lock__an_unreadable_runtime_record_without_a_pin_is_disabled(
 //! the new one, so it is rejected on length before the version is even looked
 //! at. The config record is unchanged in both length and version, so the PIN is
 //! read back exactly as it was written.
-void test_security_lock__a_shorter_runtime_record_keeps_the_pin_and_arms(void) {
+void test_security_lock__a_shorter_runtime_record_keeps_the_pin_and_locks(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_delays(90, 900));
 
   prv_shorten_runtime_record();
   prv_simulate_reboot();
 
-  cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
+  // Locked: this is the firmware-install shape, and an install is exactly when
+  // the watch has been out of its owner's hands.
+  cl_assert_equal_i(SecurityLockStateLocked, security_lock_get_state());
   cl_assert_equal_i(4, security_lock_get_pin_len());
   cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
 
@@ -1395,11 +1404,11 @@ void test_security_lock__a_shorter_runtime_record_keeps_the_pin_and_arms(void) {
 }
 
 //! What a rejected runtime record costs, stated as behaviour rather than left
-//! implied by the tests above: the fallback is Armed, so a watch that was shut
-//! comes back open. That is the deliberate choice -- locking someone out of
-//! their own watch on an upgrade is the worse failure -- which is exactly why
-//! nothing may cause the record to be rejected in the first place.
-void test_security_lock__a_rejected_runtime_record_unlocks_a_locked_watch(void) {
+//! implied by the tests above: a watch that was shut comes back shut. Losing
+//! the record is what a firmware install does, and an install is exactly when
+//! the watch has been off the wrist, so the fallback asks for the PIN rather
+//! than assuming whoever is holding it already had it open.
+void test_security_lock__a_rejected_runtime_record_keeps_a_locked_watch_locked(void) {
   cl_assert_equal_i(S_SUCCESS, security_lock_set_pin(PIN, strlen(PIN)));
   cl_assert_equal_i(S_SUCCESS, security_lock_set_state(SecurityLockStateLocked));
   cl_assert(security_lock_is_locked());
@@ -1407,8 +1416,10 @@ void test_security_lock__a_rejected_runtime_record_unlocks_a_locked_watch(void) 
   prv_shorten_runtime_record();
   prv_simulate_reboot();
 
-  cl_assert(!security_lock_is_locked());
-  cl_assert_equal_i(SecurityLockStateArmed, security_lock_get_state());
+  cl_assert(security_lock_is_locked());
+  cl_assert_equal_i(SecurityLockStateLocked, security_lock_get_state());
+  // Locked, not bricked: the PIN survived in the config record.
+  cl_assert(security_lock_verify_pin(PIN, strlen(PIN), NULL));
 }
 
 //! So the record's version is frozen, and this is the tripwire.

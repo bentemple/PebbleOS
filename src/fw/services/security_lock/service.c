@@ -272,14 +272,15 @@ void security_lock_init(void) {
     // that still has one was never turned off. The two records losing step is
     // the only way to reach here.
     //
-    // Armed rather than Locked: a firmware upgrade is a deliberate act by
-    // someone who already had the watch open, and locking them out of it is the
-    // worse failure. Only reached on the fallback path, so the extra read costs
-    // an ordinary boot nothing.
+    // Locked rather than Armed. The record is lost on a firmware install, which
+    // is exactly when the watch has been off the wrist and in a cable, so the
+    // safe assumption is that it needs unlocking rather than that whoever is
+    // holding it already had it open. The PIN is intact either way, so this
+    // costs its owner one entry and costs anyone else the watch.
     SecurityLockConfig cfg;
     if ((prv_read_config(&cfg) == S_SUCCESS) && (cfg.pin_len != 0)) {
-      PBL_LOG_INFO("Runtime record gone but a PIN remains; coming back armed");
-      s_runtime_cache.state = SecurityLockStateArmed;
+      PBL_LOG_INFO("Runtime record gone but a PIN remains; coming back locked");
+      s_runtime_cache.state = SecurityLockStateLocked;
     }
     memset(&cfg, 0, sizeof(cfg));
   }
