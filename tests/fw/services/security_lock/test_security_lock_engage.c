@@ -94,6 +94,10 @@ void security_lock_screen_pop(void) {
   s_lock_screen_pops++;
 }
 
+//! Pulled in by security_lock_ui_quiesce(): an alarm already on screen is torn
+//! down with everything else when the watch locks.
+void alarm_popup_close(void) {}
+
 void launcher_block_popups_for_lock(bool block) {
   s_lockouts += block ? 1 : -1;
 }
