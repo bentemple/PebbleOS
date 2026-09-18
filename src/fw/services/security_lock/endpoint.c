@@ -14,7 +14,7 @@
 #include "pbl/services/regular_timer.h"
 #include "pbl/services/security_lock_ui.h"
 #include "pbl/services/system_task.h"
-#include "pbl/util/attributes.h"
+#include "pbl/kernel/compiler.h"
 #include "util/net.h"
 
 PBL_LOG_MODULE_DECLARE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_LEVEL);
@@ -32,7 +32,7 @@ PBL_LOG_MODULE_DECLARE(service_security_lock, CONFIG_SERVICE_SECURITY_LOCK_LOG_L
 //! differ in what they destroy and a length-sensitive parser is exactly how the
 //! retired CONFIGURE broke. Its low nibble matches SHRED_COMPLETE, which is the
 //! reply it ends in.
-typedef enum PACKED {
+typedef enum PBL_PACKED {
   SecurityLockCmdLock = 0x02,
   SecurityLockCmdStatusRequest = 0x03,
   SecurityLockCmdLockErase = 0x04,
@@ -43,25 +43,25 @@ typedef enum PACKED {
   SecurityLockCmdStateChanged = 0x05 | RESPONSE_MASK,
 } SecurityLockCmd;
 
-typedef struct PACKED {
+typedef struct PBL_PACKED {
   uint8_t cmd;
   uint8_t reason;
 } SecurityLockReasonMsg;
 
-typedef struct PACKED {
+typedef struct PBL_PACKED {
   uint8_t cmd;
   uint8_t state;
   uint8_t pin_configured;
   net32 deadline_remaining_s;
 } SecurityLockStatusMsg;
 
-typedef struct PACKED {
+typedef struct PBL_PACKED {
   uint8_t cmd;
   uint8_t reason;
   net32 wiped_dbs;
 } SecurityLockShredCompleteMsg;
 
-typedef struct PACKED {
+typedef struct PBL_PACKED {
   uint8_t cmd;
   uint8_t state;
 } SecurityLockStateMsg;

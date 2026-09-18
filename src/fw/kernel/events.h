@@ -511,7 +511,7 @@ typedef struct PBL_PACKED { // 1 byte
 //! Third-party app persist storage is deliberately not wiped by the shred
 //! itself -- the phone cannot restore it -- so this event is how an app opts
 //! in to clearing its own.
-typedef struct PACKED { // 1 byte
+typedef struct PBL_PACKED { // 1 byte
   //! SecurityShredReason. Never SecurityShredReasonDuressPin: a duress wipe
   //! publishes nothing, so a subscriber cannot tell one from an ordinary
   //! unlock and report it.
@@ -529,7 +529,7 @@ typedef struct PACKED { // 1 byte
 //! one of the PINs the watch accepts unlocks while quietly destroying the
 //! watch's content, and anything here that told the two unlocks apart would be
 //! a way to observe someone entering it under coercion.
-typedef struct PACKED { // 1 byte
+typedef struct PBL_PACKED { // 1 byte
   bool is_locked;
 } PebbleSecurityLockEvent;
 

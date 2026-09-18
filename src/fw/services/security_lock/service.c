@@ -56,7 +56,7 @@ static const char *ALARMS_KEY = "al";
 //! and for the same reason: see the layout note on SecurityLockRuntime.
 static const char *SHRED_HEALTH_KEY = "hd";
 
-typedef struct PACKED {
+typedef struct PBL_PACKED {
   uint16_t version;
   uint8_t pin_len;
   uint8_t salt[SECURITY_LOCK_SALT_LEN];
@@ -69,7 +69,7 @@ typedef struct PACKED {
   uint8_t duress_hash[SECURITY_LOCK_HASH_LEN];
 } SecurityLockConfig;
 
-typedef struct PACKED {
+typedef struct PBL_PACKED {
   uint16_t version;
   uint8_t state;
   uint8_t failed_attempts;

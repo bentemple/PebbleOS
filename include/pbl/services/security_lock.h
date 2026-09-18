@@ -8,7 +8,6 @@
 #include <time.h>
 
 #include "system/status_codes.h"
-#include "pbl/util/attributes.h"
 
 //! Persistent state for the security lockdown feature.
 //!
